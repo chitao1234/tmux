@@ -35,6 +35,13 @@ char		*win32_wide_to_utf8(const wchar_t *);
 int		 win32_init(void);
 void		 win32_fini(void);
 
+struct win32_handle_event *win32_handle_event_new(HANDLE, void (*)(void *),
+		     void (*)(void *), void *);
+void		 win32_handle_event_free(struct win32_handle_event *);
+struct evbuffer *win32_handle_event_input(struct win32_handle_event *);
+int		 win32_handle_event_write(struct win32_handle_event *,
+		     const void *, size_t);
+
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_server_spawn(const char *, uint64_t, char **);

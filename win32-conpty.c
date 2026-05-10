@@ -28,6 +28,7 @@ struct win32_pane {
 	HANDLE		 thread;
 	DWORD		 process_id;
 	struct bufferevent *event;
+	struct win32_handle_event *output_event;
 	int		 exited;
 	int		 status;
 };
@@ -197,6 +198,8 @@ win32_pane_close(struct window_pane *wp)
 		return;
 	if (pw->event != NULL)
 		bufferevent_free(pw->event);
+	if (pw->output_event != NULL)
+		win32_handle_event_free(pw->output_event);
 	if (pw->hpcon != NULL)
 		ClosePseudoConsole(pw->hpcon);
 	win32_close_handle(&pw->input_read);
@@ -234,19 +237,25 @@ win32_pane_buffered(__unused struct window_pane *wp)
 }
 
 int
-win32_pane_write(__unused struct window_pane *wp, __unused const void *data,
-    __unused size_t size)
+win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 {
-	errno = ENOSYS;
-	return (-1);
+	DWORD	written;
+
+	if (wp->win32 == NULL || wp->win32->input_write == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	if (!WriteFile(wp->win32->input_write, data, size, &written, NULL)) {
+		errno = EIO;
+		return (-1);
+	}
+	return ((int)written);
 }
 
 struct bufferevent *
-win32_pane_get_event(struct window_pane *wp)
+win32_pane_get_event(__unused struct window_pane *wp)
 {
-	if (wp->win32 == NULL)
-		return (NULL);
-	return (wp->win32->event);
+	return (NULL);
 }
 
 #endif /* TMUX_WIN32 */
