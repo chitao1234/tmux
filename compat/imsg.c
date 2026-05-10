@@ -52,7 +52,11 @@ imsgbuf_init(struct imsgbuf *imsgbuf, int fd)
 void
 imsgbuf_allow_fdpass(struct imsgbuf *imsgbuf)
 {
+#ifdef TMUX_WIN32
+	(void)imsgbuf;
+#else
 	imsgbuf->flags |= IMSG_ALLOW_FDPASS;
+#endif
 }
 
 int
@@ -254,6 +258,12 @@ imsg_compose(struct imsgbuf *imsgbuf, uint32_t type, uint32_t id, pid_t pid,
 	if (ibuf_add(wbuf, data, datalen) == -1)
 		goto fail;
 
+#ifdef TMUX_WIN32
+	if (fd != -1) {
+		errno = ENOSYS;
+		goto fail;
+	}
+#endif
 	ibuf_fd_set(wbuf, fd);
 	imsg_close(imsgbuf, wbuf);
 
@@ -282,6 +292,12 @@ imsg_composev(struct imsgbuf *imsgbuf, uint32_t type, uint32_t id, pid_t pid,
 		if (ibuf_add(wbuf, iov[i].iov_base, iov[i].iov_len) == -1)
 			goto fail;
 
+#ifdef TMUX_WIN32
+	if (fd != -1) {
+		errno = ENOSYS;
+		goto fail;
+	}
+#endif
 	ibuf_fd_set(wbuf, fd);
 	imsg_close(imsgbuf, wbuf);
 

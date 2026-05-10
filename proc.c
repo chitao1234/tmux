@@ -228,6 +228,9 @@ proc_exit(struct tmuxproc *tp)
 void
 proc_set_signals(struct tmuxproc *tp, void (*signalcb)(int))
 {
+#ifdef TMUX_WIN32
+	tp->signalcb = signalcb;
+#else
 	struct sigaction	sa;
 
 	tp->signalcb = signalcb;
@@ -259,11 +262,16 @@ proc_set_signals(struct tmuxproc *tp, void (*signalcb)(int))
 	signal_add(&tp->ev_sigusr2, NULL);
 	signal_set(&tp->ev_sigwinch, SIGWINCH, proc_signal_cb, tp);
 	signal_add(&tp->ev_sigwinch, NULL);
+#endif
 }
 
 void
 proc_clear_signals(struct tmuxproc *tp, int defaults)
 {
+#ifdef TMUX_WIN32
+	(void)tp;
+	(void)defaults;
+#else
 	struct sigaction	sa;
 
 	memset(&sa, 0, sizeof sa);
@@ -294,6 +302,7 @@ proc_clear_signals(struct tmuxproc *tp, int defaults)
 		sigaction(SIGUSR2, &sa, NULL);
 		sigaction(SIGWINCH, &sa, NULL);
 	}
+#endif
 }
 
 struct tmuxpeer *
@@ -358,6 +367,19 @@ proc_toggle_log(struct tmuxproc *tp)
 pid_t
 proc_fork_and_daemon(int *fd)
 {
+#ifdef TMUX_WIN32
+	char	*cause = NULL;
+
+	*fd = -1;
+	if (win32_server_spawn(socket_path, 0, &cause) != 0) {
+		if (cause != NULL) {
+			log_debug("%s: %s", __func__, cause);
+			free(cause);
+		}
+		return (-1);
+	}
+	return (1);
+#else
 	pid_t	pid;
 	int	pair[2];
 
@@ -377,6 +399,7 @@ proc_fork_and_daemon(int *fd)
 		*fd = pair[0];
 		return (pid);
 	}
+#endif
 }
 
 uid_t

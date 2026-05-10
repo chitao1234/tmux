@@ -296,9 +296,9 @@ win32_pane_exited(struct window_pane *wp, int *status)
 	if (!GetExitCodeProcess(wp->win32->process, &code))
 		code = 1;
 	wp->win32->exited = 1;
-	wp->win32->status = (int)code;
+	wp->win32->status = W_EXITCODE((int)code, 0);
 	if (status != NULL)
-		*status = (int)code;
+		*status = wp->win32->status;
 	return (1);
 }
 
@@ -351,7 +351,7 @@ win32_job_error_cb(void *arg)
 	DWORD		 code;
 
 	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
-		wj->status = (int)code;
+		wj->status = W_EXITCODE((int)code, 0);
 	if (wj->event != NULL && wj->event->errorcb != NULL)
 		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
 }
@@ -489,7 +489,7 @@ win32_job_get_status(struct win32_job *wj)
 	DWORD	code;
 
 	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
-		wj->status = (int)code;
+		wj->status = W_EXITCODE((int)code, 0);
 	return (wj->status);
 }
 

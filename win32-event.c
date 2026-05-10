@@ -18,6 +18,48 @@
 
 #ifdef TMUX_WIN32
 
+ssize_t
+readv(int fd, const struct iovec *iov, int iovcnt)
+{
+	char	*base;
+	size_t	 len;
+
+	if (iovcnt != 1) {
+		errno = EINVAL;
+		return (-1);
+	}
+	base = iov[0].iov_base;
+	len = iov[0].iov_len;
+	if (len > INT_MAX)
+		len = INT_MAX;
+	return (read(fd, base, len));
+}
+
+ssize_t
+writev(int fd, const struct iovec *iov, int iovcnt)
+{
+	const char	*base;
+	size_t		 len;
+	ssize_t		 total = 0, n;
+	int		 i;
+
+	for (i = 0; i < iovcnt; i++) {
+		base = iov[i].iov_base;
+		len = iov[i].iov_len;
+		while (len != 0) {
+			n = write(fd, base, len > INT_MAX ? INT_MAX : len);
+			if (n == -1)
+				return (total == 0 ? -1 : total);
+			if (n == 0)
+				return (total);
+			total += n;
+			base += n;
+			len -= n;
+		}
+	}
+	return (total);
+}
+
 struct win32_handle_event {
 	HANDLE		 handle;
 	HANDLE		 thread;

@@ -16,14 +16,21 @@
 
 #include <sys/types.h>
 
+#include <limits.h>
 #include <unistd.h>
 
 #include "compat.h"
 
-#ifdef HAVE_SYSCONF
+#ifndef OPEN_MAX
+#define OPEN_MAX 256
+#endif
+
 int
 getdtablesize(void)
 {
+#ifdef HAVE_SYSCONF
 	return (sysconf(_SC_OPEN_MAX));
-}
+#else
+	return (OPEN_MAX);
 #endif
+}

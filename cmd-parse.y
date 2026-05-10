@@ -30,6 +30,12 @@
 
 #include "tmux.h"
 
+#ifdef TMUX_WIN32
+#ifdef ERROR
+#undef ERROR
+#endif
+#endif
+
 static int			 yylex(void);
 static int			 yyparse(void);
 static void printflike(1,2)	 yyerror(const char *, ...);

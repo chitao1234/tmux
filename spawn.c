@@ -214,17 +214,22 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	struct window_pane	 *new_wp;
 	struct environ		 *child;
 	struct environ_entry	 *ee;
-	char			**argv, *cp, **argvp, *argv0, *cwd, *new_cwd;
+	char			**argv, *cp, *cwd, *new_cwd;
+#ifndef TMUX_WIN32
+	char			**argvp, *argv0;
+#endif
 	char			  path[PATH_MAX];
 	const char		 *cmd, *tmp, *home = find_home();
 	const char		 *actual_cwd = NULL;
 	int			  argc;
 	u_int			  idx;
-	struct termios		  now;
 	u_int			  hlimit;
 	struct winsize		  ws;
+#ifndef TMUX_WIN32
+	struct termios		  now;
 	sigset_t		  set, oldset;
 	key_code		  key;
+#endif
 
 	spawn_log(__func__, sc);
 
@@ -361,8 +366,10 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	ws.ws_ypixel = w->ypixel * ws.ws_row;
 
 	/* Block signals until fork has completed. */
+#ifndef TMUX_WIN32
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
+#endif
 
 	/* If the command is empty, don't fork a child process. */
 	if (sc->flags & SPAWN_EMPTY) {
@@ -392,7 +399,6 @@ spawn_pane(struct spawn_context *sc, char **cause)
 			layout_close_pane(new_wp);
 			window_remove_pane(w, new_wp);
 		}
-		sigprocmask(SIG_SETMASK, &oldset, NULL);
 		environ_free(child);
 		return (NULL);
 	}
@@ -510,7 +516,9 @@ complete:
 
 	new_wp->flags &= ~PANE_EXITED;
 
+#ifndef TMUX_WIN32
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
 	window_pane_set_event(new_wp);
 
 	environ_free(child);

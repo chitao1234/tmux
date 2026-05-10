@@ -182,17 +182,23 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
     int lockfd, char *lockfile)
 {
 	int		 fd;
+#ifndef TMUX_WIN32
 	sigset_t	 set, oldset;
+#endif
 	struct client	*c = NULL;
 	char		*cause = NULL;
 	struct timeval	 tv = { .tv_sec = 3600 };
 
+#ifndef TMUX_WIN32
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
+#endif
 
 	if (~flags & CLIENT_NOFORK) {
 		if (proc_fork_and_daemon(&fd) != 0) {
+#ifndef TMUX_WIN32
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
 			return (fd);
 		}
 	}
@@ -204,7 +210,9 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	server_proc = proc_start("server");
 
 	proc_set_signals(server_proc, server_signal);
+#ifndef TMUX_WIN32
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
 
 	if (log_get_level() > 1)
 		tty_create_log();
@@ -438,6 +446,12 @@ server_add_accept(int timeout)
 static void
 server_signal(int sig)
 {
+#ifdef TMUX_WIN32
+	if (sig == SIGINT || sig == SIGTERM) {
+		server_exit = 1;
+		server_send_exit();
+	}
+#else
 	int	fd;
 
 	log_debug("%s: %s", __func__, strsignal(sig));
@@ -464,8 +478,10 @@ server_signal(int sig)
 		proc_toggle_log(server_proc);
 		break;
 	}
+#endif
 }
 
+#ifndef TMUX_WIN32
 /* Handle SIGCHLD. */
 static void
 server_child_signal(void)
@@ -534,6 +550,7 @@ server_child_stopped(pid_t pid, int status)
 	}
 	job_check_died(pid, status);
 }
+#endif
 
 /* Add to message log. */
 void

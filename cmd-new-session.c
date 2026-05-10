@@ -74,7 +74,11 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 	struct session		*s, *as, *groupwith = NULL;
 	struct environ		*env;
 	struct options		*oo;
+#ifndef TMUX_WIN32
 	struct termios		 tio, *tiop;
+#else
+	struct termios		*tiop;
+#endif
 	struct session_group	*sg = NULL;
 	const char		*errstr, *template, *group, *tmp;
 	char			*cause, *cwd = NULL, *cp, *newname = NULL;
@@ -187,9 +191,13 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 			    "unset $TMUX to force");
 			goto fail;
 		}
+#ifndef TMUX_WIN32
 		if (tcgetattr(c->fd, &tio) != 0)
 			fatal("tcgetattr failed");
 		tiop = &tio;
+#else
+		tiop = NULL;
+#endif
 	} else
 		tiop = NULL;
 

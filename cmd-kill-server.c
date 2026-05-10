@@ -54,8 +54,17 @@ const struct cmd_entry cmd_start_server_entry = {
 static enum cmd_retval
 cmd_kill_server_exec(struct cmd *self, __unused struct cmdq_item *item)
 {
+#ifdef TMUX_WIN32
+	struct client	*c = item != NULL ? cmdq_get_client(item) : NULL;
+
+	if (cmd_get_entry(self) == &cmd_kill_server_entry && c != NULL) {
+		c->exit_message = xstrdup("kill-server is unsupported on Win32 MVP");
+		c->flags |= CLIENT_EXIT;
+	}
+#else
 	if (cmd_get_entry(self) == &cmd_kill_server_entry)
 		kill(getpid(), SIGTERM);
+#endif
 
 	return (CMD_RETURN_NORMAL);
 }

@@ -757,6 +757,12 @@ ibuf_write(int fd, struct msgbuf *msgbuf)
 int
 msgbuf_write(int fd, struct msgbuf *msgbuf)
 {
+#ifdef TMUX_WIN32
+	(void)fd;
+	(void)msgbuf;
+	errno = ENOSYS;
+	return (-1);
+#else
 	struct iovec	 iov[IOV_MAX];
 	struct ibuf	*buf, *buf0 = NULL;
 	unsigned int	 i = 0;
@@ -821,6 +827,7 @@ msgbuf_write(int fd, struct msgbuf *msgbuf)
 	msgbuf_drain(msgbuf, n);
 
 	return (0);
+#endif
 }
 
 static int
@@ -908,6 +915,12 @@ ibuf_read(int fd, struct msgbuf *msgbuf)
 int
 msgbuf_read(int fd, struct msgbuf *msgbuf)
 {
+#ifdef TMUX_WIN32
+	(void)fd;
+	(void)msgbuf;
+	errno = ENOSYS;
+	return (-1);
+#else
 	struct msghdr		 msg;
 	struct cmsghdr		*cmsg;
 	union {
@@ -980,6 +993,7 @@ again:
 
 	/* new data arrived, try to process it */
 	return (ibuf_read_process(msgbuf, fdpass));
+#endif
 }
 
 static void

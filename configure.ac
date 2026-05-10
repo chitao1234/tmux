@@ -171,9 +171,16 @@ AC_CHECK_FUNCS([ \
 ])
 
 # Check for functions with a compatibility implementation.
+case "$host_os" in
+	*mingw*)
+		AC_DEFINE(HAVE_CFMAKERAW)
+		;;
+	*)
+		AC_REPLACE_FUNCS([cfmakeraw])
+		;;
+esac
 AC_REPLACE_FUNCS([ \
 	asprintf \
-	cfmakeraw \
 	clock_gettime \
 	closefrom \
 	explicit_bzero \
@@ -688,7 +695,14 @@ AC_CHECK_DECL(
 if test "x$found_daemon" = xyes; then
 	AC_DEFINE(HAVE_DAEMON)
 else
-	AC_LIBOBJ(daemon)
+	case "$host_os" in
+		*mingw*)
+			AC_DEFINE(HAVE_DAEMON)
+			;;
+		*)
+			AC_LIBOBJ(daemon)
+			;;
+	esac
 fi
 
 # Look for stravis, compat/{vis,unvis}.c used if missing.
@@ -722,16 +736,25 @@ else
 fi
 
 # Look for fdforkpty and forkpty in libutil.
-AC_SEARCH_LIBS(fdforkpty, util, found_fdforkpty=yes, found_fdforkpty=no)
-if test "x$found_fdforkpty" = xyes; then
-	AC_DEFINE(HAVE_FDFORKPTY)
-else
-	AC_LIBOBJ(fdforkpty)
-fi
-AC_SEARCH_LIBS(forkpty, util, found_forkpty=yes, found_forkpty=no)
-if test "x$found_forkpty" = xyes; then
-	AC_DEFINE(HAVE_FORKPTY)
-fi
+case "$host_os" in
+	*mingw*)
+		AC_DEFINE(HAVE_FDFORKPTY)
+		AC_DEFINE(HAVE_FORKPTY)
+		found_forkpty=yes
+		;;
+	*)
+	AC_SEARCH_LIBS(fdforkpty, util, found_fdforkpty=yes, found_fdforkpty=no)
+	if test "x$found_fdforkpty" = xyes; then
+		AC_DEFINE(HAVE_FDFORKPTY)
+	else
+		AC_LIBOBJ(fdforkpty)
+	fi
+	AC_SEARCH_LIBS(forkpty, util, found_forkpty=yes, found_forkpty=no)
+	if test "x$found_forkpty" = xyes; then
+		AC_DEFINE(HAVE_FORKPTY)
+	fi
+		;;
+esac
 AM_CONDITIONAL(NEED_FORKPTY, test "x$found_forkpty" = xno)
 
 # Look for kinfo_getfile in libutil.
@@ -988,8 +1011,8 @@ case "$host_os" in
 		AC_MSG_RESULT(win32)
 		PLATFORM=win32
 		AC_DEFINE(TMUX_WIN32)
-		AM_CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 $AM_CPPFLAGS"
-		CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 $CPPFLAGS"
+		AM_CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DNCURSES_STATIC $AM_CPPFLAGS"
+		CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DNCURSES_STATIC $CPPFLAGS"
 		;;
 	*cygwin*|*msys*)
 		AC_MSG_RESULT(cygwin)

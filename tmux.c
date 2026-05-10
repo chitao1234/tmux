@@ -158,6 +158,10 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 		}
 		if (no_realpath)
 			path = expanded;
+#ifdef TMUX_WIN32
+		else
+			path = expanded;
+#else
 		else {
 			if (realpath(expanded, resolved) == NULL) {
 				log_debug("%s: realpath(\"%s\") failed: %s", __func__,
@@ -168,6 +172,7 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 			path = xstrdup(resolved);
 			free(expanded);
 		}
+#endif
 		for (i = 0; i < *n; i++) {
 			if (strcmp(path, (*paths)[i]) == 0)
 				break;
@@ -208,11 +213,20 @@ make_label(const char *label, char **cause)
 
 	xasprintf(&base, "%s/tmux-%ld", path, (long)uid);
 	free(path);
-	if (mkdir(base, S_IRWXU) != 0 && errno != EEXIST) {
+	if (mkdir(base
+#ifndef TMUX_WIN32
+	    , S_IRWXU
+#endif
+	    ) != 0 && errno != EEXIST) {
 		xasprintf(cause, "couldn't create directory %s (%s)", base,
 		    strerror(errno));
 		goto fail;
 	}
+#ifdef TMUX_WIN32
+	xasprintf(&path, "%s/%s", base, label);
+	free(base);
+	return (path);
+#else
 	if (lstat(base, &sb) != 0) {
 		xasprintf(cause, "couldn't read directory %s (%s)", base,
 		    strerror(errno));
@@ -229,6 +243,7 @@ make_label(const char *label, char **cause)
 	xasprintf(&path, "%s/%s", base, label);
 	free(base);
 	return (path);
+#endif
 
 fail:
 	free(base);
@@ -256,6 +271,10 @@ shell_argv0(const char *shell, int is_login)
 void
 setblocking(int fd, int state)
 {
+#ifdef TMUX_WIN32
+	(void)fd;
+	(void)state;
+#else
 	int mode;
 
 	if ((mode = fcntl(fd, F_GETFL)) != -1) {
@@ -265,6 +284,7 @@ setblocking(int fd, int state)
 			mode &= ~O_NONBLOCK;
 		fcntl(fd, F_SETFL, mode);
 	}
+#endif
 }
 
 uint64_t
@@ -323,6 +343,9 @@ find_cwd(void)
 	if ((pwd = getenv("PWD")) == NULL || *pwd == '\0')
 		return (cwd);
 
+#ifdef TMUX_WIN32
+	return (cwd);
+#else
 	/*
 	 * We want to use PWD so that symbolic links are maintained,
 	 * but only if it matches the actual working directory.
@@ -334,6 +357,7 @@ find_cwd(void)
 	if (strcmp(resolved1, resolved2) != 0)
 		return (cwd);
 	return (pwd);
+#endif
 }
 
 const char *
@@ -385,6 +409,10 @@ main(int argc, char **argv)
 
 	setlocale(LC_TIME, "");
 	tzset();
+
+#ifdef TMUX_WIN32
+	win32_refresh_environ();
+#endif
 
 	if (**argv == '-')
 		flags = CLIENT_LOGIN;
@@ -467,8 +495,10 @@ main(int argc, char **argv)
 	if ((flags & CLIENT_NOFORK) && argc != 0)
 		usage(1);
 
+#ifndef TMUX_WIN32
 	if ((ptm_fd = getptmfd()) == -1)
 		err(1, "getptmfd");
+#endif
 	if (pledge("stdio rpath wpath cpath flock fattr unix getpw sendfd "
 	    "recvfd proc exec tty ps", NULL) != 0)
 		err(1, "pledge");

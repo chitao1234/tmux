@@ -9,14 +9,30 @@
  */
 
 #include <sys/types.h>
+#include <sys/utsname.h>
 
 #include <errno.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <wchar.h>
 
 #include "tmux.h"
 
 #ifdef TMUX_WIN32
+
+static struct passwd win32_passwd;
+static char    *win32_passwd_name;
+static char    *win32_passwd_dir;
+static char    *win32_passwd_shell;
+char	      **environ;
+
+void
+win32_refresh_environ(void)
+{
+	environ = _environ;
+}
 
 const char *
 win32_strerror(DWORD error)
@@ -110,6 +126,165 @@ win32_getenv_utf8(const char *name)
 	free(value);
 	free(wname);
 	return (out);
+}
+
+static void
+win32_passwd_set(const char *name)
+{
+	const char	*home, *shell;
+
+	home = getenv("HOME");
+	if (home == NULL || *home == '\0')
+		home = getenv("USERPROFILE");
+	if (home == NULL || *home == '\0')
+		home = "C:\\";
+
+	shell = getenv("SHELL");
+	if (shell == NULL || *shell == '\0')
+		shell = _PATH_BSHELL;
+
+	free(win32_passwd_name);
+	free(win32_passwd_dir);
+	free(win32_passwd_shell);
+	win32_passwd_name = xstrdup(name);
+	win32_passwd_dir = xstrdup(home);
+	win32_passwd_shell = xstrdup(shell);
+
+	win32_passwd.pw_name = win32_passwd_name;
+	win32_passwd.pw_uid = 0;
+	win32_passwd.pw_gid = 0;
+	win32_passwd.pw_dir = win32_passwd_dir;
+	win32_passwd.pw_shell = win32_passwd_shell;
+}
+
+struct passwd *
+getpwuid(__unused uid_t uid)
+{
+	const char	*name;
+
+	name = getenv("USER");
+	if (name == NULL || *name == '\0')
+		name = getenv("USERNAME");
+	if (name == NULL || *name == '\0')
+		name = "win32";
+	win32_passwd_set(name);
+	return (&win32_passwd);
+}
+
+struct passwd *
+getpwnam(const char *name)
+{
+	if (name == NULL || *name == '\0')
+		return (NULL);
+	win32_passwd_set(name);
+	return (&win32_passwd);
+}
+
+uid_t
+getuid(void)
+{
+	return (0);
+}
+
+uid_t
+geteuid(void)
+{
+	return (getuid());
+}
+
+gid_t
+getegid(void)
+{
+	return (0);
+}
+
+int
+getpagesize(void)
+{
+	SYSTEM_INFO si;
+
+	GetSystemInfo(&si);
+	return ((int)si.dwPageSize);
+}
+
+char *
+ctime_r(const time_t *timep, char *buf)
+{
+	char	*s;
+
+	if (buf == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	s = ctime(timep);
+	if (s == NULL)
+		return (NULL);
+	strlcpy(buf, s, 26);
+	return (buf);
+}
+
+struct tm *
+gmtime_r(const time_t *timep, struct tm *result)
+{
+	struct tm	*tmp;
+
+	if (result == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	tmp = gmtime(timep);
+	if (tmp == NULL)
+		return (NULL);
+	memcpy(result, tmp, sizeof *result);
+	return (result);
+}
+
+struct tm *
+localtime_r(const time_t *timep, struct tm *result)
+{
+	struct tm	*tmp;
+
+	if (result == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	tmp = localtime(timep);
+	if (tmp == NULL)
+		return (NULL);
+	memcpy(result, tmp, sizeof *result);
+	return (result);
+}
+
+char *
+ttyname(__unused int fd)
+{
+	return (NULL);
+}
+
+int
+wcwidth(wchar_t wc)
+{
+	if (wc == 0)
+		return (0);
+	if ((wc < 0x20) || (wc >= 0x7f && wc < 0xa0))
+		return (-1);
+	return (1);
+}
+
+int
+uname(struct utsname *u)
+{
+	if (u == NULL) {
+		errno = EFAULT;
+		return (-1);
+	}
+	memset(u, 0, sizeof *u);
+	strlcpy(u->sysname, "Windows", sizeof u->sysname);
+	strlcpy(u->nodename, "localhost", sizeof u->nodename);
+	strlcpy(u->release, "10", sizeof u->release);
+	strlcpy(u->version, "ConPTY", sizeof u->version);
+	strlcpy(u->machine, "x86_64", sizeof u->machine);
+	return (0);
 }
 
 int

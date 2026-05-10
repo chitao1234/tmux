@@ -27,13 +27,18 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
+#include <wchar.h>
 
 #ifdef environ
 #undef environ
 #endif
 
+#ifndef TMUX_WIN32_UID_T_DEFINED
+#define TMUX_WIN32_UID_T_DEFINED
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
+#endif
 
 struct iovec {
 	void	*iov_base;
@@ -48,6 +53,15 @@ struct termios {
 	unsigned char c_cc[32];
 };
 
+typedef unsigned char cc_t;
+
+#ifndef VERASE
+#define VERASE 2
+#endif
+#ifndef _POSIX_VDISABLE
+#define _POSIX_VDISABLE 0xff
+#endif
+
 struct winsize {
 	unsigned short ws_row;
 	unsigned short ws_col;
@@ -57,6 +71,10 @@ struct winsize {
 
 #ifndef IOV_MAX
 #define IOV_MAX 1024
+#endif
+
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
 #endif
 
 #ifndef FNM_NOMATCH
@@ -76,6 +94,18 @@ struct winsize {
 #endif
 
 int fnmatch(const char *, const char *, int);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getegid(void);
+int getpagesize(void);
+char *ctime_r(const time_t *, char *);
+struct tm *gmtime_r(const time_t *, struct tm *);
+struct tm *localtime_r(const time_t *, struct tm *);
+ssize_t readv(int, const struct iovec *, int);
+char *ttyname(int);
+int wcwidth(wchar_t);
+ssize_t writev(int, const struct iovec *, int);
+void win32_refresh_environ(void);
 
 typedef long regoff_t;
 typedef struct {
@@ -119,6 +149,38 @@ typedef struct {
 
 #ifndef PATH_MAX
 #define PATH_MAX MAX_PATH
+#endif
+
+#ifndef WAIT_ANY
+#define WAIT_ANY (-1)
+#endif
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+#ifndef WUNTRACED
+#define WUNTRACED 2
+#endif
+
+#ifndef W_EXITCODE
+#define W_EXITCODE(ret, sig) (((ret) << 8) | (sig))
+#endif
+#ifndef WIFEXITED
+#define WIFEXITED(status) (((status) & 0x7f) == 0)
+#endif
+#ifndef WEXITSTATUS
+#define WEXITSTATUS(status) (((status) >> 8) & 0xff)
+#endif
+#ifndef WIFSIGNALED
+#define WIFSIGNALED(status) (((status) & 0x7f) != 0)
+#endif
+#ifndef WTERMSIG
+#define WTERMSIG(status) ((status) & 0x7f)
+#endif
+#ifndef WIFSTOPPED
+#define WIFSTOPPED(status) (0)
+#endif
+#ifndef WSTOPSIG
+#define WSTOPSIG(status) (0)
 #endif
 
 #ifndef _PATH_BSHELL

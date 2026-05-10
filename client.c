@@ -251,9 +251,13 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	struct msg_command	*data;
 	int			 fd, i;
 	const char		*ttynam, *termname, *cwd;
+#ifndef TMUX_WIN32
 	pid_t			 ppid;
 	enum msgtype		 msg;
 	struct termios		 tio, saved_tio;
+#else
+	enum msgtype		 msg;
+#endif
 	size_t			 size, linesize = 0;
 	ssize_t			 linelen;
 	char			*line = NULL, **caps = NULL, *cause;
@@ -448,9 +452,11 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (client_exitreason != CLIENT_EXIT_NONE)
 			printf("[%s]\n", client_exit_message());
 
+#ifndef TMUX_WIN32
 		ppid = getppid();
 		if (client_exittype == MSG_DETACHKILL && ppid > 1)
 			kill(ppid, SIGHUP);
+#endif
 	} else if (client_flags & CLIENT_CONTROL) {
 		if (client_exitreason != CLIENT_EXIT_NONE)
 			printf("%%exit %s\n", client_exit_message());
@@ -566,6 +572,9 @@ client_exec(const char *shell, const char *shellcmd)
 static void
 client_signal(int sig)
 {
+#ifdef TMUX_WIN32
+	(void)sig;
+#else
 	struct sigaction sigact;
 	int		 status;
 	pid_t		 pid;
@@ -614,6 +623,7 @@ client_signal(int sig)
 			break;
 		}
 	}
+#endif
 }
 
 /* Callback for file write error or close. */
@@ -773,7 +783,9 @@ client_dispatch_wait(struct imsg *imsg)
 static void
 client_dispatch_attached(struct imsg *imsg)
 {
+#ifndef TMUX_WIN32
 	struct sigaction	 sigact;
+#endif
 	char			*data;
 	ssize_t			 datalen;
 
@@ -836,6 +848,12 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen != 0)
 			fatalx("bad MSG_SUSPEND size");
 
+#ifdef TMUX_WIN32
+		client_exitreason = CLIENT_EXIT_MESSAGE_PROVIDED;
+		client_exitmessage = xstrdup(
+		    "suspend-client is not supported in the native Windows MVP");
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+#else
 		memset(&sigact, 0, sizeof sigact);
 		sigemptyset(&sigact.sa_mask);
 		sigact.sa_flags = SA_RESTART;
@@ -844,13 +862,21 @@ client_dispatch_attached(struct imsg *imsg)
 			fatal("sigaction failed");
 		client_suspended = 1;
 		kill(getpid(), SIGTSTP);
+#endif
 		break;
 	case MSG_LOCK:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			fatalx("bad MSG_LOCK string");
 
+#ifdef TMUX_WIN32
+		client_exitreason = CLIENT_EXIT_MESSAGE_PROVIDED;
+		client_exitmessage = xstrdup(
+		    "lock-client is not supported in the native Windows MVP");
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+#else
 		system(data);
 		proc_send(client_peer, MSG_UNLOCK, -1, NULL, 0);
+#endif
 		break;
 	}
 }

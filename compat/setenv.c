@@ -21,19 +21,37 @@
 #include <string.h>
 
 #include "compat.h"
+#include "xmalloc.h"
 
 int
 setenv(const char *name, const char *value, __unused int overwrite)
 {
 	char	*newval;
+	int	 ret;
 
 	xasprintf(&newval, "%s=%s", name, value);
-	return (putenv(newval));
+#ifdef TMUX_WIN32
+	ret = _putenv(newval);
+	win32_refresh_environ();
+#else
+	ret = putenv(newval);
+#endif
+	return (ret);
 }
 
 int
 unsetenv(const char *name)
 {
+#ifdef TMUX_WIN32
+	char	*newval;
+	int	 ret;
+
+	xasprintf(&newval, "%s=", name);
+	ret = _putenv(newval);
+	free(newval);
+	win32_refresh_environ();
+	return (ret);
+#else
 	char  **envptr;
 	int	namelen;
 
@@ -46,4 +64,5 @@ unsetenv(const char *name)
 	for (; *envptr != NULL; envptr++)
 		*envptr = *(envptr + 1);
 	return (0);
+#endif
 }
