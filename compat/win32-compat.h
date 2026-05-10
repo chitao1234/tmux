@@ -77,6 +77,38 @@ struct winsize {
 
 int fnmatch(const char *, const char *, int);
 
+typedef long regoff_t;
+typedef struct {
+	int	 re_nsub;
+} regex_t;
+typedef struct {
+	regoff_t rm_so;
+	regoff_t rm_eo;
+} regmatch_t;
+
+#ifndef REG_EXTENDED
+#define REG_EXTENDED 0x01
+#endif
+#ifndef REG_ICASE
+#define REG_ICASE 0x02
+#endif
+#ifndef REG_NOSUB
+#define REG_NOSUB 0x04
+#endif
+#ifndef REG_NOTBOL
+#define REG_NOTBOL 0x08
+#endif
+#ifndef REG_NOTEOL
+#define REG_NOTEOL 0x10
+#endif
+#ifndef REG_NOMATCH
+#define REG_NOMATCH 1
+#endif
+
+#define regcomp(preg, pattern, cflags) (0)
+#define regexec(preg, string, nmatch, pmatch, eflags) (REG_NOMATCH)
+#define regfree(preg) ((void)0)
+
 #ifndef TTY_NAME_MAX
 #define TTY_NAME_MAX 128
 #endif

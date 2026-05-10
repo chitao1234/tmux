@@ -32,6 +32,8 @@
 
 static void	 input_key_mouse(struct window_pane *, struct mouse_event *);
 
+static struct window_pane	*input_key_pane_target;
+
 /* Entry in the key tree. */
 struct input_key_entry {
 	key_code			 key;
@@ -397,6 +399,8 @@ input_key_build(void)
 int
 input_key_pane(struct window_pane *wp, key_code key, struct mouse_event *m)
 {
+	int	ret;
+
 	if (log_get_level() != 0) {
 		log_debug("writing key 0x%llx (%s) to %%%u", key,
 		    key_string_lookup_key(key, 1), wp->id);
@@ -407,7 +411,10 @@ input_key_pane(struct window_pane *wp, key_code key, struct mouse_event *m)
 			input_key_mouse(wp, m);
 		return (0);
 	}
-	return (input_key(wp->screen, wp->event, key));
+	input_key_pane_target = wp;
+	ret = input_key(wp->screen, wp->event, key);
+	input_key_pane_target = NULL;
+	return (ret);
 }
 
 static void
@@ -415,6 +422,13 @@ input_key_write(const char *from, struct bufferevent *bev, const char *data,
     size_t size)
 {
 	log_debug("%s: %.*s", from, (int)size, data);
+#ifdef TMUX_WIN32
+	if (input_key_pane_target != NULL &&
+	    input_key_pane_target->win32 != NULL) {
+		win32_pane_write(input_key_pane_target, data, size);
+		return;
+	}
+#endif
 	bufferevent_write(bev, data, size);
 }
 
@@ -811,5 +825,11 @@ input_key_mouse(struct window_pane *wp, struct mouse_event *m)
 	if (!input_key_get_mouse(s, m, x, y, &buf, &len))
 		return;
 	log_debug("writing mouse %.*s to %%%u", (int)len, buf, wp->id);
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL) {
+		win32_pane_write(wp, buf, len);
+		return;
+	}
+#endif
 	input_key_write(__func__, wp->event, buf, len);
 }

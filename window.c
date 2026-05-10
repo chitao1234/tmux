@@ -17,13 +17,17 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/ioctl.h>
+#endif
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifndef TMUX_WIN32
 #include <fnmatch.h>
 #include <regex.h>
+#endif
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -372,13 +376,17 @@ window_destroy(struct window *w)
 int
 window_pane_destroy_ready(struct window_pane *wp)
 {
+#ifndef TMUX_WIN32
 	int	n;
+#endif
 
 	if (wp->pipe_fd != -1) {
 		if (EVBUFFER_LENGTH(wp->pipe_event->output) != 0)
 			return (0);
+#ifndef TMUX_WIN32
 		if (ioctl(wp->fd, FIONREAD, &n) != -1 && n > 0)
 			return (0);
+#endif
 	}
 
 	if (~wp->flags & PANE_EXITED)
@@ -438,15 +446,18 @@ window_resize(struct window *w, u_int sx, u_int sy, int xpixel, int ypixel)
 void
 window_pane_send_resize(struct window_pane *wp, u_int sx, u_int sy)
 {
+#ifndef TMUX_WIN32
 	struct window	*w = wp->window;
 	struct winsize	 ws;
+#endif
 
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL) {
 		win32_pane_resize(wp, sx, sy);
 		return;
 	}
-#endif
+	return;
+#else
 
 	if (wp->fd == -1)
 		return;
@@ -469,6 +480,7 @@ window_pane_send_resize(struct window_pane *wp, u_int sx, u_int sy)
 		if (errno != EINVAL && errno != ENXIO)
 #endif
 		fatal("ioctl failed");
+#endif
 }
 
 int
@@ -1068,7 +1080,7 @@ window_pane_destroy(struct window_pane *wp)
 	free(wp);
 }
 
-static void
+void
 window_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 {
 	struct window_pane		*wp = data;
@@ -1096,7 +1108,7 @@ window_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 	bufferevent_disable(wp->event, EV_READ);
 }
 
-static void
+void
 window_pane_error_callback(__unused struct bufferevent *bufev,
     __unused short what, void *data)
 {
@@ -1112,6 +1124,18 @@ window_pane_error_callback(__unused struct bufferevent *bufev,
 void
 window_pane_set_event(struct window_pane *wp)
 {
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL) {
+		wp->event = bufferevent_new(-1, window_pane_read_callback,
+		    NULL, window_pane_error_callback, wp);
+		if (wp->event == NULL)
+			fatalx("out of memory");
+		wp->ictx = input_init(wp, wp->event, &wp->palette, NULL);
+		win32_pane_drain(wp);
+		return;
+	}
+#endif
+
 	setblocking(wp->fd, 0);
 
 	wp->event = bufferevent_new(wp->fd, window_pane_read_callback,

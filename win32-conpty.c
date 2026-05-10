@@ -81,6 +81,35 @@ win32_close_handle(HANDLE *h)
 	*h = NULL;
 }
 
+static void
+win32_pane_read_cb(void *arg)
+{
+	struct window_pane	*wp = arg;
+
+	win32_pane_drain(wp);
+}
+
+void
+win32_pane_drain(struct window_pane *wp)
+{
+	struct evbuffer		*dst;
+
+	if (wp->win32 == NULL || wp->win32->output_event == NULL ||
+	    wp->event == NULL)
+		return;
+	dst = wp->event->input;
+	win32_handle_event_drain(wp->win32->output_event, dst);
+	window_pane_read_callback(wp->event, wp);
+}
+
+static void
+win32_pane_error_cb(void *arg)
+{
+	struct window_pane	*wp = arg;
+
+	window_pane_error_callback(wp->event, 0, wp);
+}
+
 int
 win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
     __unused struct environ *env, const char *cwd, char **cause)
@@ -151,6 +180,13 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
 
+	pw->output_event = win32_handle_event_new(pw->output_read,
+	    win32_pane_read_cb, win32_pane_error_cb, wp);
+	if (pw->output_event == NULL) {
+		xasprintf(cause, "couldn't create pane output event");
+		goto fail;
+	}
+
 	DeleteProcThreadAttributeList(si.lpAttributeList);
 	free(si.lpAttributeList);
 	free(wcmd);
@@ -166,12 +202,20 @@ fail:
 	free(wcmd);
 	free(wcwd);
 	if (pw != NULL) {
+		if (wp->win32 == pw)
+			wp->win32 = NULL;
+		if (pw->output_event != NULL)
+			win32_handle_event_free(pw->output_event);
+		if (pw->process != NULL)
+			TerminateProcess(pw->process, 1);
 		if (pw->hpcon != NULL)
 			ClosePseudoConsole(pw->hpcon);
 		win32_close_handle(&pw->input_read);
 		win32_close_handle(&pw->input_write);
 		win32_close_handle(&pw->output_read);
 		win32_close_handle(&pw->output_write);
+		win32_close_handle(&pw->thread);
+		win32_close_handle(&pw->process);
 		free(pw);
 	}
 	return (-1);
