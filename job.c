@@ -17,12 +17,16 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#endif
 
+#ifndef TMUX_WIN32
 #include <fcntl.h>
 #include <signal.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -55,6 +59,9 @@ struct job {
 
 	int			 fd;
 	struct bufferevent	*event;
+#ifdef TMUX_WIN32
+	struct win32_job		*win32;
+#endif
 
 	job_update_cb		 updatecb;
 	job_complete_cb		 completecb;
@@ -76,13 +83,21 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 {
 	struct job	 *job;
 	struct environ	 *env;
+#ifndef TMUX_WIN32
 	pid_t		  pid;
 	int		  nullfd, out[2], master, do_close = 1;
 	const char	 *home, *shell;
 	sigset_t	  set, oldset;
 	struct winsize	  ws;
 	char		**argvp, tty[TTY_NAME_MAX], *argv0;
+#else
+	const char	 *shell;
+	char		 *argv0;
+#endif
 	struct options	 *oo;
+#ifdef TMUX_WIN32
+	struct win32_job *wj;
+#endif
 
 	/*
 	 * Do not set TERM during .tmux.conf (second argument here), it is nice
@@ -105,6 +120,45 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 			shell = _PATH_BSHELL;
 	}
 	argv0 = shell_argv0(shell, 0);
+
+#ifdef TMUX_WIN32
+	wj = win32_job_spawn(cmd, argc, argv, env, s, cwd, flags, sx, sy, NULL);
+	if (wj == NULL) {
+		environ_free(env);
+		free(argv0);
+		return (NULL);
+	}
+
+	job = xcalloc(1, sizeof *job);
+	job->state = JOB_RUNNING;
+	job->flags = flags;
+	job->win32 = wj;
+	job->fd = -1;
+	win32_job_get_pid(wj, &job->pid);
+	job->event = win32_job_get_event(wj);
+	job->event->readcb = job_read_callback;
+	job->event->writecb = job_write_callback;
+	job->event->errorcb = job_error_callback;
+	job->event->cbarg = job;
+
+	if (cmd != NULL)
+		job->cmd = xstrdup(cmd);
+	else
+		job->cmd = cmd_stringify_argv(argc, argv);
+	job->status = 0;
+
+	LIST_INSERT_HEAD(&all_jobs, job, entry);
+
+	job->updatecb = updatecb;
+	job->completecb = completecb;
+	job->freecb = freecb;
+	job->data = data;
+
+	environ_free(env);
+	free(argv0);
+	log_debug("run job %p: %s, pid %ld", job, job->cmd, (long)job->pid);
+	return (job);
+#else
 
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
@@ -236,6 +290,7 @@ fail:
 	environ_free(env);
 	free(argv0);
 	return (NULL);
+#endif
 }
 
 /* Take job's file descriptor and free the job. */
@@ -276,8 +331,15 @@ job_free(struct job *job)
 	if (job->freecb != NULL && job->data != NULL)
 		job->freecb(job->data);
 
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_close(job->win32);
+		job->win32 = NULL;
+	}
+#else
 	if (job->pid != -1)
 		kill(job->pid, SIGTERM);
+#endif
 	if (job->event != NULL)
 		bufferevent_free(job->event);
 	if (job->fd != -1)
@@ -290,6 +352,12 @@ job_free(struct job *job)
 void
 job_resize(struct job *job, u_int sx, u_int sy)
 {
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_resize(job->win32, sx, sy);
+		return;
+	}
+#else
 	struct winsize	 ws;
 
 	if (job->fd == -1 || (~job->flags & JOB_PTY))
@@ -302,6 +370,7 @@ job_resize(struct job *job, u_int sx, u_int sy)
 	ws.ws_row = sy;
 	if (ioctl(job->fd, TIOCSWINSZ, &ws) == -1)
 		fatal("ioctl failed");
+#endif
 }
 
 /* Job buffer read callback. */
@@ -329,7 +398,9 @@ job_write_callback(__unused struct bufferevent *bufev, void *data)
 	    (long) job->pid, len);
 
 	if (len == 0 && (~job->flags & JOB_KEEPWRITE)) {
+#ifndef TMUX_WIN32
 		shutdown(job->fd, SHUT_WR);
+#endif
 		bufferevent_disable(job->event, EV_WRITE);
 	}
 }
@@ -343,6 +414,12 @@ job_error_callback(__unused struct bufferevent *bufev, __unused short events,
 
 	log_debug("job error %p: %s, pid %ld", job, job->cmd, (long) job->pid);
 
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		job->status = win32_job_get_status(job->win32);
+		job->state = JOB_DEAD;
+	}
+#endif
 	if (job->state == JOB_DEAD) {
 		if (job->completecb != NULL)
 			job->completecb(job);
@@ -357,6 +434,10 @@ job_error_callback(__unused struct bufferevent *bufev, __unused short events,
 void
 job_check_died(pid_t pid, int status)
 {
+#ifdef TMUX_WIN32
+	(void)pid;
+	(void)status;
+#else
 	struct job	*job;
 
 	LIST_FOREACH(job, &all_jobs, entry) {
@@ -383,6 +464,7 @@ job_check_died(pid_t pid, int status)
 		job->pid = -1;
 		job->state = JOB_DEAD;
 	}
+#endif
 }
 
 /* Get job status. */
@@ -413,8 +495,15 @@ job_kill_all(void)
 	struct job	*job;
 
 	LIST_FOREACH(job, &all_jobs, entry) {
+#ifdef TMUX_WIN32
+		if (job->win32 != NULL) {
+			win32_job_close(job->win32);
+			job->win32 = NULL;
+		}
+#else
 		if (job->pid != -1)
 			kill(job->pid, SIGTERM);
+#endif
 	}
 }
 

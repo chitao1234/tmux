@@ -33,6 +33,19 @@ struct win32_pane {
 	int		 status;
 };
 
+struct win32_job {
+	HANDLE		 process;
+	HANDLE		 thread;
+	DWORD		 process_id;
+	HANDLE		 stdin_read;
+	HANDLE		 stdin_write;
+	HANDLE		 stdout_read;
+	HANDLE		 stdout_write;
+	struct win32_handle_event *output_event;
+	struct bufferevent *event;
+	int		 status;
+};
+
 static int
 win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
     int inherit_write)
@@ -51,6 +64,21 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
 	    0))
 		return (-1);
 	return (0);
+}
+
+static wchar_t *
+win32_build_job_command(const char *cmd, int argc, char **argv)
+{
+	char	*line = NULL;
+	wchar_t	*wline;
+
+	if (cmd != NULL)
+		xasprintf(&line, "%s", cmd);
+	else
+		line = cmd_stringify_argv(argc, argv);
+	wline = win32_utf8_to_wide(line);
+	free(line);
+	return (wline);
 }
 
 static wchar_t *
@@ -302,6 +330,173 @@ struct bufferevent *
 win32_pane_get_event(__unused struct window_pane *wp)
 {
 	return (NULL);
+}
+
+static void
+win32_job_read_cb(void *arg)
+{
+	struct win32_job	*wj = arg;
+
+	if (wj->event == NULL || wj->output_event == NULL)
+		return;
+	win32_handle_event_drain(wj->output_event, wj->event->input);
+	if (wj->event->readcb != NULL)
+		wj->event->readcb(wj->event, wj->event->cbarg);
+}
+
+static void
+win32_job_error_cb(void *arg)
+{
+	struct win32_job	*wj = arg;
+	DWORD		 code;
+
+	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
+		wj->status = (int)code;
+	if (wj->event != NULL && wj->event->errorcb != NULL)
+		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
+}
+
+struct win32_job *
+win32_job_spawn(const char *cmd, int argc, char **argv,
+    __unused struct environ *env, __unused struct session *s, const char *cwd,
+    int flags, __unused int sx, __unused int sy, char **cause)
+{
+	struct win32_job		*wj;
+	STARTUPINFOW		 si;
+	PROCESS_INFORMATION	 pi;
+	wchar_t			*wcmd = NULL, *wcwd = NULL;
+	BOOL			 ok;
+
+	if (flags & JOB_PTY) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "PTY jobs are not supported in the native Windows MVP");
+		}
+		errno = ENOSYS;
+		return (NULL);
+	}
+
+	wj = xcalloc(1, sizeof *wj);
+	if (win32_make_pipe(&wj->stdin_read, &wj->stdin_write, 1, 0) != 0 ||
+	    win32_make_pipe(&wj->stdout_read, &wj->stdout_write, 0, 1) != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "CreatePipe failed: %s",
+			    win32_strerror(GetLastError()));
+		}
+		goto fail;
+	}
+
+	memset(&si, 0, sizeof si);
+	memset(&pi, 0, sizeof pi);
+	si.cb = sizeof si;
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdInput = wj->stdin_read;
+	si.hStdOutput = wj->stdout_write;
+	si.hStdError = (flags & JOB_SHOWSTDERR) ?
+	    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
+
+	wcmd = win32_build_job_command(cmd, argc, argv);
+	if (cwd != NULL)
+		wcwd = win32_utf8_to_wide(cwd);
+	ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, wcwd, &si,
+	    &pi);
+	if (!ok) {
+		if (cause != NULL) {
+			xasprintf(cause, "CreateProcess job failed: %s",
+			    win32_strerror(GetLastError()));
+		}
+		goto fail;
+	}
+
+	wj->process = pi.hProcess;
+	wj->thread = pi.hThread;
+	wj->process_id = pi.dwProcessId;
+	win32_close_handle(&wj->stdin_read);
+	win32_close_handle(&wj->stdout_write);
+
+	wj->event = bufferevent_new(-1, NULL, NULL, NULL, NULL);
+	if (wj->event == NULL)
+		fatalx("out of memory");
+	wj->output_event = win32_handle_event_new(wj->stdout_read,
+	    win32_job_read_cb, win32_job_error_cb, wj);
+	if (wj->output_event == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't create job output event");
+		goto fail;
+	}
+
+	free(wcmd);
+	free(wcwd);
+	return (wj);
+
+fail:
+	free(wcmd);
+	free(wcwd);
+	if (wj != NULL) {
+		if (wj->output_event != NULL)
+			win32_handle_event_free(wj->output_event);
+		if (wj->event != NULL)
+			bufferevent_free(wj->event);
+		if (wj->process != NULL)
+			TerminateProcess(wj->process, 1);
+		win32_close_handle(&wj->stdin_read);
+		win32_close_handle(&wj->stdin_write);
+		win32_close_handle(&wj->stdout_read);
+		win32_close_handle(&wj->stdout_write);
+		win32_close_handle(&wj->thread);
+		win32_close_handle(&wj->process);
+		free(wj);
+	}
+	return (NULL);
+}
+
+void
+win32_job_close(struct win32_job *wj)
+{
+	if (wj == NULL)
+		return;
+	if (wj->process != NULL)
+		TerminateProcess(wj->process, 1);
+	if (wj->output_event != NULL)
+		win32_handle_event_free(wj->output_event);
+	wj->event = NULL;
+	win32_close_handle(&wj->stdin_read);
+	win32_close_handle(&wj->stdin_write);
+	win32_close_handle(&wj->stdout_read);
+	win32_close_handle(&wj->stdout_write);
+	win32_close_handle(&wj->thread);
+	win32_close_handle(&wj->process);
+	free(wj);
+}
+
+void
+win32_job_resize(__unused struct win32_job *wj, __unused u_int sx,
+    __unused u_int sy)
+{
+}
+
+int
+win32_job_get_pid(struct win32_job *wj, pid_t *pid)
+{
+	if (pid != NULL)
+		*pid = (pid_t)wj->process_id;
+	return (0);
+}
+
+int
+win32_job_get_status(struct win32_job *wj)
+{
+	DWORD	code;
+
+	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
+		wj->status = (int)code;
+	return (wj->status);
+}
+
+struct bufferevent *
+win32_job_get_event(struct win32_job *wj)
+{
+	return (wj->event);
 }
 
 #endif /* TMUX_WIN32 */
