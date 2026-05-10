@@ -2376,6 +2376,9 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	int		 flags, feat;
 	uint64_t	 longflags;
 	char		*name;
+#ifdef TMUX_WIN32
+	struct msg_win32_handle handle;
+#endif
 
 	if (c->flags & CLIENT_IDENTIFIED)
 		return (-1);
@@ -2450,6 +2453,24 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		c->out_fd = imsg_get_fd(imsg);
 		log_debug("client %p IDENTIFY_STDOUT %d", c, c->out_fd);
 		break;
+#ifdef TMUX_WIN32
+	case MSG_IDENTIFY_WIN32_STDIN:
+		if (datalen != sizeof handle)
+			return (-1);
+		memcpy(&handle, data, sizeof handle);
+		log_debug("client %p IDENTIFY_WIN32_STDIN pid %lu handle %#llx",
+		    c, (unsigned long)handle.pid,
+		    (unsigned long long)handle.handle);
+		break;
+	case MSG_IDENTIFY_WIN32_STDOUT:
+		if (datalen != sizeof handle)
+			return (-1);
+		memcpy(&handle, data, sizeof handle);
+		log_debug("client %p IDENTIFY_WIN32_STDOUT pid %lu handle %#llx",
+		    c, (unsigned long)handle.pid,
+		    (unsigned long long)handle.handle);
+		break;
+#endif
 	case MSG_IDENTIFY_ENVIRON:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			return (-1);

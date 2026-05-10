@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 8
+#define PROTOCOL_VERSION 9
 
 /* Message types. */
 enum msgtype {
@@ -39,6 +39,8 @@ enum msgtype {
 	MSG_IDENTIFY_STDOUT,
 	MSG_IDENTIFY_LONGFLAGS,
 	MSG_IDENTIFY_TERMINFO,
+	MSG_IDENTIFY_WIN32_STDIN,
+	MSG_IDENTIFY_WIN32_STDOUT,
 
 	MSG_COMMAND = 200,
 	MSG_DETACH,
@@ -78,6 +80,11 @@ enum msgtype {
 struct msg_command {
 	int	argc;
 }; /* followed by packed argv */
+
+struct msg_win32_handle {
+	uint32_t	pid;
+	uint64_t	handle;
+};
 
 struct msg_read_open {
 	int	stream;

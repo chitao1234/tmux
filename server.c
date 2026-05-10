@@ -106,6 +106,10 @@ server_check_marked(void)
 int
 server_create_socket(uint64_t flags, char **cause)
 {
+#ifdef TMUX_WIN32
+	(void)flags;
+	return (win32_ipc_server_create(socket_path, cause));
+#else
 	struct sockaddr_un	sa;
 	size_t			size;
 	mode_t			mask;
@@ -151,6 +155,7 @@ fail:
 		    strerror(errno));
 	}
 	return (-1);
+#endif
 }
 
 /* Tidy up every hour. */

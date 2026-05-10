@@ -106,6 +106,18 @@ client_get_lock(char *lockfile)
 static int
 client_connect(struct event_base *base, const char *path, uint64_t flags)
 {
+#ifdef TMUX_WIN32
+	char	*cause = NULL;
+	int	 fd;
+
+	(void)base;
+	fd = win32_ipc_client_connect(path, flags, &cause);
+	if (fd == -1 && cause != NULL) {
+		log_debug("%s", cause);
+		free(cause);
+	}
+	return (fd);
+#else
 	struct sockaddr_un	sa;
 	size_t			size;
 	int			fd, lockfd = -1, locked = 0;
@@ -180,6 +192,7 @@ failed:
 	}
 	close(fd);
 	return (-1);
+#endif
 }
 
 /* Get exit string from reason number. */
@@ -472,7 +485,11 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 {
 	char	**ss;
 	size_t	  sslen;
+#ifdef TMUX_WIN32
+	struct msg_win32_handle handle;
+#else
 	int	  fd;
+#endif
 	uint64_t  flags = client_flags;
 	pid_t	  pid;
 	u_int	  i;
@@ -494,12 +511,22 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		    caps[i], strlen(caps[i]) + 1);
 	}
 
+#ifdef TMUX_WIN32
+	handle.pid = GetCurrentProcessId();
+	handle.handle = (uint64_t)(uintptr_t)GetStdHandle(STD_INPUT_HANDLE);
+	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1, &handle,
+	    sizeof handle);
+	handle.handle = (uint64_t)(uintptr_t)GetStdHandle(STD_OUTPUT_HANDLE);
+	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDOUT, -1, &handle,
+	    sizeof handle);
+#else
 	if ((fd = dup(STDIN_FILENO)) == -1)
 		fatal("dup failed");
 	proc_send(client_peer, MSG_IDENTIFY_STDIN, fd, NULL, 0);
 	if ((fd = dup(STDOUT_FILENO)) == -1)
 		fatal("dup failed");
 	proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0);
+#endif
 
 	pid = getpid();
 	proc_send(client_peer, MSG_IDENTIFY_CLIENTPID, -1, &pid, sizeof pid);
