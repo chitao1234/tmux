@@ -522,6 +522,7 @@ file_write_left(struct client_files *files)
 	return (waiting != 0);
 }
 
+#ifndef TMUX_WIN32
 /* Client file write error callback. */
 static void
 file_write_error_callback(__unused struct bufferevent *bev, __unused short what,
@@ -554,11 +555,51 @@ file_write_callback(__unused struct bufferevent *bev, void *arg)
 
 	if (cf->closed && EVBUFFER_LENGTH(cf->event->output) == 0) {
 		bufferevent_free(cf->event);
+		cf->event = NULL;
 		close(cf->fd);
-		RB_REMOVE(client_files, cf->tree, cf);
+		cf->fd = -1;
 		file_free(cf);
 	}
 }
+#endif
+
+#ifdef TMUX_WIN32
+static void
+file_write_sync(struct client_file *cf, const void *data, size_t size)
+{
+	const char	*ptr = data;
+	ssize_t		 n;
+
+	while (size != 0) {
+		n = write(cf->fd, ptr, size);
+		if (n == -1) {
+			if (errno == EINTR)
+				continue;
+			log_debug("write error file %d: %s", cf->stream,
+			    strerror(errno));
+			close(cf->fd);
+			cf->fd = -1;
+			if (cf->cb != NULL)
+				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+			return;
+		}
+		if (n == 0) {
+			log_debug("write error file %d: wrote zero bytes",
+			    cf->stream);
+			close(cf->fd);
+			cf->fd = -1;
+			if (cf->cb != NULL)
+				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+			return;
+		}
+		ptr += n;
+		size -= n;
+	}
+
+	if (cf->cb != NULL)
+		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+}
+#endif
 
 /* Handle a file write open message (client). */
 void
@@ -611,11 +652,13 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		goto reply;
 	}
 
+#ifndef TMUX_WIN32
 	cf->event = bufferevent_new(cf->fd, NULL, file_write_callback,
 	    file_write_error_callback, cf);
 	if (cf->event == NULL)
 		fatalx("out of memory");
 	bufferevent_enable(cf->event, EV_WRITE);
+#endif
 	goto reply;
 
 reply:
@@ -640,6 +683,13 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 		fatalx("unknown stream number");
 	log_debug("write %zu to file %d", size, cf->stream);
 
+#ifdef TMUX_WIN32
+	if (cf->event == NULL) {
+		if (cf->fd != -1)
+			file_write_sync(cf, msg + 1, size);
+		return;
+	}
+#endif
 	if (cf->event != NULL)
 		bufferevent_write(cf->event, msg + 1, size);
 }
@@ -662,11 +712,13 @@ file_write_close(struct client_files *files, struct imsg *imsg)
 	if (cf->event == NULL || EVBUFFER_LENGTH(cf->event->output) == 0) {
 		if (cf->event != NULL)
 			bufferevent_free(cf->event);
+		cf->event = NULL;
 		if (cf->fd != -1)
 			close(cf->fd);
-		RB_REMOVE(client_files, files, cf);
+		cf->fd = -1;
 		file_free(cf);
-	}
+	} else
+		cf->closed = 1;
 }
 
 /* Client file read error callback. */
