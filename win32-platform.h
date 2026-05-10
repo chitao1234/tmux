@@ -34,6 +34,7 @@ char		*win32_wide_to_utf8(const wchar_t *);
 
 int		 win32_init(void);
 void		 win32_fini(void);
+void		 win32_check_children(void);
 
 struct win32_handle_event *win32_handle_event_new(HANDLE, void (*)(void *),
 		     void (*)(void *), void *);
@@ -41,6 +42,7 @@ void		 win32_handle_event_free(struct win32_handle_event *);
 struct evbuffer *win32_handle_event_input(struct win32_handle_event *);
 void		 win32_handle_event_drain(struct win32_handle_event *,
 		     struct evbuffer *);
+size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
 

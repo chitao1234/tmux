@@ -380,14 +380,17 @@ window_pane_destroy_ready(struct window_pane *wp)
 	int	n;
 #endif
 
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL && win32_pane_buffered(wp) > 0)
+		return (0);
+#else
 	if (wp->pipe_fd != -1) {
 		if (EVBUFFER_LENGTH(wp->pipe_event->output) != 0)
 			return (0);
-#ifndef TMUX_WIN32
 		if (ioctl(wp->fd, FIONREAD, &n) != -1 && n > 0)
 			return (0);
-#endif
 	}
+#endif
 
 	if (~wp->flags & PANE_EXITED)
 		return (0);

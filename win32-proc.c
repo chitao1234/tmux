@@ -18,6 +18,29 @@
 
 #ifdef TMUX_WIN32
 
+void
+win32_check_children(void)
+{
+	struct window		*w;
+	struct window_pane	*wp;
+	int			 status;
+
+	RB_FOREACH(w, windows, &windows) {
+		TAILQ_FOREACH(wp, &w->panes, entry) {
+			if (wp->win32 == NULL)
+				continue;
+			if (wp->flags & PANE_EXITED)
+				continue;
+			if (!win32_pane_exited(wp, &status))
+				continue;
+			wp->status = status;
+			wp->flags |= PANE_STATUSREADY|PANE_EXITED;
+			if (window_pane_destroy_ready(wp))
+				server_destroy_pane(wp, 1);
+		}
+	}
+}
+
 int
 win32_server_spawn(const char *socket_path, uint64_t flags, char **cause)
 {

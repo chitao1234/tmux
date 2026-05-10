@@ -281,6 +281,9 @@ server_loop(void)
 		}
 	} while (items != 0);
 
+#ifdef TMUX_WIN32
+	win32_check_children();
+#endif
 	server_client_loop();
 
 	if (!options_get_number(global_options, "exit-empty") && !server_exit)

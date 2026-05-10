@@ -275,9 +275,11 @@ win32_pane_exited(struct window_pane *wp, int *status)
 }
 
 size_t
-win32_pane_buffered(__unused struct window_pane *wp)
+win32_pane_buffered(struct window_pane *wp)
 {
-	return (0);
+	if (wp->win32 == NULL || wp->win32->output_event == NULL)
+		return (0);
+	return (win32_handle_event_buffered(wp->win32->output_event));
 }
 
 int

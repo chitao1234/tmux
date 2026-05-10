@@ -199,6 +199,17 @@ win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
 	LeaveCriticalSection(&whe->lock);
 }
 
+size_t
+win32_handle_event_buffered(struct win32_handle_event *whe)
+{
+	size_t	size;
+
+	EnterCriticalSection(&whe->lock);
+	size = EVBUFFER_LENGTH(whe->input);
+	LeaveCriticalSection(&whe->lock);
+	return (size);
+}
+
 int
 win32_handle_event_write(__unused struct win32_handle_event *whe,
     __unused const void *data, __unused size_t size)
