@@ -17,7 +17,9 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/socket.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -35,9 +37,11 @@
 
 static enum cmd_retval	cmd_pipe_pane_exec(struct cmd *, struct cmdq_item *);
 
+#ifndef TMUX_WIN32
 static void cmd_pipe_pane_read_callback(struct bufferevent *, void *);
 static void cmd_pipe_pane_write_callback(struct bufferevent *, void *);
 static void cmd_pipe_pane_error_callback(struct bufferevent *, short, void *);
+#endif
 
 const struct cmd_entry cmd_pipe_pane_entry = {
 	.name = "pipe-pane",
@@ -55,6 +59,12 @@ const struct cmd_entry cmd_pipe_pane_entry = {
 static enum cmd_retval
 cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
+#ifdef TMUX_WIN32
+	(void)self;
+
+	cmdq_error(item, "pipe-pane is not supported in the native Windows MVP");
+	return (CMD_RETURN_ERROR);
+#else
 	struct args			*args = cmd_get_args(self);
 	struct cmd_find_state		*target = cmdq_get_target(item);
 	struct client			*tc = cmdq_get_target_client(item);
@@ -188,8 +198,10 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 		free(cmd);
 		return (CMD_RETURN_NORMAL);
 	}
+#endif
 }
 
+#ifndef TMUX_WIN32
 static void
 cmd_pipe_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 {
@@ -233,3 +245,4 @@ cmd_pipe_pane_error_callback(__unused struct bufferevent *bufev,
 	if (window_pane_destroy_ready(wp))
 		server_destroy_pane(wp, 1);
 }
+#endif

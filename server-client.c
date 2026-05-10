@@ -17,8 +17,10 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/ioctl.h>
 #include <sys/uio.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -543,6 +545,12 @@ server_client_free(__unused int fd, __unused short events, void *arg)
 void
 server_client_suspend(struct client *c)
 {
+#ifdef TMUX_WIN32
+	if (c->session != NULL) {
+		status_message_set(c, -1, 1, 0, 0,
+		    "suspend-client is not supported in the native Windows MVP");
+	}
+#else
 	struct session	*s = c->session;
 
 	if (s == NULL || (c->flags & CLIENT_UNATTACHEDFLAGS))
@@ -551,6 +559,7 @@ server_client_suspend(struct client *c)
 	tty_stop_tty(&c->tty);
 	c->flags |= CLIENT_SUSPENDED;
 	proc_send(c->peer, MSG_SUSPEND, -1, NULL, 0);
+#endif
 }
 
 /* Detach a client. */

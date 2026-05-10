@@ -18,11 +18,15 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/stat.h>
 #include <sys/socket.h>
+#endif
 
 #include <ctype.h>
+#ifndef TMUX_WIN32
 #include <pwd.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -55,9 +59,11 @@ server_acl_init(void)
 {
 	RB_INIT(&server_acl_entries);
 
+#ifndef TMUX_WIN32
 	if (getuid() != 0)
 		server_acl_user_allow(0);
 	server_acl_user_allow(getuid());
+#endif
 }
 
 /* Find user entry. */
@@ -73,6 +79,10 @@ server_acl_user_find(uid_t uid)
 void
 server_acl_display(struct cmdq_item *item)
 {
+#ifdef TMUX_WIN32
+	cmdq_print(item,
+	    "native Windows MVP: ACLs are limited to the current user");
+#else
 	struct server_acl_user	*loop;
 	struct passwd		*pw;
 	const char		*name;
@@ -89,6 +99,7 @@ server_acl_display(struct cmdq_item *item)
 		else
 			cmdq_print(item, "%s (W)", name);
 	}
+#endif
 }
 
 /* Allow a user. */
@@ -163,6 +174,10 @@ server_acl_user_deny_write(uid_t uid)
 int
 server_acl_join(struct client *c)
 {
+#ifdef TMUX_WIN32
+	(void)c;
+	return (1);
+#else
 	struct server_acl_user	*user;
 	uid_t			 uid;
 
@@ -176,6 +191,7 @@ server_acl_join(struct client *c)
 	if (user->flags & SERVER_ACL_READONLY)
 		c->flags |= CLIENT_READONLY;
 	return (1);
+#endif
 }
 
 /* Get UID for user entry. */
