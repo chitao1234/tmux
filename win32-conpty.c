@@ -202,6 +202,9 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 		goto fail;
 	}
 
+	win32_close_handle(&pw->input_read);
+	win32_close_handle(&pw->output_write);
+
 	pw->process = pi.hProcess;
 	pw->thread = pi.hThread;
 	pw->process_id = pi.dwProcessId;
