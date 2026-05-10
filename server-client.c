@@ -2200,6 +2200,10 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	case MSG_IDENTIFY_LONGFLAGS:
 	case MSG_IDENTIFY_STDIN:
 	case MSG_IDENTIFY_STDOUT:
+#ifdef TMUX_WIN32
+	case MSG_IDENTIFY_WIN32_STDIN:
+	case MSG_IDENTIFY_WIN32_STDOUT:
+#endif
 	case MSG_IDENTIFY_TERM:
 	case MSG_IDENTIFY_TERMINFO:
 	case MSG_IDENTIFY_TTYNAME:
