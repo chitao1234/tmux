@@ -272,8 +272,9 @@ void
 setblocking(int fd, int state)
 {
 #ifdef TMUX_WIN32
-	(void)fd;
-	(void)state;
+	u_long mode = state ? 0 : 1;
+
+	ioctlsocket(win32_ipc_socket(fd), FIONBIO, &mode);
 #else
 	int mode;
 

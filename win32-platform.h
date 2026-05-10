@@ -18,6 +18,7 @@
 struct bufferevent;
 struct client;
 struct environ;
+struct evbuffer;
 struct job;
 struct session;
 struct spawn_context;
@@ -45,9 +46,13 @@ void		 win32_handle_event_drain(struct win32_handle_event *,
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
+int		 win32_handle_write(HANDLE, const void *, size_t);
 
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
+int		 win32_ipc_server_accept(int, char **);
+int		 win32_ipc_close(int);
+SOCKET		 win32_ipc_socket(int);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
 int		 win32_terminal_init_client(char **);

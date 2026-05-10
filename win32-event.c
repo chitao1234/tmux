@@ -18,11 +18,27 @@
 
 #ifdef TMUX_WIN32
 
+static int
+win32_socket_errno(int error)
+{
+	switch (error) {
+	case WSAEWOULDBLOCK:
+		return (EAGAIN);
+	case WSAEINTR:
+		return (EINTR);
+	case WSAECONNREFUSED:
+		return (ECONNREFUSED);
+	default:
+		return (error);
+	}
+}
+
 ssize_t
 readv(int fd, const struct iovec *iov, int iovcnt)
 {
 	char	*base;
 	size_t	 len;
+	int	 n;
 
 	if (iovcnt != 1) {
 		errno = EINVAL;
@@ -32,7 +48,12 @@ readv(int fd, const struct iovec *iov, int iovcnt)
 	len = iov[0].iov_len;
 	if (len > INT_MAX)
 		len = INT_MAX;
-	return (read(fd, base, len));
+	n = recv(win32_ipc_socket(fd), base, len, 0);
+	if (n == SOCKET_ERROR) {
+		errno = win32_socket_errno(WSAGetLastError());
+		return (-1);
+	}
+	return (n);
 }
 
 ssize_t
@@ -47,9 +68,12 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 		base = iov[i].iov_base;
 		len = iov[i].iov_len;
 		while (len != 0) {
-			n = write(fd, base, len > INT_MAX ? INT_MAX : len);
-			if (n == -1)
+			n = send(win32_ipc_socket(fd), base,
+			    len > INT_MAX ? INT_MAX : len, 0);
+			if (n == SOCKET_ERROR) {
+				errno = win32_socket_errno(WSAGetLastError());
 				return (total == 0 ? -1 : total);
+			}
 			if (n == 0)
 				return (total);
 			total += n;
@@ -182,10 +206,23 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 	whe->notify_read = pair[0];
 	whe->notify_write = pair[1];
 	whe->input = evbuffer_new();
+	if (whe->input == NULL) {
+		closesocket(pair[0]);
+		closesocket(pair[1]);
+		free(whe);
+		return (NULL);
+	}
 	whe->readcb = readcb;
 	whe->errorcb = errorcb;
 	whe->arg = arg;
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (whe->stop == NULL) {
+		evbuffer_free(whe->input);
+		closesocket(pair[0]);
+		closesocket(pair[1]);
+		free(whe);
+		return (NULL);
+	}
 	InitializeCriticalSection(&whe->lock);
 
 	event_set(&whe->event, (evutil_socket_t)whe->notify_read,
@@ -254,10 +291,22 @@ win32_handle_event_buffered(struct win32_handle_event *whe)
 
 int
 win32_handle_event_write(__unused struct win32_handle_event *whe,
-    __unused const void *data, __unused size_t size)
+    const void *data, size_t size)
 {
-	errno = ENOSYS;
-	return (-1);
+	return (win32_handle_write(whe->handle, data, size));
+}
+
+int
+win32_handle_write(HANDLE handle, const void *data, size_t size)
+{
+	DWORD	written;
+
+	if (!WriteFile(handle, data, size > MAXDWORD ? MAXDWORD : size,
+	    &written, NULL)) {
+		errno = EIO;
+		return (-1);
+	}
+	return ((int)written);
 }
 
 #endif /* TMUX_WIN32 */

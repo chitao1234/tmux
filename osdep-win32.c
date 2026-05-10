@@ -30,5 +30,8 @@ osdep_get_cwd(__unused int fd)
 struct event_base *
 osdep_event_init(void)
 {
+	if (win32_init() != 0)
+		fatal("WSAStartup failed");
+	atexit(win32_fini);
 	return (event_init());
 }

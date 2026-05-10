@@ -78,7 +78,10 @@ win32_terminal_get_size(__unused struct client *c, u_int *sx, u_int *sy,
 	CONSOLE_SCREEN_BUFFER_INFO csbi;
 	HANDLE hout;
 
-	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (c != NULL && c->win32_stdout != NULL)
+		hout = c->win32_stdout;
+	else
+		hout = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (hout == INVALID_HANDLE_VALUE ||
 	    !GetConsoleScreenBufferInfo(hout, &csbi))
 		return (-1);

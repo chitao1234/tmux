@@ -108,15 +108,49 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 {
 #ifdef TMUX_WIN32
 	char	*cause = NULL;
-	int	 fd;
+	int	 fd, i;
 
-	(void)base;
 	fd = win32_ipc_client_connect(path, flags, &cause);
-	if (fd == -1 && cause != NULL) {
+	if (fd != -1) {
+		setblocking(fd, 0);
+		return (fd);
+	}
+	if (cause != NULL) {
 		log_debug("%s", cause);
 		free(cause);
+		cause = NULL;
 	}
-	return (fd);
+	if (flags & CLIENT_NOSTARTSERVER)
+		return (-1);
+	if (~flags & CLIENT_STARTSERVER)
+		return (-1);
+	if (flags & CLIENT_NOFORK)
+		return (server_start(client_proc, flags, base, -1, NULL));
+	if (win32_server_spawn(path, flags, &cause) != 0) {
+		if (cause != NULL) {
+			log_debug("%s", cause);
+			free(cause);
+		}
+		return (-1);
+	}
+	for (i = 0; i < 100; i++) {
+		fd = win32_ipc_client_connect(path, flags, &cause);
+		if (fd != -1) {
+			setblocking(fd, 0);
+			return (fd);
+		}
+		if (cause != NULL) {
+			log_debug("%s", cause);
+			free(cause);
+			cause = NULL;
+		}
+		if (errno != ENOENT && errno != ECONNREFUSED &&
+		    errno != WSAECONNREFUSED)
+			return (-1);
+		Sleep(50);
+	}
+	errno = ETIMEDOUT;
+	return (-1);
 #else
 	struct sockaddr_un	sa;
 	size_t			size;

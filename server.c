@@ -235,8 +235,10 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 #else
 	server_fd = server_create_socket(flags, &cause);
 #endif
-	if (server_fd != -1)
+	if (server_fd != -1) {
+		setblocking(server_fd, 0);
 		server_update_socket();
+	}
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
 	else
@@ -364,6 +366,9 @@ server_update_socket(void)
 	if (n != last) {
 		last = n;
 
+#ifdef TMUX_WIN32
+		return;
+#endif
 		if (stat(socket_path, &sb) != 0)
 			return;
 		mode = sb.st_mode & ACCESSPERMS;
@@ -384,8 +389,12 @@ server_update_socket(void)
 static void
 server_accept(int fd, short events, __unused void *data)
 {
+#ifdef TMUX_WIN32
+	char			*cause = NULL;
+#else
 	struct sockaddr_storage	 sa;
 	socklen_t		 slen = sizeof sa;
+#endif
 	int			 newfd;
 	struct client		*c;
 
@@ -393,6 +402,21 @@ server_accept(int fd, short events, __unused void *data)
 	if (!(events & EV_READ))
 		return;
 
+#ifdef TMUX_WIN32
+	(void)fd;
+	newfd = win32_ipc_server_accept(server_fd, &cause);
+	if (newfd == -1) {
+		log_debug("%s", cause != NULL ? cause : "accept failed");
+		free(cause);
+		if (errno == EAGAIN || errno == EINTR || errno == ECONNABORTED)
+			return;
+		if (errno == ENFILE || errno == EMFILE) {
+			server_add_accept(1);
+			return;
+		}
+		fatal("accept failed");
+	}
+#else
 	newfd = accept(fd, (struct sockaddr *) &sa, &slen);
 	if (newfd == -1) {
 		if (errno == EAGAIN || errno == EINTR || errno == ECONNABORTED)
@@ -404,9 +428,14 @@ server_accept(int fd, short events, __unused void *data)
 		}
 		fatal("accept failed");
 	}
+#endif
 
 	if (server_exit) {
+#ifdef TMUX_WIN32
+		win32_ipc_close(newfd);
+#else
 		close(newfd);
+#endif
 		return;
 	}
 	c = server_client_create(newfd);
@@ -432,8 +461,13 @@ server_add_accept(int timeout)
 		event_del(&server_ev_accept);
 
 	if (timeout == 0) {
-		event_set(&server_ev_accept, server_fd, EV_READ, server_accept,
-		    NULL);
+		event_set(&server_ev_accept,
+#ifdef TMUX_WIN32
+		    (evutil_socket_t)win32_ipc_socket(server_fd),
+#else
+		    server_fd,
+#endif
+		    EV_READ, server_accept, NULL);
 		event_add(&server_ev_accept, NULL);
 	} else {
 		event_set(&server_ev_accept, server_fd, EV_TIMEOUT,

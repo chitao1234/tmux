@@ -290,7 +290,12 @@ server_client_create(int fd)
 {
 	struct client	*c;
 
+#ifdef TMUX_WIN32
+	if (fd != -1)
+		setblocking(fd, 0);
+#else
 	setblocking(fd, 0);
+#endif
 
 	c = xcalloc(1, sizeof *c);
 	c->references = 1;
@@ -354,6 +359,10 @@ server_client_open(struct client *c, char **cause)
 		return (-1);
 	}
 
+#ifdef TMUX_WIN32
+	if (c->win32_stdin != NULL && c->win32_stdout != NULL)
+		c->flags |= CLIENT_TERMINAL;
+#endif
 	if (!(c->flags & CLIENT_TERMINAL)) {
 		*cause = xstrdup("not a terminal");
 		return (-1);
@@ -501,9 +510,23 @@ server_client_lost(struct client *c)
 	if (c->out_fd != -1)
 		close(c->out_fd);
 	if (c->fd != -1) {
+#ifdef TMUX_WIN32
+		win32_ipc_close(c->fd);
+#else
 		close(c->fd);
+#endif
 		c->fd = -1;
 	}
+#ifdef TMUX_WIN32
+	if (c->win32_stdin != NULL) {
+		CloseHandle(c->win32_stdin);
+		c->win32_stdin = NULL;
+	}
+	if (c->win32_stdout != NULL) {
+		CloseHandle(c->win32_stdout);
+		c->win32_stdout = NULL;
+	}
+#endif
 	server_client_unref(c);
 
 	server_add_accept(0); /* may be more file descriptors now */
@@ -2464,21 +2487,49 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		break;
 #ifdef TMUX_WIN32
 	case MSG_IDENTIFY_WIN32_STDIN:
+	{
+		HANDLE process;
+
 		if (datalen != sizeof handle)
 			return (-1);
 		memcpy(&handle, data, sizeof handle);
 		log_debug("client %p IDENTIFY_WIN32_STDIN pid %lu handle %#llx",
 		    c, (unsigned long)handle.pid,
 		    (unsigned long long)handle.handle);
+		process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.pid);
+		if (process == NULL ||
+		    !DuplicateHandle(process, (HANDLE)(uintptr_t)handle.handle,
+		    GetCurrentProcess(), &c->win32_stdin, 0, FALSE,
+		    DUPLICATE_SAME_ACCESS)) {
+			log_debug("DuplicateHandle stdin failed: %s",
+			    win32_strerror(GetLastError()));
+		}
+		if (process != NULL)
+			CloseHandle(process);
 		break;
+	}
 	case MSG_IDENTIFY_WIN32_STDOUT:
+	{
+		HANDLE process;
+
 		if (datalen != sizeof handle)
 			return (-1);
 		memcpy(&handle, data, sizeof handle);
 		log_debug("client %p IDENTIFY_WIN32_STDOUT pid %lu handle %#llx",
 		    c, (unsigned long)handle.pid,
 		    (unsigned long long)handle.handle);
+		process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.pid);
+		if (process == NULL ||
+		    !DuplicateHandle(process, (HANDLE)(uintptr_t)handle.handle,
+		    GetCurrentProcess(), &c->win32_stdout, 0, FALSE,
+		    DUPLICATE_SAME_ACCESS)) {
+			log_debug("DuplicateHandle stdout failed: %s",
+			    win32_strerror(GetLastError()));
+		}
+		if (process != NULL)
+			CloseHandle(process);
 		break;
+	}
 #endif
 	case MSG_IDENTIFY_ENVIRON:
 		if (datalen == 0 || data[datalen - 1] != '\0')
@@ -2520,9 +2571,21 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 
 	if (c->flags & CLIENT_CONTROL)
 		control_start(c);
+#ifdef TMUX_WIN32
+	else if (c->win32_stdin != NULL && c->win32_stdout != NULL) {
+		if (tty_init(&c->tty, c) == 0) {
+			tty_resize(&c->tty);
+			c->flags |= CLIENT_TERMINAL;
+		}
+	}
+#endif
 	else if (c->fd != -1) {
 		if (tty_init(&c->tty, c) != 0) {
+#ifdef TMUX_WIN32
+			win32_ipc_close(c->fd);
+#else
 			close(c->fd);
+#endif
 			c->fd = -1;
 		} else {
 			tty_resize(&c->tty);

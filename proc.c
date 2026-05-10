@@ -144,6 +144,11 @@ peer_check_version(struct tmuxpeer *peer, struct imsg *imsg)
 static void
 proc_update_event(struct tmuxpeer *peer)
 {
+#ifdef TMUX_WIN32
+	evutil_socket_t	fd = (evutil_socket_t)win32_ipc_socket(peer->ibuf.fd);
+#else
+	int		fd = peer->ibuf.fd;
+#endif
 	short	events;
 
 	event_del(&peer->event);
@@ -151,7 +156,7 @@ proc_update_event(struct tmuxpeer *peer)
 	events = EV_READ;
 	if (imsgbuf_queuelen(&peer->ibuf) > 0)
 		events |= EV_WRITE;
-	event_set(&peer->event, peer->ibuf.fd, events, proc_event_cb, peer);
+	event_set(&peer->event, fd, events, proc_event_cb, peer);
 
 	event_add(&peer->event, NULL);
 }
@@ -321,7 +326,13 @@ proc_add_peer(struct tmuxproc *tp, int fd,
 	if (imsgbuf_init(&peer->ibuf, fd) == -1)
 		fatal("imsgbuf_init");
 	imsgbuf_allow_fdpass(&peer->ibuf);
-	event_set(&peer->event, fd, EV_READ, proc_event_cb, peer);
+	event_set(&peer->event,
+#ifdef TMUX_WIN32
+	    (evutil_socket_t)win32_ipc_socket(fd),
+#else
+	    fd,
+#endif
+	    EV_READ, proc_event_cb, peer);
 
 	if (getpeereid(fd, &peer->uid, &gid) != 0)
 		peer->uid = (uid_t)-1;
@@ -342,7 +353,11 @@ proc_remove_peer(struct tmuxpeer *peer)
 	event_del(&peer->event);
 	imsgbuf_clear(&peer->ibuf);
 
+#ifdef TMUX_WIN32
+	win32_ipc_close(peer->ibuf.fd);
+#else
 	close(peer->ibuf.fd);
+#endif
 	free(peer);
 }
 

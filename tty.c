@@ -41,6 +41,7 @@
 
 static int	tty_log_fd = -1;
 
+static void	tty_read_callback(int, short, void *);
 static void	tty_start_timer_callback(int, short, void *);
 static void	tty_clipboard_query_callback(int, short, void *);
 static void	tty_set_italics(struct tty *);
@@ -200,6 +201,18 @@ tty_read_callback(__unused int fd, __unused short events, void *data)
 	size_t		 size = EVBUFFER_LENGTH(tty->in);
 	int		 nread;
 
+#ifdef TMUX_WIN32
+	if (tty->win32_in != NULL) {
+		win32_handle_event_drain(tty->win32_in, tty->in);
+		nread = EVBUFFER_LENGTH(tty->in) - size;
+		if (nread == 0) {
+			log_debug("%s: read closed", name);
+			server_client_lost(tty->client);
+			return;
+		}
+		goto read_done;
+	}
+#endif
 	nread = evbuffer_read(tty->in, c->fd, -1);
 	if (nread == 0 || nread == -1) {
 		if (nread == 0)
@@ -210,6 +223,9 @@ tty_read_callback(__unused int fd, __unused short events, void *data)
 		server_client_lost(tty->client);
 		return;
 	}
+#ifdef TMUX_WIN32
+read_done:
+#endif
 	log_debug("%s: read %d bytes (already %zu)", name, nread, size);
 
 	while (tty_keys_next(tty))
@@ -274,9 +290,22 @@ tty_write_callback(__unused int fd, __unused short events, void *data)
 	size_t		 size = EVBUFFER_LENGTH(tty->out);
 	int		 nwrite;
 
+#ifdef TMUX_WIN32
+	if (c->win32_stdout != NULL) {
+		nwrite = win32_handle_write(c->win32_stdout,
+		    EVBUFFER_DATA(tty->out), size);
+		if (nwrite == -1)
+			return;
+		evbuffer_drain(tty->out, nwrite);
+		goto write_done;
+	}
+#endif
 	nwrite = evbuffer_write(tty->out, c->fd);
 	if (nwrite == -1)
 		return;
+#ifdef TMUX_WIN32
+write_done:
+#endif
 	log_debug("%s: wrote %d bytes (of %zu)", c->name, nwrite, size);
 
 	if (c->redraw > 0) {
@@ -289,9 +318,32 @@ tty_write_callback(__unused int fd, __unused short events, void *data)
 	} else if (tty_block_maybe(tty))
 		return;
 
-	if (EVBUFFER_LENGTH(tty->out) != 0)
+	if (EVBUFFER_LENGTH(tty->out) != 0) {
+#ifdef TMUX_WIN32
+		if (c->win32_stdout != NULL) {
+			tty_write_callback(-1, EV_WRITE, tty);
+			return;
+		}
+#endif
 		event_add(&tty->event_out, NULL);
+	}
 }
+
+#ifdef TMUX_WIN32
+static void
+tty_win32_read_callback(void *data)
+{
+	tty_read_callback(-1, EV_READ, data);
+}
+
+static void
+tty_win32_error_callback(void *data)
+{
+	struct tty	*tty = data;
+
+	server_client_lost(tty->client);
+}
+#endif
 
 int
 tty_open(struct tty *tty, char **cause)
@@ -308,13 +360,34 @@ tty_open(struct tty *tty, char **cause)
 
 	tty->flags &= ~(TTY_NOCURSOR|TTY_FREEZE|TTY_BLOCK|TTY_TIMER);
 
+#ifdef TMUX_WIN32
+	if (c->win32_stdin != NULL) {
+		tty->win32_in = win32_handle_event_new(c->win32_stdin,
+		    tty_win32_read_callback, tty_win32_error_callback, tty);
+		if (tty->win32_in == NULL) {
+			*cause = xstrdup("couldn't create Win32 tty input event");
+			tty_close(tty);
+			return (-1);
+		}
+	} else {
+#endif
 	event_set(&tty->event_in, c->fd, EV_PERSIST|EV_READ,
 	    tty_read_callback, tty);
+#ifdef TMUX_WIN32
+	}
+#endif
 	tty->in = evbuffer_new();
 	if (tty->in == NULL)
 		fatal("out of memory");
 
+#ifndef TMUX_WIN32
 	event_set(&tty->event_out, c->fd, EV_WRITE, tty_write_callback, tty);
+#else
+	if (c->win32_stdout == NULL) {
+		event_set(&tty->event_out, c->fd, EV_WRITE, tty_write_callback,
+		    tty);
+	}
+#endif
 	tty->out = evbuffer_new();
 	if (tty->out == NULL)
 		fatal("out of memory");
@@ -363,8 +436,15 @@ tty_start_tty(struct tty *tty)
 	struct termios	 tio;
 #endif
 
+#ifdef TMUX_WIN32
+	if (c->win32_stdin == NULL) {
+		setblocking(c->fd, 0);
+		event_add(&tty->event_in, NULL);
+	}
+#else
 	setblocking(c->fd, 0);
 	event_add(&tty->event_in, NULL);
+#endif
 
 #ifndef TMUX_WIN32
 	memcpy(&tio, &tty->tio, sizeof tio);
@@ -482,8 +562,15 @@ tty_stop_tty(struct tty *tty)
 	event_del(&tty->timer);
 	tty->flags &= ~TTY_BLOCK;
 
+#ifdef TMUX_WIN32
+	if (tty->win32_in == NULL)
+		event_del(&tty->event_in);
+	if (c->win32_stdout == NULL)
+		event_del(&tty->event_out);
+#else
 	event_del(&tty->event_in);
 	event_del(&tty->event_out);
+#endif
 
 	/*
 	 * Be flexible about error handling and try not kill the server just
@@ -537,8 +624,11 @@ tty_stop_tty(struct tty *tty)
 
 #ifdef TMUX_WIN32
 	win32_terminal_restore_client(c);
-#endif
+	if (c->win32_stdin == NULL)
+		setblocking(c->fd, 1);
+#else
 	setblocking(c->fd, 1);
+#endif
 }
 
 void
@@ -550,9 +640,19 @@ tty_close(struct tty *tty)
 
 	if (tty->flags & TTY_OPENED) {
 		evbuffer_free(tty->in);
-		event_del(&tty->event_in);
 		evbuffer_free(tty->out);
+#ifdef TMUX_WIN32
+		if (tty->win32_in != NULL) {
+			win32_handle_event_free(tty->win32_in);
+			tty->win32_in = NULL;
+		} else
+			event_del(&tty->event_in);
+		if (tty->client->win32_stdout == NULL)
+			event_del(&tty->event_out);
+#else
+		event_del(&tty->event_in);
 		event_del(&tty->event_out);
+#endif
 
 		tty_term_free(tty->term);
 		tty_keys_free(tty);
@@ -604,6 +704,11 @@ tty_raw(struct tty *tty, const char *s)
 
 	slen = strlen(s);
 	for (i = 0; i < 5; i++) {
+#ifdef TMUX_WIN32
+		if (c->win32_stdout != NULL)
+			n = win32_handle_write(c->win32_stdout, s, slen);
+		else
+#endif
 		n = write(c->fd, s, slen);
 		if (n >= 0) {
 			s += n;
@@ -677,9 +782,16 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 
 	if (tty_log_fd != -1)
 		write(tty_log_fd, buf, len);
-	if ((tty->flags & TTY_STARTED) &&
-	    !event_pending(&tty->event_out, EV_WRITE, NULL))
-		event_add(&tty->event_out, NULL);
+	if (tty->flags & TTY_STARTED) {
+#ifdef TMUX_WIN32
+		if (c->win32_stdout != NULL) {
+			tty_write_callback(-1, EV_WRITE, tty);
+			return;
+		}
+#endif
+		if (!event_pending(&tty->event_out, EV_WRITE, NULL))
+			event_add(&tty->event_out, NULL);
+	}
 }
 
 void

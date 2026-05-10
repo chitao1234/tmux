@@ -758,10 +758,7 @@ int
 msgbuf_write(int fd, struct msgbuf *msgbuf)
 {
 #ifdef TMUX_WIN32
-	(void)fd;
-	(void)msgbuf;
-	errno = ENOSYS;
-	return (-1);
+	return (ibuf_write(fd, msgbuf));
 #else
 	struct iovec	 iov[IOV_MAX];
 	struct ibuf	*buf, *buf0 = NULL;
@@ -916,10 +913,7 @@ int
 msgbuf_read(int fd, struct msgbuf *msgbuf)
 {
 #ifdef TMUX_WIN32
-	(void)fd;
-	(void)msgbuf;
-	errno = ENOSYS;
-	return (-1);
+	return (ibuf_read(fd, msgbuf));
 #else
 	struct msghdr		 msg;
 	struct cmsghdr		*cmsg;

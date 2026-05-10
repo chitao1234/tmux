@@ -1682,6 +1682,9 @@ struct tty {
 	struct evbuffer	*out;
 	struct event	 timer;
 	size_t		 discarded;
+#ifdef TMUX_WIN32
+	struct win32_handle_event *win32_in;
+#endif
 
 	struct termios	 tio;
 	struct visible_ranges r;
@@ -2023,6 +2026,10 @@ struct client {
 	pid_t			 pid;
 	int			 fd;
 	int			 out_fd;
+#ifdef TMUX_WIN32
+	HANDLE			 win32_stdin;
+	HANDLE			 win32_stdout;
+#endif
 	struct event		 event;
 	int			 retval;
 
