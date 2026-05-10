@@ -19,13 +19,21 @@
 #ifndef TMUX_H
 #define TMUX_H
 
+#ifdef TMUX_WIN32
+#include "compat/win32-compat.h"
+#endif
+
 #include <sys/time.h>
+#ifndef TMUX_WIN32
 #include <sys/uio.h>
+#endif
 
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#ifndef TMUX_WIN32
 #include <termios.h>
+#endif
 #include <wchar.h>
 
 #ifdef HAVE_UTEMPTER
@@ -78,6 +86,10 @@ struct tty_key;
 struct tmuxpeer;
 struct tmuxproc;
 struct winlink;
+
+#ifdef TMUX_WIN32
+#include "win32-platform.h"
+#endif
 
 /* Default configuration files and socket paths. */
 #ifndef TMUX_CONF
@@ -1281,6 +1293,9 @@ struct window_pane {
 
 	int		 fd;
 	struct bufferevent *event;
+#ifdef TMUX_WIN32
+	struct win32_pane *win32;
+#endif
 
 	struct window_pane_offset offset;
 	size_t		 base_offset;

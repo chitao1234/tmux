@@ -17,14 +17,24 @@
 #ifndef COMPAT_H
 #define COMPAT_H
 
+#ifdef TMUX_WIN32
+#include "compat/win32-compat.h"
+#endif
+
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/ioctl.h>
 #include <sys/uio.h>
+#endif
 
+#ifndef TMUX_WIN32
 #include <fnmatch.h>
+#endif
 #include <limits.h>
 #include <stdio.h>
+#ifndef TMUX_WIN32
 #include <termios.h>
+#endif
 #include <wchar.h>
 
 #ifdef HAVE_EVENT2_EVENT_H
