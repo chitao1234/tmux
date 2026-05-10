@@ -441,6 +441,13 @@ window_pane_send_resize(struct window_pane *wp, u_int sx, u_int sy)
 	struct window	*w = wp->window;
 	struct winsize	 ws;
 
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL) {
+		win32_pane_resize(wp, sx, sy);
+		return;
+	}
+#endif
+
 	if (wp->fd == -1)
 		return;
 
@@ -1015,6 +1022,11 @@ window_pane_destroy(struct window_pane *wp)
 
 	window_pane_reset_mode_all(wp);
 	free(wp->searchstr);
+
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL)
+		win32_pane_close(wp);
+#endif
 
 	if (wp->fd != -1) {
 #ifdef HAVE_UTEMPTER

@@ -383,6 +383,21 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	}
 
 	/* Fork the new process. */
+#ifdef TMUX_WIN32
+	if (win32_pane_spawn(sc, new_wp, child, actual_cwd != NULL ?
+	    actual_cwd : new_wp->cwd, cause) != 0) {
+		new_wp->fd = -1;
+		if (~sc->flags & SPAWN_RESPAWN) {
+			server_client_remove_pane(new_wp);
+			layout_close_pane(new_wp);
+			window_remove_pane(w, new_wp);
+		}
+		sigprocmask(SIG_SETMASK, &oldset, NULL);
+		environ_free(child);
+		return (NULL);
+	}
+	goto complete;
+#else
 	new_wp->pid = fdforkpty(ptm_fd, &new_wp->fd, new_wp->tty, NULL, &ws);
 	if (new_wp->pid == -1) {
 		xasprintf(cause, "fork failed: %s", strerror(errno));
@@ -481,6 +496,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		xasprintf(&argv0, "-%s", new_wp->shell);
 	execl(new_wp->shell, argv0, (char *)NULL);
 	_exit(1);
+#endif
 
 complete:
 #ifdef HAVE_UTEMPTER
