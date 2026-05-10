@@ -81,6 +81,12 @@ if IS_CYGWIN
 AM_CPPFLAGS += -DTMUX_SOCK_PERM=0
 endif
 
+# Set flags for native Win32.
+if IS_WIN32
+AM_CPPFLAGS += -DTMUX_WIN32 -DWIN32_LEAN_AND_MEAN \
+	-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006
+endif
+
 # List of sources.
 dist_tmux_SOURCES = \
 	alerts.c \
@@ -219,6 +225,17 @@ dist_tmux_SOURCES = \
 	xmalloc.c \
 	xmalloc.h
 nodist_tmux_SOURCES = osdep-@PLATFORM@.c
+
+if IS_WIN32
+dist_tmux_SOURCES += \
+	win32-conpty.c \
+	win32-error.c \
+	win32-event.c \
+	win32-ipc.c \
+	win32-platform.h \
+	win32-proc.c \
+	win32-terminal.c
+endif
 
 # Add compat file for forkpty.
 if NEED_FORKPTY

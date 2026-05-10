@@ -589,60 +589,67 @@ fi
 # (_XOPEN_SOURCE and _XOPEN_SOURCE_EXTENDED) (see xopen_networking(7)). On
 # others, UNIX 03 (_XOPEN_SOURCE 600, see standards(7) on Solaris).
 XOPEN_DEFINES=
-AC_MSG_CHECKING(for CMSG_DATA)
-AC_EGREP_CPP(
-	yes,
-	[
-		#include <sys/socket.h>
-		#ifdef CMSG_DATA
-		yes
-		#endif
-	],
-	found_cmsg_data=yes,
-	found_cmsg_data=no
-)
-AC_MSG_RESULT($found_cmsg_data)
-if test "x$found_cmsg_data" = xno; then
-	AC_MSG_CHECKING(if CMSG_DATA needs _XOPEN_SOURCE_EXTENDED)
-	AC_EGREP_CPP(
-		yes,
-		[
-			#define _XOPEN_SOURCE 1
-			#define _XOPEN_SOURCE_EXTENDED 1
-			#include <sys/socket.h>
-			#ifdef CMSG_DATA
-			yes
-			#endif
-		],
-		found_cmsg_data=yes,
-		found_cmsg_data=no
-	)
-	AC_MSG_RESULT($found_cmsg_data)
-	if test "x$found_cmsg_data" = xyes; then
-		XOPEN_DEFINES="-D_XOPEN_SOURCE -D_XOPEN_SOURCE_EXTENDED"
-	fi
-fi
-if test "x$found_cmsg_data" = xno; then
-	AC_MSG_CHECKING(if CMSG_DATA needs _XOPEN_SOURCE 600)
-	AC_EGREP_CPP(
-		yes,
-		[
-			#define _XOPEN_SOURCE 600
-			#include <sys/socket.h>
-			#ifdef CMSG_DATA
-			yes
-			#endif
-		],
-		found_cmsg_data=yes,
-		found_cmsg_data=no
-	)
-	AC_MSG_RESULT($found_cmsg_data)
-	if test "x$found_cmsg_data" = xyes; then
-		XOPEN_DEFINES="-D_XOPEN_SOURCE=600"
-	else
-		AC_MSG_ERROR("CMSG_DATA not found")
-	fi
-fi
+case "$host_os" in
+	*mingw*)
+		found_cmsg_data=skipped
+		;;
+	*)
+		AC_MSG_CHECKING(for CMSG_DATA)
+		AC_EGREP_CPP(
+			yes,
+			[
+				#include <sys/socket.h>
+				#ifdef CMSG_DATA
+				yes
+				#endif
+			],
+			found_cmsg_data=yes,
+			found_cmsg_data=no
+		)
+		AC_MSG_RESULT($found_cmsg_data)
+		if test "x$found_cmsg_data" = xno; then
+			AC_MSG_CHECKING(if CMSG_DATA needs _XOPEN_SOURCE_EXTENDED)
+			AC_EGREP_CPP(
+				yes,
+				[
+					#define _XOPEN_SOURCE 1
+					#define _XOPEN_SOURCE_EXTENDED 1
+					#include <sys/socket.h>
+					#ifdef CMSG_DATA
+					yes
+					#endif
+				],
+				found_cmsg_data=yes,
+				found_cmsg_data=no
+			)
+			AC_MSG_RESULT($found_cmsg_data)
+			if test "x$found_cmsg_data" = xyes; then
+				XOPEN_DEFINES="-D_XOPEN_SOURCE -D_XOPEN_SOURCE_EXTENDED"
+			fi
+		fi
+		if test "x$found_cmsg_data" = xno; then
+			AC_MSG_CHECKING(if CMSG_DATA needs _XOPEN_SOURCE 600)
+			AC_EGREP_CPP(
+				yes,
+				[
+					#define _XOPEN_SOURCE 600
+					#include <sys/socket.h>
+					#ifdef CMSG_DATA
+					yes
+					#endif
+				],
+				found_cmsg_data=yes,
+				found_cmsg_data=no
+			)
+			AC_MSG_RESULT($found_cmsg_data)
+			if test "x$found_cmsg_data" = xyes; then
+				XOPEN_DEFINES="-D_XOPEN_SOURCE=600"
+			else
+				AC_MSG_ERROR("CMSG_DATA not found")
+			fi
+		fi
+		;;
+esac
 AC_SUBST(XOPEN_DEFINES)
 
 # Look for err and friends in err.h.
@@ -977,6 +984,13 @@ case "$host_os" in
 		AC_MSG_RESULT(hpux)
 		PLATFORM=hpux
 		;;
+	*mingw*)
+		AC_MSG_RESULT(win32)
+		PLATFORM=win32
+		AC_DEFINE(TMUX_WIN32)
+		AM_CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 $AM_CPPFLAGS"
+		CPPFLAGS="-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 $CPPFLAGS"
+		;;
 	*cygwin*|*msys*)
 		AC_MSG_RESULT(cygwin)
 		PLATFORM=cygwin
@@ -1002,6 +1016,7 @@ AM_CONDITIONAL(IS_SUNOS, test "x$PLATFORM" = xsunos)
 AM_CONDITIONAL(IS_HPUX, test "x$PLATFORM" = xhpux)
 AM_CONDITIONAL(IS_CYGWIN, test "x$PLATFORM" = xcygwin)
 AM_CONDITIONAL(IS_HAIKU, test "x$PLATFORM" = xhaiku)
+AM_CONDITIONAL(IS_WIN32, test "x$PLATFORM" = xwin32)
 AM_CONDITIONAL(IS_UNKNOWN, test "x$PLATFORM" = xunknown)
 
 # Set the default lock command
@@ -1012,9 +1027,26 @@ if test "x$PLATFORM" = xlinux; then
 		DEFAULT_LOCK_CMD="vlock"
 	fi
 fi
+if test "x$PLATFORM" = xwin32; then
+	DEFAULT_LOCK_CMD=""
+fi
 AC_MSG_CHECKING(lock-command)
 AC_MSG_RESULT($DEFAULT_LOCK_CMD)
 AC_SUBST(DEFAULT_LOCK_CMD)
+
+if test "x$PLATFORM" = xwin32; then
+	AC_CHECK_DECLS(
+		[CreatePseudoConsole, ResizePseudoConsole, ClosePseudoConsole,
+		 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE],
+		[],
+		[AC_MSG_ERROR([native Windows build requires ConPTY declarations])],
+		[[#define _WIN32_WINNT 0x0A00
+		  #define NTDDI_VERSION 0x0A000006
+		  #define WIN32_LEAN_AND_MEAN
+		  #include <windows.h>]]
+	)
+	LIBS="$LIBS -lkernel32 -luser32 -ladvapi32 -lws2_32"
+fi
 
 # Save our CFLAGS/CPPFLAGS/LDFLAGS for the Makefile and restore the old user
 # variables.
