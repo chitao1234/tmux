@@ -17,17 +17,23 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/ioctl.h>
 
 #include <netinet/in.h>
+#endif
 
 #include <curses.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifndef TMUX_WIN32
 #include <resolv.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
+#ifndef TMUX_WIN32
 #include <termios.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -92,15 +98,19 @@ tty_create_log(void)
 	xsnprintf(name, sizeof name, "tmux-out-%ld.log", (long)getpid());
 
 	tty_log_fd = open(name, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+#ifndef TMUX_WIN32
 	if (tty_log_fd != -1 && fcntl(tty_log_fd, F_SETFD, FD_CLOEXEC) == -1)
 		fatal("fcntl failed");
+#endif
 }
 
 int
 tty_init(struct tty *tty, struct client *c)
 {
+#ifndef TMUX_WIN32
 	if (!isatty(c->fd))
 		return (-1);
+#endif
 
 	memset(tty, 0, sizeof *tty);
 	tty->client = c;
@@ -109,8 +119,10 @@ tty_init(struct tty *tty, struct client *c)
 	tty->ccolour = -1;
 	tty->fg = tty->bg = -1;
 
+#ifndef TMUX_WIN32
 	if (tcgetattr(c->fd, &tty->tio) != 0)
 		return (-1);
+#endif
 	return (0);
 }
 
@@ -118,9 +130,24 @@ void
 tty_resize(struct tty *tty)
 {
 	struct client	*c = tty->client;
+#ifndef TMUX_WIN32
 	struct winsize	 ws;
+#endif
 	u_int		 sx, sy, xpixel, ypixel;
 
+#ifdef TMUX_WIN32
+	if (win32_terminal_get_size(c, &sx, &sy, &xpixel, &ypixel) == 0) {
+		log_debug("%s: %s now %ux%u (%ux%u)", __func__, c->name,
+		    sx, sy, xpixel, ypixel);
+		tty_set_size(tty, sx, sy, xpixel, ypixel);
+		tty_invalidate(tty);
+		return;
+	}
+	sx = 80;
+	sy = 24;
+	xpixel = 0;
+	ypixel = 0;
+#else
 	if (ioctl(c->fd, TIOCGWINSZ, &ws) != -1) {
 		sx = ws.ws_col;
 		if (sx == 0) {
@@ -148,6 +175,7 @@ tty_resize(struct tty *tty)
 		xpixel = 0;
 		ypixel = 0;
 	}
+#endif
 	log_debug("%s: %s now %ux%u (%ux%u)", __func__, c->name, sx, sy,
 	    xpixel, ypixel);
 	tty_set_size(tty, sx, sy, xpixel, ypixel);
@@ -331,11 +359,14 @@ void
 tty_start_tty(struct tty *tty)
 {
 	struct client	*c = tty->client;
+#ifndef TMUX_WIN32
 	struct termios	 tio;
+#endif
 
 	setblocking(c->fd, 0);
 	event_add(&tty->event_in, NULL);
 
+#ifndef TMUX_WIN32
 	memcpy(&tio, &tty->tio, sizeof tio);
 	tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
 	tio.c_iflag |= IGNBRK;
@@ -346,6 +377,7 @@ tty_start_tty(struct tty *tty)
 	tio.c_cc[VTIME] = 0;
 	if (tcsetattr(c->fd, TCSANOW, &tio) == 0)
 		tcflush(c->fd, TCOFLUSH);
+#endif
 
 	tty_putcode(tty, TTYC_SMCUP);
 
@@ -434,7 +466,11 @@ void
 tty_stop_tty(struct tty *tty)
 {
 	struct client	*c = tty->client;
+#ifndef TMUX_WIN32
 	struct winsize	 ws;
+#else
+	u_int		 sy;
+#endif
 
 	if (!(tty->flags & TTY_STARTED))
 		return;
@@ -454,12 +490,17 @@ tty_stop_tty(struct tty *tty)
 	 * because the fd is invalid. Things like ssh -t can easily leave us
 	 * with a dead tty.
 	 */
+#ifndef TMUX_WIN32
 	if (ioctl(c->fd, TIOCGWINSZ, &ws) == -1)
 		return;
 	if (tcsetattr(c->fd, TCSANOW, &tty->tio) == -1)
 		return;
 
 	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, ws.ws_row - 1));
+#else
+	sy = tty->sy == 0 ? 24 : tty->sy;
+	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, sy - 1));
+#endif
 	if (tty_acs_needed(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMACS));
 	tty_raw(tty, tty_term_string(tty->term, TTYC_SGR0));
@@ -494,6 +535,9 @@ tty_stop_tty(struct tty *tty)
 	if (tty->term->flags & TERM_VT100LIKE)
 		tty_raw(tty, "\033[?2031l");
 
+#ifdef TMUX_WIN32
+	win32_terminal_restore_client(c);
+#endif
 	setblocking(c->fd, 1);
 }
 

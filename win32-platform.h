@@ -48,7 +48,7 @@ int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
-int		 win32_terminal_init_client(struct client *, char **);
+int		 win32_terminal_init_client(char **);
 int		 win32_terminal_get_size(struct client *, u_int *, u_int *,
 		     u_int *, u_int *);
 void		 win32_terminal_restore_client(struct client *);

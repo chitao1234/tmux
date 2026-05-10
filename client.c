@@ -17,11 +17,13 @@
  */
 
 #include <sys/types.h>
+#ifndef TMUX_WIN32
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/file.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -303,8 +305,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	/* Save these before pledge(). */
 	if ((cwd = find_cwd()) == NULL && (cwd = find_home()) == NULL)
 		cwd = "/";
+#ifdef TMUX_WIN32
+	ttynam = "";
+#else
 	if ((ttynam = ttyname(STDIN_FILENO)) == NULL)
 		ttynam = "";
+#endif
 	if ((termname = getenv("TERM")) == NULL)
 		termname = "";
 
@@ -341,6 +347,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	environ_free(global_environ);
 
 	/* Set up control mode. */
+#ifndef TMUX_WIN32
 	if (client_flags & CLIENT_CONTROLCONTROL) {
 		if (tcgetattr(STDIN_FILENO, &saved_tio) != 0) {
 			fprintf(stderr, "tcgetattr failed: %s\n",
@@ -360,6 +367,15 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		cfsetospeed(&tio, cfgetospeed(&saved_tio));
 		tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 	}
+#else
+	if (!(client_flags & CLIENT_CONTROL)) {
+		if (win32_terminal_init_client(&cause) != 0) {
+			fprintf(stderr, "%s\n", cause);
+			free(cause);
+			return (1);
+		}
+	}
+#endif
 
 	/* Send identify messages. */
 	client_send_identify(ttynam, termname, caps, ncaps, cwd, feat);
@@ -402,8 +418,10 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 
 	/* Run command if user requested exec, instead of exiting. */
 	if (client_exittype == MSG_EXEC) {
+#ifndef TMUX_WIN32
 		if (client_flags & CLIENT_CONTROLCONTROL)
 			tcsetattr(STDOUT_FILENO, TCSAFLUSH, &saved_tio);
+#endif
 		client_exec(client_execshell, client_execcmd);
 	}
 
@@ -438,7 +456,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (client_flags & CLIENT_CONTROLCONTROL) {
 			printf("\033\\");
 			fflush(stdout);
+#ifndef TMUX_WIN32
 			tcsetattr(STDOUT_FILENO, TCSAFLUSH, &saved_tio);
+#endif
 		}
 	} else if (client_exitreason != CLIENT_EXIT_NONE)
 		fprintf(stderr, "%s\n", client_exit_message());
