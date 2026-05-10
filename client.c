@@ -37,6 +37,9 @@
 static struct tmuxproc	*client_proc;
 static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
+#ifdef TMUX_WIN32
+static int		 client_is_console;
+#endif
 static int		 client_suspended;
 static enum {
 	CLIENT_EXIT_NONE,
@@ -364,6 +367,10 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 	if ((termname = getenv("TERM")) == NULL)
 		termname = "";
+#ifdef TMUX_WIN32
+	(void)win32_terminal_prepare_terminfo();
+	client_is_console = win32_terminal_is_client_console();
+#endif
 
 	/*
 	 * Drop privileges for client. "proc exec" is needed for -c and for
@@ -380,10 +387,15 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		fatal("pledge failed");
 
 	/* Load terminfo entry if any. */
+#ifdef TMUX_WIN32
+	if (*termname != '\0' &&
+	    tty_term_read_list(termname, -1, &caps, &ncaps, &cause) != 0) {
+#else
 	if (isatty(STDIN_FILENO) &&
 	    *termname != '\0' &&
 	    tty_term_read_list(termname, STDIN_FILENO, &caps, &ncaps,
 	    &cause) != 0) {
+#endif
 		fprintf(stderr, "%s\n", cause);
 		free(cause);
 		return (1);
@@ -419,7 +431,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 	}
 #else
-	if (!(client_flags & CLIENT_CONTROL)) {
+	if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
 		if (win32_terminal_init_client(&cause) != 0) {
 			fprintf(stderr, "%s\n", cause);
 			free(cause);

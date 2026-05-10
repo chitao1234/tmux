@@ -23,6 +23,21 @@ static DWORD	saved_out_mode;
 static int	saved_modes;
 
 int
+win32_terminal_is_client_console(void)
+{
+	HANDLE	hin, hout;
+	DWORD	mode;
+
+	hin = GetStdHandle(STD_INPUT_HANDLE);
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (hin == INVALID_HANDLE_VALUE || hout == INVALID_HANDLE_VALUE)
+		return (0);
+	if (!GetConsoleMode(hin, &mode) || !GetConsoleMode(hout, &mode))
+		return (0);
+	return (1);
+}
+
+int
 win32_terminal_init_client(char **cause)
 {
 	HANDLE	hin, hout;

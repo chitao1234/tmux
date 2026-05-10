@@ -128,6 +128,83 @@ win32_getenv_utf8(const char *name)
 	return (out);
 }
 
+static int
+win32_path_is_dir(const char *path)
+{
+	wchar_t	*wpath;
+	DWORD	 attr;
+	int	 ok;
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL)
+		return (0);
+	attr = GetFileAttributesW(wpath);
+	ok = (attr != INVALID_FILE_ATTRIBUTES &&
+	    (attr & FILE_ATTRIBUTE_DIRECTORY));
+	free(wpath);
+	return (ok);
+}
+
+int
+win32_terminal_prepare_terminfo(void)
+{
+	const char	*terminfo, *terminfo_dirs;
+	const char	*paths[] = {
+		"\\..\\sysroot\\share\\terminfo",
+		"\\..\\share\\terminfo",
+		"\\share\\terminfo",
+		"C:\\msys64\\usr\\share\\terminfo",
+		"C:\\msys64\\ucrt64\\share\\terminfo",
+		NULL
+	};
+	wchar_t		 exe[MAX_PATH];
+	DWORD		 n;
+	char		*exe_utf8, *dir, *candidate;
+	size_t		 i;
+
+	terminfo = getenv("TERMINFO");
+	terminfo_dirs = getenv("TERMINFO_DIRS");
+	if ((terminfo != NULL && *terminfo != '\0') ||
+	    (terminfo_dirs != NULL && *terminfo_dirs != '\0'))
+		return (0);
+
+	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+	if (n == 0 || n == MAX_PATH)
+		return (-1);
+	exe_utf8 = win32_wide_to_utf8(exe);
+	if (exe_utf8 == NULL)
+		return (-1);
+	dir = xstrdup(exe_utf8);
+	free(exe_utf8);
+	if (dir == NULL)
+		return (-1);
+	if ((candidate = strrchr(dir, '\\')) != NULL)
+		*candidate = '\0';
+	else if ((candidate = strrchr(dir, '/')) != NULL)
+		*candidate = '\0';
+	else {
+		free(dir);
+		return (-1);
+	}
+
+	for (i = 0; paths[i] != NULL; i++) {
+		if (paths[i][1] == ':')
+			candidate = xstrdup(paths[i]);
+		else
+			xasprintf(&candidate, "%s%s", dir, paths[i]);
+		if (win32_path_is_dir(candidate)) {
+			setenv("TERMINFO", candidate, 1);
+			free(candidate);
+			free(dir);
+			return (0);
+		}
+		free(candidate);
+	}
+
+	free(dir);
+	return (-1);
+}
+
 static void
 win32_passwd_set(const char *name)
 {

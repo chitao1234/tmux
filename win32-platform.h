@@ -55,6 +55,8 @@ int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
+int		 win32_terminal_prepare_terminfo(void);
+int		 win32_terminal_is_client_console(void);
 int		 win32_terminal_init_client(char **);
 int		 win32_terminal_get_size(struct client *, u_int *, u_int *,
 		     u_int *, u_int *);
