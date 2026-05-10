@@ -12,6 +12,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -76,11 +77,98 @@ win32_ipc_errno(int error)
 		return (ECONNABORTED);
 	case WSAECONNREFUSED:
 		return (ECONNREFUSED);
+	case WSAECONNRESET:
+	case WSAENETRESET:
+		return (ECONNRESET);
+	case WSAENOTCONN:
+		return (ENOTCONN);
+	case WSAETIMEDOUT:
+		return (ETIMEDOUT);
 	case WSAEMFILE:
 		return (EMFILE);
 	default:
 		return (error);
 	}
+}
+
+static int
+win32_ipc_set_blocking(SOCKET fd, int state, char **cause)
+{
+	u_long	mode = state ? 0 : 1;
+
+	if (ioctlsocket(fd, FIONBIO, &mode) == SOCKET_ERROR) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't set IPC socket mode: %s",
+			    win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+win32_ipc_send_all(SOCKET fd, const void *buf, size_t len, const char *what,
+    char **cause)
+{
+	const char	*ptr = buf;
+	int		 n;
+
+	while (len != 0) {
+		n = send(fd, ptr, (int)(len > INT_MAX ? INT_MAX : len), 0);
+		if (n == SOCKET_ERROR) {
+			int error = WSAGetLastError();
+
+			if (cause != NULL) {
+				xasprintf(cause, "%s: %s", what,
+				    win32_strerror(error));
+			}
+			errno = win32_ipc_errno(error);
+			return (-1);
+		}
+		if (n == 0) {
+			if (cause != NULL)
+				xasprintf(cause, "%s: connection closed", what);
+			errno = EIO;
+			return (-1);
+		}
+		ptr += n;
+		len -= n;
+	}
+	return (0);
+}
+
+static int
+win32_ipc_recv_all(SOCKET fd, void *buf, size_t len, const char *what,
+    char **cause)
+{
+	char	*ptr = buf;
+	int	 n;
+
+	while (len != 0) {
+		n = recv(fd, ptr, (int)(len > INT_MAX ? INT_MAX : len), 0);
+		if (n == SOCKET_ERROR) {
+			int error = WSAGetLastError();
+
+			if (cause != NULL) {
+				xasprintf(cause, "%s: %s", what,
+				    win32_strerror(error));
+			}
+			errno = win32_ipc_errno(error);
+			return (-1);
+		}
+		if (n == 0) {
+			if (cause != NULL)
+				xasprintf(cause, "%s: connection closed", what);
+			errno = ECONNRESET;
+			return (-1);
+		}
+		ptr += n;
+		len -= n;
+	}
+	return (0);
 }
 
 static int
@@ -257,7 +345,7 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 	struct sockaddr_in	 sin;
 	uint16_t		 port;
 	uint32_t		 token, reply;
-	int			 n, saved_errno;
+	int			 saved_errno;
 
 	if (win32_ipc_read_port_file(path, &port, cause) != 0)
 		return (-1);
@@ -291,24 +379,25 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 	}
 
 	token = htonl(win32_ipc_hash(path));
-	n = send(fd, (const char *)&token, sizeof token, 0);
-	if (n != sizeof token) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't verify Win32 IPC token");
-		saved_errno = n == SOCKET_ERROR ?
-		    win32_ipc_errno(WSAGetLastError()) : EIO;
+	if (win32_ipc_send_all(fd, &token, sizeof token,
+	    "couldn't verify Win32 IPC token", cause) != 0) {
+		saved_errno = errno;
 		closesocket(fd);
 		errno = saved_errno;
 		return (-1);
 	}
-	n = recv(fd, (char *)&reply, sizeof reply, MSG_WAITALL);
-	if (n != sizeof reply || reply != token) {
-		if (cause != NULL)
-			xasprintf(cause, "Win32 IPC token mismatch");
-		saved_errno = n == SOCKET_ERROR ?
-		    win32_ipc_errno(WSAGetLastError()) : EACCES;
+	if (win32_ipc_recv_all(fd, &reply, sizeof reply,
+	    "couldn't read Win32 IPC token reply", cause) != 0) {
+		saved_errno = errno;
 		closesocket(fd);
 		errno = saved_errno;
+		return (-1);
+	}
+	if (reply != token) {
+		if (cause != NULL)
+			xasprintf(cause, "Win32 IPC token mismatch");
+		closesocket(fd);
+		errno = EACCES;
 		return (-1);
 	}
 	return (win32_ipc_save_socket(fd));
@@ -319,7 +408,7 @@ win32_ipc_server_accept(int fd, char **cause)
 {
 	SOCKET			 newfd;
 	struct sockaddr_storage	 ss;
-	int			 len = sizeof ss, n;
+	int			 len = sizeof ss, saved_errno;
 	uint32_t		 token, expected;
 
 	newfd = accept(win32_ipc_socket(fd), (struct sockaddr *)&ss, &len);
@@ -334,13 +423,18 @@ win32_ipc_server_accept(int fd, char **cause)
 		return (-1);
 	}
 
-	n = recv(newfd, (char *)&token, sizeof token, MSG_WAITALL);
-	if (n != sizeof token) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't read Win32 IPC token");
+	if (win32_ipc_set_blocking(newfd, 1, cause) != 0) {
+		saved_errno = errno;
 		closesocket(newfd);
-		errno = n == SOCKET_ERROR ?
-		    win32_ipc_errno(WSAGetLastError()) : EACCES;
+		errno = saved_errno;
+		return (-1);
+	}
+
+	if (win32_ipc_recv_all(newfd, &token, sizeof token,
+	    "couldn't read Win32 IPC token", cause) != 0) {
+		saved_errno = errno;
+		closesocket(newfd);
+		errno = saved_errno;
 		return (-1);
 	}
 	expected = htonl(socket_path == NULL ? token : win32_ipc_hash(socket_path));
@@ -351,13 +445,11 @@ win32_ipc_server_accept(int fd, char **cause)
 		errno = EACCES;
 		return (-1);
 	}
-	n = send(newfd, (const char *)&token, sizeof token, 0);
-	if (n != sizeof token) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't acknowledge Win32 IPC token");
+	if (win32_ipc_send_all(newfd, &token, sizeof token,
+	    "couldn't acknowledge Win32 IPC token", cause) != 0) {
+		saved_errno = errno;
 		closesocket(newfd);
-		errno = n == SOCKET_ERROR ?
-		    win32_ipc_errno(WSAGetLastError()) : EIO;
+		errno = saved_errno;
 		return (-1);
 	}
 	return (win32_ipc_save_socket(newfd));

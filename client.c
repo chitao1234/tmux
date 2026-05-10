@@ -108,7 +108,7 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 {
 #ifdef TMUX_WIN32
 	char	*cause = NULL;
-	int	 fd, i;
+	int	 fd, i, saved_errno;
 
 	fd = win32_ipc_client_connect(path, flags, &cause);
 	if (fd != -1) {
@@ -144,8 +144,8 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 			free(cause);
 			cause = NULL;
 		}
-		if (errno != ENOENT && errno != ECONNREFUSED &&
-		    errno != WSAECONNREFUSED)
+		saved_errno = errno;
+		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED)
 			return (-1);
 		Sleep(50);
 	}

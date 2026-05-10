@@ -391,6 +391,7 @@ server_accept(int fd, short events, __unused void *data)
 {
 #ifdef TMUX_WIN32
 	char			*cause = NULL;
+	int			 saved_errno;
 #else
 	struct sockaddr_storage	 sa;
 	socklen_t		 slen = sizeof sa;
@@ -406,14 +407,18 @@ server_accept(int fd, short events, __unused void *data)
 	(void)fd;
 	newfd = win32_ipc_server_accept(server_fd, &cause);
 	if (newfd == -1) {
+		saved_errno = errno;
 		log_debug("%s", cause != NULL ? cause : "accept failed");
 		free(cause);
-		if (errno == EAGAIN || errno == EINTR || errno == ECONNABORTED)
+		if (saved_errno == EAGAIN || saved_errno == EINTR ||
+		    saved_errno == ECONNABORTED || saved_errno == ECONNRESET ||
+		    saved_errno == EACCES)
 			return;
-		if (errno == ENFILE || errno == EMFILE) {
+		if (saved_errno == ENFILE || saved_errno == EMFILE) {
 			server_add_accept(1);
 			return;
 		}
+		errno = saved_errno;
 		fatal("accept failed");
 	}
 #else
