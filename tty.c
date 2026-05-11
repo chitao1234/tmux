@@ -2283,6 +2283,9 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 		if (!ctx->wrapped ||
 		    !tty_full_width(tty, ctx) ||
 		    (tty->term->flags & TERM_NOAM) ||
+#ifdef TMUX_WIN32
+		    tty->client->win32_console ||
+#endif
 		    ctx->xoff + ctx->ocx != 0 ||
 		    ctx->yoff + ctx->ocy != tty->cy + 1 ||
 		    tty->cx < tty->sx ||
@@ -2586,6 +2589,9 @@ tty_cursor_pane_unless_wrap(struct tty *tty, const struct tty_ctx *ctx,
 	if (!ctx->wrapped ||
 	    !tty_full_width(tty, ctx) ||
 	    (tty->term->flags & TERM_NOAM) ||
+#ifdef TMUX_WIN32
+	    tty->client->win32_console ||
+#endif
 	    ctx->xoff + cx != 0 ||
 	    ctx->yoff + cy != tty->cy + 1 ||
 	    tty->cx < tty->sx ||
