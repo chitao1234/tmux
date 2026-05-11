@@ -67,6 +67,87 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
 }
 
 static wchar_t *
+win32_quote_argument(const char *arg)
+{
+	const char	*src;
+	char	*out, *dst;
+	size_t	 len, bs;
+	int	 quote;
+	wchar_t	*wout;
+
+	quote = (*arg == '\0' || strpbrk(arg, " \t\n\v\"") != NULL);
+	if (!quote)
+		return (win32_utf8_to_wide(arg));
+
+	len = 3;
+	for (src = arg; *src != '\0'; src++) {
+		if (*src == '\\' || *src == '"')
+			len += 2;
+		else
+			len++;
+	}
+	out = xmalloc(len);
+	dst = out;
+	*dst++ = '"';
+	for (;;) {
+		bs = 0;
+		while (*arg == '\\') {
+			bs++;
+			arg++;
+		}
+		if (*arg == '\0') {
+			while (bs-- != 0) {
+				*dst++ = '\\';
+				*dst++ = '\\';
+			}
+			break;
+		}
+		if (*arg == '"') {
+			while (bs-- != 0) {
+				*dst++ = '\\';
+				*dst++ = '\\';
+			}
+			*dst++ = '\\';
+			*dst++ = *arg++;
+			continue;
+		}
+		while (bs-- != 0)
+			*dst++ = '\\';
+		*dst++ = *arg++;
+	}
+	*dst++ = '"';
+	*dst = '\0';
+
+	wout = win32_utf8_to_wide(out);
+	free(out);
+	return (wout);
+}
+
+static wchar_t *
+win32_build_argv_command(int argc, char **argv)
+{
+	wchar_t	*line = NULL, *quoted;
+	size_t	 used = 0, len = 1, qlen;
+	int	 i;
+
+	line = xcalloc(len, sizeof *line);
+	for (i = 0; i < argc; i++) {
+		quoted = win32_quote_argument(argv[i]);
+		if (quoted == NULL)
+			continue;
+		qlen = wcslen(quoted);
+		len = used + qlen + 2;
+		line = xreallocarray(line, len, sizeof *line);
+		if (used != 0)
+			line[used++] = L' ';
+		memcpy(line + used, quoted, (qlen + 1) * sizeof *line);
+		used += qlen;
+		free(quoted);
+	}
+	return (line);
+}
+
+static wchar_t *
 win32_build_environment(struct environ *env)
 {
 	struct environ_entry	*envent;
@@ -118,7 +199,7 @@ win32_build_job_command(const char *cmd, int argc, char **argv)
 	if (cmd != NULL)
 		xasprintf(&line, "%s", cmd);
 	else
-		line = cmd_stringify_argv(argc, argv);
+		return (win32_build_argv_command(argc, argv));
 	wline = win32_utf8_to_wide(line);
 	free(line);
 	return (wline);
@@ -137,6 +218,8 @@ win32_build_command(struct window_pane *wp)
 	if (wp->argc == 1) {
 		cmd = wp->argv[0];
 		xasprintf(&line, "\"%s\" /d /s /c \"%s\"", shell, cmd);
+	} else if (wp->argc > 1) {
+		return (win32_build_argv_command(wp->argc, wp->argv));
 	} else
 		xasprintf(&line, "\"%s\"", shell);
 	wline = win32_utf8_to_wide(line);
