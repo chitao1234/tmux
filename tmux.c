@@ -44,6 +44,9 @@ int		 ptm_fd = -1;
 const char	*shell_command;
 
 static __dead void	 usage(int);
+#ifdef TMUX_WIN32
+static int		 win32_get_argv(int *, char ***);
+#endif
 static char		*make_label(const char *, char **);
 
 static int		 areshell(const char *);
@@ -58,6 +61,57 @@ usage(int status)
 	    getprogname());
 	exit(status);
 }
+
+#ifdef TMUX_WIN32
+static int
+win32_get_argv(int *argcp, char ***argvp)
+{
+	typedef LPWSTR *(WINAPI *command_line_to_argv)(LPCWSTR, int *);
+
+	HMODULE			 shell32;
+	union {
+		FARPROC			 proc;
+		command_line_to_argv	 to_argv;
+	}			 cast;
+	wchar_t		       **wargv;
+	char		       **argv;
+	int			 argc, i;
+
+	shell32 = LoadLibraryW(L"shell32.dll");
+	if (shell32 == NULL)
+		return (-1);
+	cast.proc = GetProcAddress(shell32, "CommandLineToArgvW");
+	if (cast.proc == NULL) {
+		FreeLibrary(shell32);
+		return (-1);
+	}
+
+	wargv = cast.to_argv(GetCommandLineW(), &argc);
+	if (wargv == NULL) {
+		FreeLibrary(shell32);
+		return (-1);
+	}
+
+	argv = xcalloc(argc + 1, sizeof *argv);
+	for (i = 0; i < argc; i++) {
+		argv[i] = win32_wide_to_utf8(wargv[i]);
+		if (argv[i] == NULL) {
+			while (i-- > 0)
+				free(argv[i]);
+			free(argv);
+			LocalFree(wargv);
+			FreeLibrary(shell32);
+			return (-1);
+		}
+	}
+	LocalFree(wargv);
+	FreeLibrary(shell32);
+
+	*argcp = argc;
+	*argvp = argv;
+	return (0);
+}
+#endif
 
 static const char *
 getshell(void)
@@ -419,6 +473,8 @@ main(int argc, char **argv)
 	tzset();
 
 #ifdef TMUX_WIN32
+	if (win32_get_argv(&argc, &argv) != 0)
+		errx(1, "couldn't decode Windows command line");
 	win32_refresh_environ();
 #endif
 
