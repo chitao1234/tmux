@@ -87,6 +87,9 @@ static void	tty_write_one(void (*)(struct tty *, const struct tty_ctx *),
 #define TTY_BLOCK_INTERVAL (100000 /* 100 milliseconds */)
 #define TTY_BLOCK_START(tty) (1 + ((tty)->sx * (tty)->sy) * 8)
 #define TTY_BLOCK_STOP(tty) (1 + ((tty)->sx * (tty)->sy) / 8)
+#ifdef TMUX_WIN32
+#define TTY_WIN32_OUT_PENDING_LIMIT (256 * 1024)
+#endif
 
 #define TTY_QUERY_TIMEOUT 5
 #define TTY_REQUEST_LIMIT 30
@@ -297,13 +300,22 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		size_t	left = size, nsend;
 		u_char	*buf = EVBUFFER_DATA(tty->out);
 
+		if (c->win32_tty_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
+			return;
 		while (left != 0) {
 			nsend = left;
 			if (nsend > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
 				nsend = MAX_IMSGSIZE - IMSG_HEADER_SIZE;
+			if (c->win32_tty_out_pending + nsend >
+			    TTY_WIN32_OUT_PENDING_LIMIT)
+				nsend = TTY_WIN32_OUT_PENDING_LIMIT -
+				    c->win32_tty_out_pending;
+			if (nsend == 0)
+				break;
 			if (proc_send(c->peer, MSG_WIN32_TTY_OUTPUT, -1, buf,
 			    nsend) != 0)
 				return;
+			c->win32_tty_out_pending += nsend;
 			buf += nsend;
 			left -= nsend;
 		}
@@ -329,6 +341,13 @@ write_done:
 	log_debug("%s: wrote %d bytes (of %zu)", c->name, nwrite, size);
 
 	if (c->redraw > 0) {
+#ifdef TMUX_WIN32
+		if (c->win32_console) {
+			log_debug("%s: waiting for redraw, %zu bytes left",
+			    c->name, c->redraw);
+			goto after_redraw;
+		}
+#endif
 		if ((size_t)nwrite >= c->redraw)
 			c->redraw = 0;
 		else
@@ -338,6 +357,9 @@ write_done:
 	} else if (tty_block_maybe(tty))
 		return;
 
+#ifdef TMUX_WIN32
+after_redraw:
+#endif
 	if (EVBUFFER_LENGTH(tty->out) != 0) {
 #ifdef TMUX_WIN32
 		if (c->win32_console) {
@@ -351,6 +373,23 @@ write_done:
 #endif
 		event_add(&tty->event_out, NULL);
 	}
+}
+
+void
+tty_write_pending(struct tty *tty)
+{
+	struct client	*c = tty->client;
+
+	if (~tty->flags & TTY_STARTED)
+		return;
+#ifdef TMUX_WIN32
+	if (c->win32_console || c->win32_stdout != NULL) {
+		tty_write_callback(-1, EV_WRITE, tty);
+		return;
+	}
+#endif
+	if (!event_pending(&tty->event_out, EV_WRITE, NULL))
+		event_add(&tty->event_out, NULL);
 }
 
 #ifdef TMUX_WIN32
@@ -733,10 +772,12 @@ tty_raw(struct tty *tty, const char *s)
 	slen = strlen(s);
 	for (i = 0; i < 5; i++) {
 #ifdef TMUX_WIN32
-		if (c->win32_console)
+		if (c->win32_console) {
 			n = proc_send(c->peer, MSG_WIN32_TTY_OUTPUT, -1, s,
 			    slen) == 0 ? slen : -1;
-		else if (c->win32_stdout != NULL)
+			if (n >= 0)
+				c->win32_tty_out_pending += n;
+		} else if (c->win32_stdout != NULL)
 			n = win32_handle_write(c->win32_stdout, s, slen);
 		else
 #endif

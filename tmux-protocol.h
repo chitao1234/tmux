@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 10
+#define PROTOCOL_VERSION 11
 
 /* Message types. */
 enum msgtype {
@@ -64,6 +64,7 @@ enum msgtype {
 	MSG_FLAGS,
 	MSG_WIN32_TTY_INPUT,
 	MSG_WIN32_TTY_OUTPUT,
+	MSG_WIN32_TTY_OUTPUT_ACK,
 	MSG_WIN32_TTY_RESIZE,
 
 	MSG_READ_OPEN = 300,
@@ -95,6 +96,10 @@ struct msg_win32_terminal_size {
 	uint32_t	sy;
 	uint32_t	xpixel;
 	uint32_t	ypixel;
+};
+
+struct msg_win32_tty_output_ack {
+	uint32_t	size;
 };
 
 struct msg_read_open {

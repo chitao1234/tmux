@@ -438,8 +438,21 @@ client_win32_input_stop(void)
 static void
 client_win32_tty_output(char *data, ssize_t datalen)
 {
-	if (!client_console_ready)
+	struct msg_win32_tty_output_ack ack;
+
+	if (datalen < 0 || datalen > UINT32_MAX) {
+		client_exitreason = CLIENT_EXIT_LOST_TTY;
+		client_exitval = 1;
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 		return;
+	}
+	ack.size = datalen;
+
+	if (!client_console_ready) {
+		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
+		    sizeof ack);
+		return;
+	}
 	if (datalen != 0 &&
 	    win32_handle_write(GetStdHandle(STD_OUTPUT_HANDLE), data,
 	    datalen) == -1) {
@@ -447,7 +460,10 @@ client_win32_tty_output(char *data, ssize_t datalen)
 		client_exitreason = CLIENT_EXIT_LOST_TTY;
 		client_exitval = 1;
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+		return;
 	}
+	proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
+	    sizeof ack);
 }
 
 static void

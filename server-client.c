@@ -54,6 +54,8 @@ static int	server_client_dispatch_identify(struct client *, struct imsg *);
 static int	server_client_dispatch_shell(struct client *);
 static void	server_client_report_theme(struct client *, enum client_theme);
 #ifdef TMUX_WIN32
+static int	server_client_win32_tty_output_ack(struct client *,
+		    struct imsg *);
 static int	server_client_win32_resize(struct client *, struct imsg *);
 static int	server_client_win32_tty_input(struct client *, struct imsg *);
 #endif
@@ -1990,7 +1992,7 @@ server_client_check_redraw(struct client *c)
 	static struct event	 ev;
 	size_t			 left;
 #ifdef TMUX_WIN32
-	size_t			 pending;
+	size_t			 pending, win32_pending;
 #endif
 
 	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
@@ -2039,6 +2041,18 @@ server_client_check_redraw(struct client *c)
 		return;
 	}
 #ifdef TMUX_WIN32
+	if (needed && c->win32_tty_out_pending != 0) {
+		log_debug("%s: redraw deferred (%zu Win32 output bytes)",
+		    c->name, c->win32_tty_out_pending);
+		if (!evtimer_initialized(&ev))
+			evtimer_set(&ev, server_client_redraw_timer, NULL);
+		if (!evtimer_pending(&ev, NULL)) {
+			log_debug("redraw timer started");
+			evtimer_add(&ev, &tv);
+		}
+		server_client_defer_redraw(c, w, client_flags);
+		return;
+	}
 	if (needed) {
 		TAILQ_FOREACH(wp, &w->panes, entry) {
 			if (wp->win32 == NULL)
@@ -2075,6 +2089,9 @@ server_client_check_redraw(struct client *c)
 	if (needed)
 		log_debug("%s: redraw needed", c->name);
 
+#ifdef TMUX_WIN32
+	win32_pending = c->win32_tty_out_pending;
+#endif
 	tty_flags = tty->flags & (TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR);
 	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE))|TTY_NOCURSOR;
 
@@ -2135,6 +2152,10 @@ server_client_check_redraw(struct client *c)
 		 * generated.
 		 */
 		c->redraw = EVBUFFER_LENGTH(tty->out);
+#ifdef TMUX_WIN32
+		if (c->win32_tty_out_pending > win32_pending)
+			c->redraw += c->win32_tty_out_pending - win32_pending;
+#endif
 		log_debug("%s: redraw added %zu bytes", c->name, c->redraw);
 	}
 }
@@ -2302,6 +2323,10 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 #ifdef TMUX_WIN32
 	case MSG_WIN32_TTY_INPUT:
 		if (server_client_win32_tty_input(c, imsg) != 0)
+			goto bad;
+		break;
+	case MSG_WIN32_TTY_OUTPUT_ACK:
+		if (server_client_win32_tty_output_ack(c, imsg) != 0)
 			goto bad;
 		break;
 	case MSG_WIN32_TTY_RESIZE:
@@ -2499,6 +2524,43 @@ server_client_win32_tty_input(struct client *c, struct imsg *imsg)
 	log_debug("%s: %s read %zd bytes", __func__, c->name, datalen);
 	while (tty_keys_next(tty))
 		;
+	return (0);
+}
+
+static int
+server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
+{
+	struct msg_win32_tty_output_ack ack;
+	size_t			       size;
+	ssize_t			       datalen;
+
+	if (!c->win32_console)
+		return (-1);
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen != sizeof ack)
+		return (-1);
+	memcpy(&ack, imsg->data, sizeof ack);
+	size = ack.size;
+	if (size > c->win32_tty_out_pending)
+		return (-1);
+
+	c->win32_tty_out_pending -= size;
+	if (c->redraw > 0) {
+		if (size >= c->redraw)
+			c->redraw = 0;
+		else
+			c->redraw -= size;
+		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
+		    c->redraw);
+	}
+	log_debug("%s: Win32 output ack %zu bytes, %zu pending", c->name,
+	    size, c->win32_tty_out_pending);
+
+	if ((c->flags & CLIENT_TERMINAL) &&
+	    (c->tty.flags & TTY_OPENED) &&
+	    EVBUFFER_LENGTH(c->tty.out) != 0)
+		tty_write_pending(&c->tty);
 	return (0);
 }
 

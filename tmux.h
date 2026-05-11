@@ -2041,6 +2041,7 @@ struct client {
 	HANDLE			 win32_stdin;
 	HANDLE			 win32_stdout;
 	int			 win32_console;
+	size_t			 win32_tty_out_pending;
 #endif
 	struct event		 event;
 	int			 retval;
@@ -2728,6 +2729,7 @@ void	tty_close(struct tty *);
 void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
+void	tty_write_pending(struct tty *);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
 void	tty_cmd_alignmenttest(struct tty *, const struct tty_ctx *);
