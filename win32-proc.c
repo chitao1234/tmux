@@ -75,7 +75,7 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	memset(&pi, 0, sizeof pi);
 	si.cb = sizeof si;
 	ok = CreateProcessW(exe, cmd, NULL, NULL, FALSE,
-	    CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
+	    CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS, NULL, NULL, &si, &pi);
 	free(cmd);
 	if (!ok) {
 		xasprintf(cause, "CreateProcess server failed: %s",
