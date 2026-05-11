@@ -62,7 +62,7 @@ int		 win32_terminal_is_client_console(void);
 int		 win32_terminal_init_client(char **);
 int		 win32_terminal_get_size(struct client *, u_int *, u_int *,
 		     u_int *, u_int *);
-void		 win32_terminal_restore_client(struct client *);
+void		 win32_terminal_restore_client(void);
 void		 win32_terminal_check_resize(struct client *);
 
 int		 win32_pane_spawn(struct spawn_context *, struct window_pane *,

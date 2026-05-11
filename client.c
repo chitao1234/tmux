@@ -39,6 +39,7 @@ static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
+static int		 client_console_ready;
 #else
 static int		 client_suspended;
 #endif
@@ -69,6 +70,9 @@ static int		 client_get_lock(char *);
 #endif
 static int		 client_connect(struct event_base *, const char *,
 			     uint64_t);
+#ifdef TMUX_WIN32
+static void		 client_restore_terminal(void);
+#endif
 static void		 client_send_identify(const char *, const char *,
 			     char **, u_int, const char *, int);
 static void		 client_signal(int);
@@ -284,6 +288,17 @@ client_exit(void)
 		proc_exit(client_proc);
 }
 
+#ifdef TMUX_WIN32
+static void
+client_restore_terminal(void)
+{
+	if (client_console_ready) {
+		win32_terminal_restore_client();
+		client_console_ready = 0;
+	}
+}
+#endif
+
 /* Client main loop. */
 int
 client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
@@ -442,6 +457,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			free(cause);
 			return (1);
 		}
+		client_console_ready = 1;
 	}
 #endif
 
@@ -457,6 +473,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		for (i = 0; i < argc; i++)
 			size += strlen(argv[i]) + 1;
 		if (size > MAX_IMSGSIZE - (sizeof *data)) {
+#ifdef TMUX_WIN32
+			client_restore_terminal();
+#endif
 			fprintf(stderr, "command too long\n");
 			return (1);
 		}
@@ -465,6 +484,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		/* Prepare command for server. */
 		data->argc = argc;
 		if (cmd_pack_argv(argc, argv, (char *)(data + 1), size) != 0) {
+#ifdef TMUX_WIN32
+			client_restore_terminal();
+#endif
 			fprintf(stderr, "command too long\n");
 			free(data);
 			return (1);
@@ -473,6 +495,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 
 		/* Send the command. */
 		if (proc_send(client_peer, msg, -1, data, size) != 0) {
+#ifdef TMUX_WIN32
+			client_restore_terminal();
+#endif
 			fprintf(stderr, "failed to send command\n");
 			free(data);
 			return (1);
@@ -492,6 +517,10 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 		client_exec(client_execshell, client_execcmd);
 	}
+
+#ifdef TMUX_WIN32
+	client_restore_terminal();
+#endif
 
 	/* Restore streams to blocking. */
 	setblocking(STDIN_FILENO, 1);
@@ -612,6 +641,10 @@ client_exec(const char *shell, const char *shellcmd)
 	setenv("SHELL", shell, 1);
 
 	proc_clear_signals(client_proc, 1);
+
+#ifdef TMUX_WIN32
+	client_restore_terminal();
+#endif
 
 	setblocking(STDIN_FILENO, 1);
 	setblocking(STDOUT_FILENO, 1);

@@ -623,7 +623,6 @@ tty_stop_tty(struct tty *tty)
 		tty_raw(tty, "\033[?2031l");
 
 #ifdef TMUX_WIN32
-	win32_terminal_restore_client(c);
 	if (c->win32_stdin == NULL)
 		setblocking(c->fd, 1);
 #else

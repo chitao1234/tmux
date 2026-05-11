@@ -20,6 +20,8 @@
 
 static DWORD	saved_in_mode;
 static DWORD	saved_out_mode;
+static UINT	saved_input_cp;
+static UINT	saved_output_cp;
 static int	saved_modes;
 
 int
@@ -55,24 +57,52 @@ win32_terminal_init_client(char **cause)
 		xasprintf(cause, "not a Windows console");
 		return (-1);
 	}
+	saved_input_cp = GetConsoleCP();
+	saved_output_cp = GetConsoleOutputCP();
 	saved_modes = 1;
 
 	mode = saved_in_mode;
 	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-	mode &= ~(ENABLE_ECHO_INPUT|ENABLE_LINE_INPUT);
-	SetConsoleMode(hin, mode);
+	mode &= ~(ENABLE_ECHO_INPUT|ENABLE_LINE_INPUT|ENABLE_PROCESSED_INPUT);
+	if (!SetConsoleMode(hin, mode)) {
+		xasprintf(cause, "couldn't set console input mode: %s",
+		    win32_strerror(GetLastError()));
+		goto fail;
+	}
 
 	mode = saved_out_mode;
 	mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 #ifdef DISABLE_NEWLINE_AUTO_RETURN
 	mode |= DISABLE_NEWLINE_AUTO_RETURN;
 #endif
-	SetConsoleMode(hout, mode);
+	if (!SetConsoleMode(hout, mode)) {
+#ifdef DISABLE_NEWLINE_AUTO_RETURN
+		mode &= ~DISABLE_NEWLINE_AUTO_RETURN;
+		if (!SetConsoleMode(hout, mode))
+#endif
+		{
+			xasprintf(cause, "couldn't set console output mode: %s",
+			    win32_strerror(GetLastError()));
+			goto fail;
+		}
+	}
+	SetConsoleCP(CP_UTF8);
+	SetConsoleOutputCP(CP_UTF8);
 	return (0);
+
+fail:
+	SetConsoleMode(hin, saved_in_mode);
+	SetConsoleMode(hout, saved_out_mode);
+	if (saved_input_cp != 0)
+		SetConsoleCP(saved_input_cp);
+	if (saved_output_cp != 0)
+		SetConsoleOutputCP(saved_output_cp);
+	saved_modes = 0;
+	return (-1);
 }
 
 void
-win32_terminal_restore_client(__unused struct client *c)
+win32_terminal_restore_client(void)
 {
 	HANDLE	hin, hout;
 
@@ -84,6 +114,11 @@ win32_terminal_restore_client(__unused struct client *c)
 		SetConsoleMode(hin, saved_in_mode);
 	if (hout != INVALID_HANDLE_VALUE)
 		SetConsoleMode(hout, saved_out_mode);
+	if (saved_input_cp != 0)
+		SetConsoleCP(saved_input_cp);
+	if (saved_output_cp != 0)
+		SetConsoleOutputCP(saved_output_cp);
+	saved_modes = 0;
 }
 
 int
