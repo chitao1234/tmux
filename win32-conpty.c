@@ -67,6 +67,49 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
 }
 
 static wchar_t *
+win32_build_environment(struct environ *env)
+{
+	struct environ_entry	*envent;
+	size_t			 len, total = 1, used = 0;
+	char			*entry;
+	wchar_t			*wentry, *block;
+
+	if (env == NULL)
+		return (NULL);
+	for (envent = environ_first(env); envent != NULL;
+	    envent = environ_next(envent)) {
+		if (envent->value == NULL || *envent->name == '\0' ||
+		    (envent->flags & ENVIRON_HIDDEN))
+			continue;
+		xasprintf(&entry, "%s=%s", envent->name, envent->value);
+		wentry = win32_utf8_to_wide(entry);
+		free(entry);
+		if (wentry == NULL)
+			continue;
+		total += wcslen(wentry) + 1;
+		free(wentry);
+	}
+
+	block = xcalloc(total, sizeof *block);
+	for (envent = environ_first(env); envent != NULL;
+	    envent = environ_next(envent)) {
+		if (envent->value == NULL || *envent->name == '\0' ||
+		    (envent->flags & ENVIRON_HIDDEN))
+			continue;
+		xasprintf(&entry, "%s=%s", envent->name, envent->value);
+		wentry = win32_utf8_to_wide(entry);
+		free(entry);
+		if (wentry == NULL)
+			continue;
+		len = wcslen(wentry) + 1;
+		memcpy(block + used, wentry, len * sizeof *block);
+		used += len;
+		free(wentry);
+	}
+	return (block);
+}
+
+static wchar_t *
 win32_build_job_command(const char *cmd, int argc, char **argv)
 {
 	char	*line = NULL;
@@ -137,14 +180,14 @@ win32_pane_error_cb(void *arg)
 
 int
 win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
-    __unused struct environ *env, const char *cwd, char **cause)
+    struct environ *env, const char *cwd, char **cause)
 {
 	struct win32_pane	*pw;
 	STARTUPINFOEXW		 si;
 	PROCESS_INFORMATION	 pi;
 	SIZE_T			 attr_size = 0;
 	COORD			 size;
-	wchar_t			*wcmd = NULL, *wcwd = NULL;
+	wchar_t			*wcmd = NULL, *wcwd = NULL, *wenv = NULL;
 	HRESULT			 hr;
 	BOOL			 ok;
 
@@ -191,9 +234,11 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 
 	wcmd = win32_build_command(wp);
 	wcwd = win32_utf8_to_wide(cwd);
+	wenv = win32_build_environment(env);
 	memset(&pi, 0, sizeof pi);
 	ok = CreateProcessW(NULL, wcmd, NULL, NULL, FALSE,
-	    EXTENDED_STARTUPINFO_PRESENT, NULL, wcwd, &si.StartupInfo, &pi);
+	    EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT,
+	    wenv, wcwd, &si.StartupInfo, &pi);
 	if (!ok) {
 		xasprintf(cause, "CreateProcess failed: %s",
 		    win32_strerror(GetLastError()));
@@ -220,6 +265,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	free(si.lpAttributeList);
 	free(wcmd);
 	free(wcwd);
+	free(wenv);
 	(void)sc;
 	return (0);
 
@@ -230,6 +276,7 @@ fail:
 	}
 	free(wcmd);
 	free(wcwd);
+	free(wenv);
 	if (pw != NULL) {
 		if (wp->win32 == pw)
 			wp->win32 = NULL;
@@ -359,13 +406,13 @@ win32_job_error_cb(void *arg)
 
 struct win32_job *
 win32_job_spawn(const char *cmd, int argc, char **argv,
-    __unused struct environ *env, __unused struct session *s, const char *cwd,
+    struct environ *env, __unused struct session *s, const char *cwd,
     int flags, __unused int sx, __unused int sy, char **cause)
 {
 	struct win32_job		*wj;
 	STARTUPINFOW		 si;
 	PROCESS_INFORMATION	 pi;
-	wchar_t			*wcmd = NULL, *wcwd = NULL;
+	wchar_t			*wcmd = NULL, *wcwd = NULL, *wenv = NULL;
 	BOOL			 ok;
 
 	if (flags & JOB_PTY) {
@@ -399,8 +446,9 @@ win32_job_spawn(const char *cmd, int argc, char **argv,
 	wcmd = win32_build_job_command(cmd, argc, argv);
 	if (cwd != NULL)
 		wcwd = win32_utf8_to_wide(cwd);
-	ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, wcwd, &si,
-	    &pi);
+	wenv = win32_build_environment(env);
+	ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
+	    CREATE_UNICODE_ENVIRONMENT, wenv, wcwd, &si, &pi);
 	if (!ok) {
 		if (cause != NULL) {
 			xasprintf(cause, "CreateProcess job failed: %s",
@@ -428,11 +476,13 @@ win32_job_spawn(const char *cmd, int argc, char **argv,
 
 	free(wcmd);
 	free(wcwd);
+	free(wenv);
 	return (wj);
 
 fail:
 	free(wcmd);
 	free(wcwd);
+	free(wenv);
 	if (wj != NULL) {
 		if (wj->output_event != NULL)
 			win32_handle_event_free(wj->output_event);
