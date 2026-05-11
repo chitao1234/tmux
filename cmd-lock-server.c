@@ -64,10 +64,6 @@ const struct cmd_entry cmd_lock_client_entry = {
 static enum cmd_retval
 cmd_lock_server_exec(struct cmd *self, struct cmdq_item *item)
 {
-#ifdef TMUX_WIN32
-	cmdq_error(item, "lock-client is not supported in the native Windows MVP");
-	return (CMD_RETURN_ERROR);
-#endif
 	struct cmd_find_state	*target = cmdq_get_target(item);
 	struct client		*tc = cmdq_get_target_client(item);
 

@@ -914,15 +914,8 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			fatalx("bad MSG_LOCK string");
 
-#ifdef TMUX_WIN32
-		client_exitreason = CLIENT_EXIT_MESSAGE_PROVIDED;
-		client_exitmessage = xstrdup(
-		    "lock-client is not supported in the native Windows MVP");
-		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
-#else
 		system(data);
 		proc_send(client_peer, MSG_UNLOCK, -1, NULL, 0);
-#endif
 		break;
 	}
 }
