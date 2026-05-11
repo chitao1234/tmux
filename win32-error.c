@@ -26,7 +26,24 @@ static struct passwd win32_passwd;
 static char    *win32_passwd_name;
 static char    *win32_passwd_dir;
 static char    *win32_passwd_shell;
+static LONG	win32_ctrl_c_events;
 char	      **environ;
+
+static BOOL WINAPI
+win32_console_ctrl_handler(DWORD type)
+{
+	if (type == CTRL_C_EVENT) {
+		InterlockedIncrement(&win32_ctrl_c_events);
+		return (TRUE);
+	}
+	return (FALSE);
+}
+
+long
+win32_console_ctrl_c_events(void)
+{
+	return (InterlockedExchange(&win32_ctrl_c_events, 0));
+}
 
 void
 win32_refresh_environ(void)
@@ -371,12 +388,14 @@ win32_init(void)
 
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
 		return (-1);
+	SetConsoleCtrlHandler(win32_console_ctrl_handler, TRUE);
 	return (0);
 }
 
 void
 win32_fini(void)
 {
+	SetConsoleCtrlHandler(win32_console_ctrl_handler, FALSE);
 	WSACleanup();
 }
 

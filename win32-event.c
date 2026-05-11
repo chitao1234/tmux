@@ -145,6 +145,7 @@ win32_handle_event_thread(void *arg)
 	struct win32_handle_event	*whe = arg;
 	char				 buf[8192], one = 1;
 	DWORD				 nread;
+	u_int				 i;
 
 	for (;;) {
 		if (WaitForSingleObject(whe->stop, 0) == WAIT_OBJECT_0)
@@ -156,6 +157,15 @@ win32_handle_event_thread(void *arg)
 			LeaveCriticalSection(&whe->lock);
 			send(whe->notify_write, &one, 1, 0);
 			break;
+		}
+		if (log_get_level() > 1) {
+			for (i = 0; i < nread; i++) {
+				if (buf[i] == '\003') {
+					log_debug("%s: read Ctrl-C byte",
+					    __func__);
+					break;
+				}
+			}
 		}
 		EnterCriticalSection(&whe->lock);
 		evbuffer_add(whe->input, buf, nread);

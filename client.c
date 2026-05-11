@@ -303,6 +303,13 @@ client_win32_resize_timer_callback(__unused tmux_event_fd fd,
 {
 	struct timeval	tv = { .tv_usec = 250000 };
 	u_int		sx, sy, xpixel, ypixel;
+	long		ctrl_c;
+
+	ctrl_c = win32_console_ctrl_c_events();
+	if (ctrl_c != 0) {
+		log_debug("%s: ignored %ld CTRL_C_EVENT%s", __func__, ctrl_c,
+		    ctrl_c == 1 ? "" : "s");
+	}
 
 	if (client_peer != NULL &&
 	    client_attached &&
