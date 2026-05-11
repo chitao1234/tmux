@@ -2395,6 +2395,7 @@ extern const char	*shell_command;
 extern int		 ptm_fd;
 extern const char	*shell_command;
 int		 checkshell(const char *);
+int		 path_is_absolute(const char *);
 void		 setblocking(int, int);
 char 		*shell_argv0(const char *, int);
 uint64_t	 get_timer(void);

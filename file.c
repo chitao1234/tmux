@@ -43,9 +43,6 @@ file_get_path(struct client *c, const char *file)
 {
 	const char	*home;
 	char		*path, *full_path;
-#ifdef TMUX_WIN32
-	u_char		 drive;
-#endif
 
 	if (strncmp(file, "~/", 2) != 0)
 		path = xstrdup(file);
@@ -55,18 +52,8 @@ file_get_path(struct client *c, const char *file)
 			home = "";
 		xasprintf(&path, "%s%s", home, file + 1);
 	}
-	if (*path == '/')
+	if (path_is_absolute(path))
 		return (path);
-#ifdef TMUX_WIN32
-	drive = (u_char)path[0];
-	if (((drive >= 'A' && drive <= 'Z') ||
-	    (drive >= 'a' && drive <= 'z')) &&
-	    path[1] == ':' &&
-	    (path[2] == '/' || path[2] == '\\'))
-		return (path);
-	if (path[0] == '\\' && path[1] == '\\')
-		return (path);
-#endif
 	xasprintf(&full_path, "%s/%s", server_client_get_cwd(c, NULL), path);
 	free(path);
 	return (full_path);

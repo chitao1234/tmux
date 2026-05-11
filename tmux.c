@@ -133,7 +133,7 @@ getshell(void)
 int
 checkshell(const char *shell)
 {
-	if (shell == NULL || *shell != '/')
+	if (!path_is_absolute(shell))
 		return (0);
 	if (areshell(shell))
 		return (0);
@@ -156,6 +156,30 @@ areshell(const char *shell)
 		progname++;
 	if (strcmp(ptr, progname) == 0)
 		return (1);
+	return (0);
+}
+
+int
+path_is_absolute(const char *path)
+{
+#ifdef TMUX_WIN32
+	u_char	drive;
+#endif
+
+	if (path == NULL || *path == '\0')
+		return (0);
+	if (*path == '/')
+		return (1);
+#ifdef TMUX_WIN32
+	drive = (u_char)path[0];
+	if (((drive >= 'A' && drive <= 'Z') ||
+	    (drive >= 'a' && drive <= 'z')) &&
+	    path[1] == ':' &&
+	    (path[2] == '/' || path[2] == '\\'))
+		return (1);
+	if (path[0] == '\\' && path[1] == '\\')
+		return (1);
+#endif
 	return (0);
 }
 

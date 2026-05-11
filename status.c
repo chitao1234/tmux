@@ -70,7 +70,7 @@ status_prompt_find_history_file(void)
 	history_file = options_get_string(global_options, "history-file");
 	if (*history_file == '\0')
 		return (NULL);
-	if (*history_file == '/')
+	if (path_is_absolute(history_file))
 		return (xstrdup(history_file));
 
 	if (history_file[0] != '~' || history_file[1] != '/')

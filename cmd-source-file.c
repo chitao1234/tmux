@@ -156,6 +156,21 @@ cmd_source_file_quote_for_glob(const char *path)
 	return (quoted);
 }
 
+#ifdef TMUX_WIN32
+static char *
+cmd_source_file_normalize_for_glob(const char *path)
+{
+	char	*normalized, *cp;
+
+	normalized = xstrdup(path);
+	for (cp = normalized; *cp != '\0'; cp++) {
+		if (*cp == '\\')
+			*cp = '/';
+	}
+	return (normalized);
+}
+#endif
+
 static enum cmd_retval
 cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 {
@@ -164,6 +179,9 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 	struct client			*c = cmdq_get_client(item);
 	enum cmd_retval			 retval = CMD_RETURN_NORMAL;
 	char				*pattern, *cwd, *expanded = NULL;
+#ifdef TMUX_WIN32
+	char				*normalized = NULL;
+#endif
 	const char			*path, *error;
 	glob_t				 g;
 	int				 result, parse_flags;
@@ -211,8 +229,13 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 			cmd_source_file_add(cdata, "-");
 			continue;
 		}
+#ifdef TMUX_WIN32
+		free(normalized);
+		normalized = cmd_source_file_normalize_for_glob(path);
+		path = normalized;
+#endif
 
-		if (*path == '/')
+		if (path_is_absolute(path))
 			pattern = xstrdup(path);
 		else
 			xasprintf(&pattern, "%s/%s", cwd, path);
@@ -241,6 +264,9 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 		globfree(&g);
 	}
 	free(expanded);
+#ifdef TMUX_WIN32
+	free(normalized);
+#endif
 
 	cdata->after = item;
 	cdata->retval = retval;
