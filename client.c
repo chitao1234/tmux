@@ -451,6 +451,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #ifdef TMUX_WIN32
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
+	if (client_is_console &&
+	    (*termname == '\0' || strcmp(termname, "dumb") == 0))
+		termname = "xterm-256color";
 #endif
 
 	/*
