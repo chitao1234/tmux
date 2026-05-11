@@ -917,9 +917,11 @@ format_cb_current_path(struct format_tree *ft)
 		return (NULL);
 
 	cwd = osdep_get_cwd(wp->fd);
+	if (cwd == NULL && wp->cwd != NULL)
+		return (xstrdup(wp->cwd));
 	if (cwd == NULL)
 		return (NULL);
-	return (xstrdup(cwd));
+	return (cwd);
 }
 
 /* Callback for history_bytes. */
