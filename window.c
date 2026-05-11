@@ -397,6 +397,16 @@ window_pane_destroy_ready(struct window_pane *wp)
 	return (1);
 }
 
+int
+window_pane_pipe_active(struct window_pane *wp)
+{
+#ifdef TMUX_WIN32
+	if (wp->pipe_job != NULL)
+		return (1);
+#endif
+	return (wp->pipe_fd != -1);
+}
+
 void
 window_add_ref(struct window *w, const char *from)
 {
@@ -1041,6 +1051,11 @@ window_pane_destroy(struct window_pane *wp)
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL)
 		win32_pane_close(wp);
+	if (wp->pipe_job != NULL) {
+		job_close_stdin(wp->pipe_job);
+		wp->pipe_job = NULL;
+		wp->pipe_fd = -1;
+	}
 #endif
 
 	if (wp->fd != -1) {
@@ -1094,9 +1109,14 @@ window_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 	size_t				 new_size;
 	struct client			*c;
 
-	if (wp->pipe_fd != -1) {
+	if (window_pane_pipe_active(wp)) {
 		new_data = window_pane_get_new_data(wp, wpo, &new_size);
 		if (new_size > 0) {
+#ifdef TMUX_WIN32
+			if (wp->pipe_job != NULL)
+				job_write(wp->pipe_job, new_data, new_size);
+			else
+#endif
 			bufferevent_write(wp->pipe_event, new_data, new_size);
 			window_pane_update_used_data(wp, wpo, new_size);
 		}

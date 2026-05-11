@@ -475,6 +475,15 @@ job_get_status(struct job *job)
 	return (job->status);
 }
 
+/* Get job PID. */
+int
+job_get_pid(struct job *job, pid_t *pid)
+{
+	if (pid != NULL)
+		*pid = job->pid;
+	return (0);
+}
+
 /* Get job data. */
 void *
 job_get_data(struct job *job)
@@ -487,6 +496,32 @@ struct bufferevent *
 job_get_event(struct job *job)
 {
 	return (job->event);
+}
+
+/* Write to job stdin. */
+int
+job_write(struct job *job, const void *data, size_t size)
+{
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL)
+		return (win32_job_write(job->win32, data, size));
+#endif
+	return (bufferevent_write(job->event, data, size));
+}
+
+/* Close job stdin. */
+void
+job_close_stdin(struct job *job)
+{
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_close_stdin(job->win32);
+		return;
+	}
+#else
+	if (job->fd != -1 && (~job->flags & JOB_PTY))
+		shutdown(job->fd, SHUT_WR);
+#endif
 }
 
 /* Kill all jobs. */

@@ -2288,7 +2288,7 @@ static void *
 format_cb_pane_pipe(struct format_tree *ft)
 {
 	if (ft->wp != NULL) {
-		if (ft->wp->pipe_fd != -1)
+		if (window_pane_pipe_active(ft->wp))
 			return (xstrdup("1"));
 		return (xstrdup("0"));
 	}
@@ -2301,7 +2301,7 @@ format_cb_pane_pipe_pid(struct format_tree *ft)
 {
 	char	*value = NULL;
 
-	if (ft->wp != NULL && ft->wp->pipe_fd != -1)
+	if (ft->wp != NULL && window_pane_pipe_active(ft->wp))
 		xasprintf(&value, "%ld", (long)ft->wp->pipe_pid);
 	return (value);
 }

@@ -1656,7 +1656,7 @@ server_client_check_pane_buffer(struct window_pane *wp)
 	 * from the buffer.
 	 */
 	minimum = wp->offset.used;
-	if (wp->pipe_fd != -1 && wp->pipe_offset.used < minimum)
+	if (window_pane_pipe_active(wp) && wp->pipe_offset.used < minimum)
 		minimum = wp->pipe_offset.used;
 	TAILQ_FOREACH(c, &clients, entry) {
 		if (c->session == NULL)
@@ -1701,7 +1701,7 @@ server_client_check_pane_buffer(struct window_pane *wp)
 	if (wp->base_offset > SIZE_MAX - minimum) {
 		log_debug("%s: %%%u base offset has wrapped", __func__, wp->id);
 		wp->offset.used -= wp->base_offset;
-		if (wp->pipe_fd != -1)
+		if (window_pane_pipe_active(wp))
 			wp->pipe_offset.used -= wp->base_offset;
 		TAILQ_FOREACH(c, &clients, entry) {
 			if (c->session == NULL || (~c->flags & CLIENT_CONTROL))

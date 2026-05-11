@@ -84,6 +84,8 @@ void		 win32_job_resize(struct win32_job *, u_int, u_int);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);
+int		 win32_job_write(struct win32_job *, const void *, size_t);
+void		 win32_job_close_stdin(struct win32_job *);
 
 #endif /* TMUX_WIN32 */
 

@@ -1316,6 +1316,9 @@ struct window_pane {
 	pid_t		 pipe_pid;
 	struct bufferevent *pipe_event;
 	struct window_pane_offset pipe_offset;
+#ifdef TMUX_WIN32
+	struct job	*pipe_job;
+#endif
 
 	struct screen	*screen;
 	struct screen	 base;
@@ -2620,9 +2623,12 @@ void		 job_free(struct job *);
 int		 job_transfer(struct job *, pid_t *, char *, size_t);
 void		 job_resize(struct job *, u_int, u_int);
 void		 job_check_died(pid_t, int);
+int		 job_get_pid(struct job *, pid_t *);
 int		 job_get_status(struct job *);
 void		*job_get_data(struct job *);
 struct bufferevent *job_get_event(struct job *);
+int		 job_write(struct job *, const void *, size_t);
+void		 job_close_stdin(struct job *);
 void		 job_kill_all(void);
 int		 job_still_running(void);
 void		 job_print_summary(struct cmdq_item *, int);
@@ -3440,6 +3446,7 @@ void		 window_destroy_panes(struct window *);
 struct window_pane *window_pane_find_by_id_str(const char *);
 struct window_pane *window_pane_find_by_id(u_int);
 int		 window_pane_destroy_ready(struct window_pane *);
+int		 window_pane_pipe_active(struct window_pane *);
 void		 window_pane_resize(struct window_pane *, u_int, u_int);
 int		 window_pane_set_mode(struct window_pane *,
 		     struct window_pane *, const struct window_mode *,

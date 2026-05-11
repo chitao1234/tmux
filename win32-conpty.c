@@ -638,4 +638,35 @@ win32_job_get_event(struct win32_job *wj)
 	return (wj->event);
 }
 
+int
+win32_job_write(struct win32_job *wj, const void *data, size_t size)
+{
+	const char	*buf = data;
+	size_t		 left = size;
+	DWORD		 written;
+
+	while (left != 0) {
+		if (wj->stdin_write == NULL) {
+			errno = EPIPE;
+			return (-1);
+		}
+		if (!WriteFile(wj->stdin_write, buf,
+		    left > MAXDWORD ? MAXDWORD : left, &written, NULL)) {
+			errno = EIO;
+			return (-1);
+		}
+		if (written == 0)
+			break;
+		buf += written;
+		left -= written;
+	}
+	return ((int)(size - left));
+}
+
+void
+win32_job_close_stdin(struct win32_job *wj)
+{
+	win32_close_handle(&wj->stdin_write);
+}
+
 #endif /* TMUX_WIN32 */

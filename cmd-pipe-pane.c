@@ -37,7 +37,16 @@
 
 static enum cmd_retval	cmd_pipe_pane_exec(struct cmd *, struct cmdq_item *);
 
-#ifndef TMUX_WIN32
+#ifdef TMUX_WIN32
+struct cmd_pipe_pane_data {
+	u_int	wp_id;
+	int	in;
+};
+
+static void cmd_pipe_pane_job_update(struct job *);
+static void cmd_pipe_pane_job_complete(struct job *);
+static void cmd_pipe_pane_job_free(void *);
+#else
 static void cmd_pipe_pane_read_callback(struct bufferevent *, void *);
 static void cmd_pipe_pane_write_callback(struct bufferevent *, void *);
 static void cmd_pipe_pane_error_callback(struct bufferevent *, short, void *);
@@ -60,10 +69,86 @@ static enum cmd_retval
 cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
 #ifdef TMUX_WIN32
-	(void)self;
+	struct args			*args = cmd_get_args(self);
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct client			*tc = cmdq_get_target_client(item);
+	struct window_pane		*wp = target->wp;
+	struct session			*s = target->s;
+	struct winlink			*wl = target->wl;
+	struct window_pane_offset	*wpo = &wp->pipe_offset;
+	struct format_tree		*ft;
+	struct job			*job;
+	struct cmd_pipe_pane_data	*cdata;
+	char				*cmd;
+	int				 old_pipe, in, out;
 
-	cmdq_error(item, "pipe-pane is not supported in the native Windows MVP");
-	return (CMD_RETURN_ERROR);
+	/* Do nothing if pane is dead. */
+	if (window_pane_exited(wp)) {
+		cmdq_error(item, "target pane has exited");
+		return (CMD_RETURN_ERROR);
+	}
+
+	/* Destroy the old pipe. */
+	old_pipe = window_pane_pipe_active(wp);
+	if (wp->pipe_job != NULL) {
+		job_close_stdin(wp->pipe_job);
+		wp->pipe_job = NULL;
+		wp->pipe_pid = -1;
+
+		if (window_pane_destroy_ready(wp)) {
+			server_destroy_pane(wp, 1);
+			return (CMD_RETURN_NORMAL);
+		}
+	}
+
+	/* If no pipe command, that is enough. */
+	if (args_count(args) == 0 || *args_string(args, 0) == '\0')
+		return (CMD_RETURN_NORMAL);
+
+	/*
+	 * With -o, only open the new pipe if there was no previous one. This
+	 * allows a pipe to be toggled with a single key, for example:
+	 *
+	 *	bind ^p pipep -o 'cat >>~/output'
+	 */
+	if (args_has(args, 'o') && old_pipe)
+		return (CMD_RETURN_NORMAL);
+
+	/* What do we want to do? Neither -I or -O is -O. */
+	if (args_has(args, 'I')) {
+		in = 1;
+		out = args_has(args, 'O');
+	} else {
+		in = 0;
+		out = 1;
+	}
+
+	/* Expand the command. */
+	ft = format_create(cmdq_get_client(item), item, FORMAT_NONE, 0);
+	format_defaults(ft, tc, s, wl, wp);
+	cmd = format_expand_time(ft, args_string(args, 0));
+	format_free(ft);
+
+	cdata = xcalloc(1, sizeof *cdata);
+	cdata->wp_id = wp->id;
+	cdata->in = in;
+
+	job = job_run(cmd, 0, NULL, NULL, s, NULL, cmd_pipe_pane_job_update,
+	    cmd_pipe_pane_job_complete, cmd_pipe_pane_job_free, cdata,
+	    JOB_NOWAIT|JOB_KEEPWRITE, -1, -1);
+	free(cmd);
+	if (job == NULL) {
+		cmdq_error(item, "failed to run pipe command");
+		cmd_pipe_pane_job_free(cdata);
+		return (CMD_RETURN_ERROR);
+	}
+
+	wp->pipe_job = job;
+	job_get_pid(job, &wp->pipe_pid);
+	memcpy(wpo, &wp->offset, sizeof *wpo);
+	if (!out)
+		job_close_stdin(job);
+	return (CMD_RETURN_NORMAL);
 #else
 	struct args			*args = cmd_get_args(self);
 	struct cmd_find_state		*target = cmdq_get_target(item);
@@ -201,7 +286,58 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 #endif
 }
 
-#ifndef TMUX_WIN32
+#ifdef TMUX_WIN32
+static void
+cmd_pipe_pane_job_update(struct job *job)
+{
+	struct cmd_pipe_pane_data	*cdata = job_get_data(job);
+	struct window_pane		*wp;
+	struct evbuffer			*evb = job_get_event(job)->input;
+	size_t				 available;
+
+	available = EVBUFFER_LENGTH(evb);
+	wp = window_pane_find_by_id(cdata->wp_id);
+	if (wp == NULL || wp->pipe_job != job || !cdata->in) {
+		if (available != 0)
+			evbuffer_drain(evb, available);
+		return;
+	}
+
+	log_debug("%%%u pipe job read %zu", wp->id, available);
+	if (available != 0) {
+		win32_pane_write(wp, EVBUFFER_DATA(evb), available);
+		evbuffer_drain(evb, available);
+	}
+
+	if (window_pane_destroy_ready(wp))
+		server_destroy_pane(wp, 1);
+}
+
+static void
+cmd_pipe_pane_job_complete(struct job *job)
+{
+	struct cmd_pipe_pane_data	*cdata = job_get_data(job);
+	struct window_pane		*wp;
+
+	cmd_pipe_pane_job_update(job);
+
+	wp = window_pane_find_by_id(cdata->wp_id);
+	if (wp == NULL || wp->pipe_job != job)
+		return;
+	log_debug("%%%u pipe job complete", wp->id);
+
+	wp->pipe_job = NULL;
+	wp->pipe_pid = -1;
+	if (window_pane_destroy_ready(wp))
+		server_destroy_pane(wp, 1);
+}
+
+static void
+cmd_pipe_pane_job_free(void *data)
+{
+	free(data);
+}
+#else
 static void
 cmd_pipe_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 {
