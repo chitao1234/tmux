@@ -4,6 +4,12 @@ This collects enough data to tell whether a highlight trail is in tmux's
 pane model, tmux's outer-terminal byte stream, or only the final Windows
 console rendering.
 
+If the same application also leaves trails when run inside an upstream tmux
+server on Linux and displayed through the same terminal, the issue is outside
+the tmux4win console transport. In that case, prefer collecting pane captures
+and upstream traces before adding Win32-specific redraw delays or repaint
+workarounds.
+
 Run these commands from the repository root in PowerShell. They use an
 isolated socket name and do not touch normal tmux sessions.
 

@@ -43,9 +43,6 @@ static int	tty_log_fd = -1;
 
 static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
-#ifdef TMUX_WIN32
-static void	tty_win32_out_callback(tmux_event_fd, short, void *);
-#endif
 static void	tty_start_timer_callback(tmux_event_fd, short, void *);
 static void	tty_clipboard_query_callback(tmux_event_fd, short, void *);
 static void	tty_set_italics(struct tty *);
@@ -92,7 +89,6 @@ static void	tty_write_one(void (*)(struct tty *, const struct tty_ctx *),
 #define TTY_BLOCK_START(tty) (1 + ((tty)->sx * (tty)->sy) * 8)
 #define TTY_BLOCK_STOP(tty) (1 + ((tty)->sx * (tty)->sy) / 8)
 #ifdef TMUX_WIN32
-#define TTY_WIN32_OUT_INTERVAL 20000
 #define TTY_WIN32_OUT_PENDING_LIMIT (256 * 1024)
 #endif
 
@@ -380,15 +376,6 @@ after_redraw:
 	}
 }
 
-#ifdef TMUX_WIN32
-static void
-tty_win32_out_callback(__unused tmux_event_fd fd, __unused short events,
-    void *data)
-{
-	tty_write_callback(-1, EV_WRITE, data);
-}
-#endif
-
 void
 tty_write_pending(struct tty *tty)
 {
@@ -398,7 +385,6 @@ tty_write_pending(struct tty *tty)
 		return;
 #ifdef TMUX_WIN32
 	if (c->win32_console) {
-		evtimer_del(&tty->win32_out_timer);
 		tty_write_callback(-1, EV_WRITE, tty);
 		return;
 	}
@@ -475,10 +461,6 @@ tty_open(struct tty *tty, char **cause)
 	tty->out = evbuffer_new();
 	if (tty->out == NULL)
 		fatal("out of memory");
-#ifdef TMUX_WIN32
-	if (c->win32_console)
-		evtimer_set(&tty->win32_out_timer, tty_win32_out_callback, tty);
-#endif
 
 	evtimer_set(&tty->clipboard_timer, tty_clipboard_query_callback, tty);
 	evtimer_set(&tty->start_timer, tty_start_timer_callback, tty);
@@ -653,8 +635,6 @@ tty_stop_tty(struct tty *tty)
 	tty->flags &= ~TTY_BLOCK;
 
 #ifdef TMUX_WIN32
-	if (c->win32_console)
-		evtimer_del(&tty->win32_out_timer);
 	if (!c->win32_console && tty->win32_in == NULL)
 		event_del(&tty->event_in);
 	if (!c->win32_console && c->win32_stdout == NULL)
@@ -730,10 +710,6 @@ tty_close(struct tty *tty)
 	tty_stop_tty(tty);
 
 	if (tty->flags & TTY_OPENED) {
-#ifdef TMUX_WIN32
-		if (tty->client->win32_console)
-			evtimer_del(&tty->win32_out_timer);
-#endif
 		evbuffer_free(tty->in);
 		evbuffer_free(tty->out);
 #ifdef TMUX_WIN32
@@ -886,16 +862,7 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 	if (tty->flags & TTY_STARTED) {
 #ifdef TMUX_WIN32
 		if (c->win32_console) {
-			if (tty->flags & TTY_NOBLOCK ||
-			    EVBUFFER_LENGTH(tty->out) >= TTY_BLOCK_START(tty))
-				tty_write_pending(tty);
-			else if (!evtimer_pending(&tty->win32_out_timer, NULL)) {
-				struct timeval tv = {
-				    .tv_usec = TTY_WIN32_OUT_INTERVAL
-				};
-
-				evtimer_add(&tty->win32_out_timer, &tv);
-			}
+			tty_write_callback(-1, EV_WRITE, tty);
 			return;
 		}
 		if (c->win32_stdout != NULL) {
