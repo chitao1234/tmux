@@ -313,6 +313,17 @@ win32_handle_event_buffered(struct win32_handle_event *whe)
 }
 
 int
+win32_handle_event_done(struct win32_handle_event *whe)
+{
+	int	done;
+
+	EnterCriticalSection(&whe->lock);
+	done = whe->error;
+	LeaveCriticalSection(&whe->lock);
+	return (done);
+}
+
+int
 win32_handle_event_write(__unused struct win32_handle_event *whe,
     const void *data, size_t size)
 {

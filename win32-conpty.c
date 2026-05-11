@@ -45,6 +45,7 @@ struct win32_job {
 	struct win32_handle_event *output_event;
 	struct bufferevent *event;
 	int		 pty;
+	int		 exited;
 	int		 status;
 };
 
@@ -266,6 +267,22 @@ win32_pane_error_cb(void *arg)
 	window_pane_error_callback(wp->event, 0, wp);
 }
 
+static int
+win32_process_status(HANDLE process, int *status)
+{
+	DWORD	code;
+
+	if (process == NULL)
+		return (0);
+	if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0)
+		return (0);
+	if (!GetExitCodeProcess(process, &code))
+		code = 1;
+	if (status != NULL)
+		*status = W_EXITCODE((int)code, 0);
+	return (1);
+}
+
 int
 win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
     struct environ *env, const char *cwd, char **cause)
@@ -425,18 +442,16 @@ win32_pane_close(struct window_pane *wp)
 int
 win32_pane_exited(struct window_pane *wp, int *status)
 {
-	DWORD	code;
+	int	found;
 
 	if (wp->win32 == NULL || wp->win32->process == NULL)
 		return (0);
-	if (WaitForSingleObject(wp->win32->process, 0) != WAIT_OBJECT_0)
+	found = win32_process_status(wp->win32->process, status);
+	if (!found)
 		return (0);
-	if (!GetExitCodeProcess(wp->win32->process, &code))
-		code = 1;
 	wp->win32->exited = 1;
-	wp->win32->status = W_EXITCODE((int)code, 0);
 	if (status != NULL)
-		*status = wp->win32->status;
+		wp->win32->status = *status;
 	return (1);
 }
 
@@ -475,9 +490,9 @@ win32_job_read_cb(void *arg)
 {
 	struct win32_job	*wj = arg;
 
-	if (wj->event == NULL || wj->output_event == NULL)
+	if (wj->event == NULL)
 		return;
-	win32_handle_event_drain_bev(wj->output_event, wj->event);
+	win32_job_drain(wj);
 	if (wj->event->readcb != NULL)
 		wj->event->readcb(wj->event, wj->event->cbarg);
 }
@@ -486,10 +501,10 @@ static void
 win32_job_error_cb(void *arg)
 {
 	struct win32_job	*wj = arg;
-	DWORD		 code;
+	int		 status;
 
-	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
-		wj->status = W_EXITCODE((int)code, 0);
+	if (win32_job_exited(wj, &status))
+		wj->status = status;
 	if (wj->event != NULL && wj->event->errorcb != NULL)
 		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
 }
@@ -676,6 +691,45 @@ win32_job_resize(struct win32_job *wj, u_int sx, u_int sy)
 }
 
 int
+win32_job_exited(struct win32_job *wj, int *status)
+{
+	int	found;
+
+	if (wj == NULL || wj->process == NULL)
+		return (0);
+	if (wj->exited) {
+		if (status != NULL)
+			*status = wj->status;
+		return (1);
+	}
+	found = win32_process_status(wj->process, status);
+	if (!found)
+		return (0);
+	wj->exited = 1;
+	if (status != NULL)
+		wj->status = *status;
+	else
+		(void)win32_process_status(wj->process, &wj->status);
+	return (1);
+}
+
+int
+win32_job_output_done(struct win32_job *wj)
+{
+	if (wj == NULL || wj->output_event == NULL)
+		return (1);
+	return (win32_handle_event_done(wj->output_event));
+}
+
+void
+win32_job_drain(struct win32_job *wj)
+{
+	if (wj == NULL || wj->event == NULL || wj->output_event == NULL)
+		return;
+	win32_handle_event_drain_bev(wj->output_event, wj->event);
+}
+
+int
 win32_job_get_pid(struct win32_job *wj, pid_t *pid)
 {
 	if (pid != NULL)
@@ -686,10 +740,10 @@ win32_job_get_pid(struct win32_job *wj, pid_t *pid)
 int
 win32_job_get_status(struct win32_job *wj)
 {
-	DWORD	code;
+	int	status;
 
-	if (wj->process != NULL && GetExitCodeProcess(wj->process, &code))
-		wj->status = W_EXITCODE((int)code, 0);
+	if (win32_job_exited(wj, &status))
+		wj->status = status;
 	return (wj->status);
 }
 

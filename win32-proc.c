@@ -39,6 +39,7 @@ win32_check_children(void)
 				server_destroy_pane(wp, 1);
 		}
 	}
+	job_check_died();
 }
 
 int

@@ -2628,7 +2628,11 @@ struct job	*job_run(const char *, int, char **, struct environ *,
 void		 job_free(struct job *);
 int		 job_transfer(struct job *, pid_t *, char *, size_t);
 void		 job_resize(struct job *, u_int, u_int);
+#ifdef TMUX_WIN32
+void		 job_check_died(void);
+#else
 void		 job_check_died(pid_t, int);
+#endif
 int		 job_get_pid(struct job *, pid_t *);
 int		 job_get_status(struct job *);
 void		*job_get_data(struct job *);

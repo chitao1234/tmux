@@ -41,6 +41,9 @@
 static void	job_read_callback(struct bufferevent *, void *);
 static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
+#ifdef TMUX_WIN32
+static void	job_complete(struct job *);
+#endif
 
 /* A single job. */
 struct job {
@@ -417,8 +420,14 @@ job_error_callback(__unused struct bufferevent *bufev, __unused short events,
 
 #ifdef TMUX_WIN32
 	if (job->win32 != NULL) {
-		job->status = win32_job_get_status(job->win32);
-		job->state = JOB_DEAD;
+		if (win32_job_exited(job->win32, &job->status)) {
+			job->state = JOB_DEAD;
+			job_complete(job);
+		} else {
+			bufferevent_disable(job->event, EV_READ);
+			job->state = JOB_CLOSED;
+		}
+		return;
 	}
 #endif
 	if (job->state == JOB_DEAD) {
@@ -431,14 +440,49 @@ job_error_callback(__unused struct bufferevent *bufev, __unused short events,
 	}
 }
 
+#ifdef TMUX_WIN32
+static void
+job_complete(struct job *job)
+{
+	if (job->win32 != NULL)
+		win32_job_drain(job->win32);
+	if (job->updatecb != NULL)
+		job->updatecb(job);
+	if (job->completecb != NULL)
+		job->completecb(job);
+	job_free(job);
+}
+
+/* Check for jobs whose Windows process has exited. */
+void
+job_check_died(void)
+{
+	struct job	*job, *job1;
+
+	LIST_FOREACH_SAFE(job, &all_jobs, entry, job1) {
+		if (job->win32 == NULL)
+			continue;
+		if (!win32_job_exited(job->win32, &job->status))
+			continue;
+
+		log_debug("job died %p: %s, pid %ld", job, job->cmd,
+		    (long) job->pid);
+
+		if ((job->flags & JOB_PTY) ||
+		    win32_job_output_done(job->win32)) {
+			job->state = JOB_DEAD;
+			job_complete(job);
+		} else {
+			bufferevent_disable(job->event, EV_READ);
+			job->state = JOB_DEAD;
+		}
+	}
+}
+#else
 /* Job died (waitpid() returned its pid). */
 void
 job_check_died(pid_t pid, int status)
 {
-#ifdef TMUX_WIN32
-	(void)pid;
-	(void)status;
-#else
 	struct job	*job;
 
 	LIST_FOREACH(job, &all_jobs, entry) {
@@ -465,8 +509,8 @@ job_check_died(pid_t pid, int status)
 		job->pid = -1;
 		job->state = JOB_DEAD;
 	}
-#endif
 }
+#endif
 
 /* Get job status. */
 int

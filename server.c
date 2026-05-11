@@ -47,6 +47,9 @@ static uint64_t		 server_client_flags;
 static int		 server_exit;
 static struct event	 server_ev_accept;
 static struct event	 server_ev_tidy;
+#ifdef TMUX_WIN32
+static struct event	 server_ev_win32_children;
+#endif
 
 struct cmd_find_state	 marked_pane;
 
@@ -59,6 +62,9 @@ static int	server_loop(void);
 static void	server_send_exit(void);
 static void	server_accept(tmux_event_fd, short, void *);
 static void	server_signal(int);
+#ifdef TMUX_WIN32
+static void	server_win32_children_event(tmux_event_fd, short, void *);
+#endif
 #ifndef TMUX_WIN32
 static void	server_child_signal(void);
 static void	server_child_exited(pid_t, int);
@@ -178,6 +184,19 @@ server_tidy_event(__unused tmux_event_fd fd, __unused short events, __unused voi
     evtimer_add(&server_ev_tidy, &tv);
 }
 
+#ifdef TMUX_WIN32
+/* Poll for process exits which do not always produce pipe or console events. */
+static void
+server_win32_children_event(__unused tmux_event_fd fd,
+    __unused short events, __unused void *data)
+{
+	struct timeval	tv = { .tv_usec = 100000 };
+
+	win32_check_children();
+	evtimer_add(&server_ev_win32_children, &tv);
+}
+#endif
+
 /* Fork new server. */
 int
 server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
@@ -269,6 +288,13 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 
 	evtimer_set(&server_ev_tidy, server_tidy_event, NULL);
 	evtimer_add(&server_ev_tidy, &tv);
+#ifdef TMUX_WIN32
+	tv.tv_sec = 0;
+	tv.tv_usec = 100000;
+	evtimer_set(&server_ev_win32_children, server_win32_children_event,
+	    NULL);
+	evtimer_add(&server_ev_win32_children, &tv);
+#endif
 
 	server_acl_init();
 

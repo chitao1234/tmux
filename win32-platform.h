@@ -47,6 +47,7 @@ void		 win32_handle_event_drain(struct win32_handle_event *,
 void		 win32_handle_event_drain_bev(struct win32_handle_event *,
 		     struct bufferevent *);
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
+int		 win32_handle_event_done(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
 int		 win32_handle_write(HANDLE, const void *, size_t);
@@ -83,6 +84,9 @@ struct win32_job *win32_job_spawn(const char *, const char *, int, char **,
 		     int, int, char **);
 void		 win32_job_close(struct win32_job *);
 void		 win32_job_resize(struct win32_job *, u_int, u_int);
+int		 win32_job_exited(struct win32_job *, int *);
+int		 win32_job_output_done(struct win32_job *);
+void		 win32_job_drain(struct win32_job *);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);
