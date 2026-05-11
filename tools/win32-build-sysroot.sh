@@ -9,6 +9,12 @@ prefix=${SYSROOT:-"$base_dir/sysroot"}
 build_dir=${BUILD_DIR:-"$base_dir/build"}
 host=${MINGW_HOST:-x86_64-w64-mingw32}
 build=${BUILD:-x86_64-pc-linux-gnu}
+ucrt_prefix=${UCRT_PREFIX:-/ucrt64}
+
+if [ -d "$ucrt_prefix/bin" ]; then
+	PATH="$ucrt_prefix/bin:$PATH"
+	export PATH
+fi
 
 cc=${CC:-"$host-gcc"}
 cxx=${CXX:-"$host-g++"}
@@ -163,6 +169,37 @@ build_openssl()
 	)
 }
 
+copy_regex()
+{
+	require_dir ucrt64 "$ucrt_prefix"
+
+	mkdir -p "$prefix/include" "$prefix/include/tre" "$prefix/lib" \
+		"$prefix/lib/pkgconfig" "$prefix/bin"
+	run cp "$ucrt_prefix/include/regex.h" "$prefix/include/regex.h"
+	run cp "$ucrt_prefix/include/tre/regex.h" "$prefix/include/tre/regex.h"
+	run cp "$ucrt_prefix/include/tre/tre-config.h" \
+		"$prefix/include/tre/tre-config.h"
+	run cp "$ucrt_prefix/include/tre/tre.h" "$prefix/include/tre/tre.h"
+
+	run cp "$ucrt_prefix/lib/libregex.a" "$prefix/lib/libregex.a"
+	run cp "$ucrt_prefix/lib/libregex.dll.a" "$prefix/lib/libregex.dll.a"
+	run cp "$ucrt_prefix/lib/libsystre.a" "$prefix/lib/libsystre.a"
+	run cp "$ucrt_prefix/lib/libsystre.dll.a" "$prefix/lib/libsystre.dll.a"
+	run cp "$ucrt_prefix/lib/libtre.a" "$prefix/lib/libtre.a"
+	run cp "$ucrt_prefix/lib/libtre.dll.a" "$prefix/lib/libtre.dll.a"
+	run cp "$ucrt_prefix/lib/libintl.a" "$prefix/lib/libintl.a"
+	run cp "$ucrt_prefix/lib/libintl.dll.a" "$prefix/lib/libintl.dll.a"
+	for pc in regex tre; do
+		sed "s|^prefix=.*|prefix=$prefix|;s|-I$ucrt_prefix/include|-I\${includedir}|g" \
+			"$ucrt_prefix/lib/pkgconfig/$pc.pc" \
+			>"$prefix/lib/pkgconfig/$pc.pc"
+	done
+
+	run cp "$ucrt_prefix/bin/libsystre-0.dll" "$prefix/bin/libsystre-0.dll"
+	run cp "$ucrt_prefix/bin/libtre-5.dll" "$prefix/bin/libtre-5.dll"
+	run cp "$ucrt_prefix/bin/libintl-8.dll" "$prefix/bin/libintl-8.dll"
+}
+
 verify_sysroot()
 {
 	tmp=${TMPDIR:-/tmp}/tmux-win32-sysroot.$$
@@ -172,13 +209,17 @@ verify_sysroot()
 	cat >"$tmp/probe.c" <<'EOF'
 #include <event.h>
 #include <curses.h>
-#include <openssl/ssl.h>
+#include <regex.h>
 
 int
 main(void)
 {
+	regex_t re;
+
 	event_init();
-	SSL_library_init();
+	if (regcomp(&re, "tmux", REG_EXTENDED) != 0)
+		return (1);
+	regfree(&re);
 	return (OK == 0 ? 0 : 0);
 }
 EOF
@@ -186,16 +227,40 @@ EOF
 	export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/lib64/pkgconfig:$prefix/share/pkgconfig"
 	export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
 	run $cc $cflags -o "$tmp/probe.exe" "$tmp/probe.c" \
-		$($pkg_config --cflags --libs libevent ncursesw openssl)
+		$($pkg_config --cflags --libs libevent_core ncursesw regex)
+	file "$tmp/probe.exe"
+}
+
+verify_openssl()
+{
+	tmp=${TMPDIR:-/tmp}/tmux-win32-openssl.$$
+	mkdir -p "$tmp"
+	trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+	cat >"$tmp/probe.c" <<'EOF'
+#include <openssl/ssl.h>
+
+int
+main(void)
+{
+	SSL_library_init();
+	return (0);
+}
+EOF
+
+	export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/lib64/pkgconfig:$prefix/share/pkgconfig"
+	export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
+	run $cc $cflags -o "$tmp/probe.exe" "$tmp/probe.c" \
+		$($pkg_config --cflags --libs openssl)
 	file "$tmp/probe.exe"
 }
 
 usage()
 {
 	cat <<EOF
-usage: $0 [all|env|libevent|ncurses|openssl|verify]
+usage: $0 [all|env|libevent|ncurses|openssl|regex|verify|verify-openssl]
 
-Build or verify the MinGW sysroot used by the native Win32 tmux MVP.
+Build or verify the MinGW sysroot used by the native Win32 tmux port.
 
 Environment overrides:
   SYSROOT       install prefix, default: $base_dir/sysroot
@@ -204,6 +269,7 @@ Environment overrides:
   LIBEVENT_SRC  libevent source directory
   NCURSES_SRC   ncurses source directory
   OPENSSL_SRC   OpenSSL source directory
+  UCRT_PREFIX   MSYS2 UCRT prefix used for regex/TRE, default: /ucrt64
 EOF
 }
 
@@ -214,6 +280,7 @@ all)
 	build_openssl
 	build_libevent
 	build_ncurses
+	copy_regex
 	verify_sysroot
 	;;
 env)
@@ -228,8 +295,14 @@ ncurses)
 openssl)
 	build_openssl
 	;;
+regex)
+	copy_regex
+	;;
 verify)
 	verify_sysroot
+	;;
+verify-openssl)
+	verify_openssl
 	;;
 *)
 	usage >&2
