@@ -593,6 +593,9 @@ main(int argc, char **argv)
 		    strcasestr(s, "UTF8") != NULL)
 			flags |= CLIENT_UTF8;
 	}
+#ifdef TMUX_WIN32
+	flags |= CLIENT_UTF8;
+#endif
 
 	global_options = options_create(NULL);
 	global_s_options = options_create(NULL);
