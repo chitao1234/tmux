@@ -40,6 +40,7 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
+static struct win32_handle_event *client_win32_input;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
 static u_int		 client_win32_resize_sy;
@@ -79,6 +80,9 @@ static void		 client_win32_resize_timer_callback(tmux_event_fd,
 			     short, void *);
 static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
+static void		 client_win32_input_start(void);
+static void		 client_win32_input_stop(void);
+static void		 client_win32_tty_output(char *, ssize_t);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -302,6 +306,7 @@ client_win32_resize_timer_callback(__unused tmux_event_fd fd,
     __unused short events, __unused void *arg)
 {
 	struct timeval	tv = { .tv_usec = 250000 };
+	struct msg_win32_terminal_size size;
 	u_int		sx, sy, xpixel, ypixel;
 	long		ctrl_c;
 
@@ -319,7 +324,12 @@ client_win32_resize_timer_callback(__unused tmux_event_fd fd,
 		log_debug("%s: console size is now %ux%u", __func__, sx, sy);
 		client_win32_resize_sx = sx;
 		client_win32_resize_sy = sy;
-		proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
+		size.sx = sx;
+		size.sy = sy;
+		size.xpixel = xpixel;
+		size.ypixel = ypixel;
+		proc_send(client_peer, MSG_WIN32_TTY_RESIZE, -1, &size,
+		    sizeof size);
 	}
 
 	if (!client_exitflag)
@@ -357,8 +367,93 @@ client_win32_resize_timer_stop(void)
 }
 
 static void
+client_win32_input_callback(__unused void *arg)
+{
+	struct evbuffer	*input = NULL;
+	size_t		 size, left, nsend;
+	u_char		*data;
+
+	if (client_peer == NULL || client_win32_input == NULL)
+		return;
+
+	input = evbuffer_new();
+	if (input == NULL)
+		fatalx("out of memory");
+	win32_handle_event_drain(client_win32_input, input);
+	size = EVBUFFER_LENGTH(input);
+	data = EVBUFFER_DATA(input);
+	log_debug("%s: forwarding %zu bytes", __func__, size);
+	left = size;
+	while (left != 0) {
+		nsend = left;
+		if (nsend > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
+			nsend = MAX_IMSGSIZE - IMSG_HEADER_SIZE;
+		if (proc_send(client_peer, MSG_WIN32_TTY_INPUT, -1, data,
+		    nsend) != 0)
+			break;
+		data += nsend;
+		left -= nsend;
+	}
+	evbuffer_free(input);
+}
+
+static void
+client_win32_input_error_callback(__unused void *arg)
+{
+	log_debug("%s: console input closed", __func__);
+	if (client_attached && client_peer != NULL) {
+		client_exitreason = CLIENT_EXIT_LOST_TTY;
+		client_exitval = 1;
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+	}
+}
+
+static void
+client_win32_input_start(void)
+{
+	HANDLE	hin;
+
+	if (client_win32_input != NULL)
+		return;
+	if (!client_is_console || (client_flags & CLIENT_CONTROL))
+		return;
+
+	hin = GetStdHandle(STD_INPUT_HANDLE);
+	client_win32_input = win32_handle_event_new(hin,
+	    client_win32_input_callback, client_win32_input_error_callback,
+	    NULL);
+	if (client_win32_input == NULL)
+		log_debug("%s: couldn't create console input event", __func__);
+}
+
+static void
+client_win32_input_stop(void)
+{
+	if (client_win32_input == NULL)
+		return;
+	win32_handle_event_free(client_win32_input);
+	client_win32_input = NULL;
+}
+
+static void
+client_win32_tty_output(char *data, ssize_t datalen)
+{
+	if (!client_console_ready)
+		return;
+	if (datalen != 0 &&
+	    win32_handle_write(GetStdHandle(STD_OUTPUT_HANDLE), data,
+	    datalen) == -1) {
+		log_debug("%s: console output failed", __func__);
+		client_exitreason = CLIENT_EXIT_LOST_TTY;
+		client_exitval = 1;
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+	}
+}
+
+static void
 client_restore_terminal(void)
 {
+	client_win32_input_stop();
 	client_win32_resize_timer_stop();
 	if (client_console_ready) {
 		win32_terminal_restore_client();
@@ -644,8 +739,7 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	char	**ss;
 	size_t	  sslen;
 #ifdef TMUX_WIN32
-	struct msg_win32_handle handle;
-	HANDLE	  h;
+	struct msg_win32_terminal_size size;
 #else
 	int	  fd;
 #endif
@@ -671,15 +765,17 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	}
 
 #ifdef TMUX_WIN32
-	handle.pid = GetCurrentProcessId();
-	h = GetStdHandle(STD_INPUT_HANDLE);
-	handle.handle = (uint64_t)(uintptr_t)h;
-	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1, &handle,
-	    sizeof handle);
-	h = GetStdHandle(STD_OUTPUT_HANDLE);
-	handle.handle = (uint64_t)(uintptr_t)h;
-	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDOUT, -1, &handle,
-	    sizeof handle);
+	if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
+		if (win32_terminal_get_size(NULL, &size.sx, &size.sy,
+		    &size.xpixel, &size.ypixel) != 0) {
+			size.sx = 80;
+			size.sy = 24;
+			size.xpixel = 0;
+			size.ypixel = 0;
+		}
+		proc_send(client_peer, MSG_IDENTIFY_WIN32_TERMINAL, -1,
+		    &size, sizeof size);
+	}
 #else
 	if ((fd = dup(STDIN_FILENO)) == -1)
 		fatal("dup failed");
@@ -877,7 +973,11 @@ client_dispatch_wait(struct imsg *imsg)
 			fatalx("bad MSG_READY size");
 
 		client_attached = 1;
+#ifdef TMUX_WIN32
+		client_win32_input_start();
+#else
 		proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
+#endif
 		break;
 	case MSG_VERSION:
 		if (datalen != 0)
@@ -929,6 +1029,11 @@ client_dispatch_wait(struct imsg *imsg)
 	case MSG_WRITE_CLOSE:
 		file_write_close(&client_files, imsg);
 		break;
+#ifdef TMUX_WIN32
+	case MSG_WIN32_TTY_OUTPUT:
+		client_win32_tty_output(data, datalen);
+		break;
+#endif
 	case MSG_OLDSTDERR:
 	case MSG_OLDSTDIN:
 	case MSG_OLDSTDOUT:
@@ -1030,5 +1135,10 @@ client_dispatch_attached(struct imsg *imsg)
 		system(data);
 		proc_send(client_peer, MSG_UNLOCK, -1, NULL, 0);
 		break;
+#ifdef TMUX_WIN32
+	case MSG_WIN32_TTY_OUTPUT:
+		client_win32_tty_output(data, datalen);
+		break;
+#endif
 	}
 }

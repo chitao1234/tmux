@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 9
+#define PROTOCOL_VERSION 10
 
 /* Message types. */
 enum msgtype {
@@ -41,6 +41,7 @@ enum msgtype {
 	MSG_IDENTIFY_TERMINFO,
 	MSG_IDENTIFY_WIN32_STDIN,
 	MSG_IDENTIFY_WIN32_STDOUT,
+	MSG_IDENTIFY_WIN32_TERMINAL,
 
 	MSG_COMMAND = 200,
 	MSG_DETACH,
@@ -61,6 +62,9 @@ enum msgtype {
 	MSG_WAKEUP,
 	MSG_EXEC,
 	MSG_FLAGS,
+	MSG_WIN32_TTY_INPUT,
+	MSG_WIN32_TTY_OUTPUT,
+	MSG_WIN32_TTY_RESIZE,
 
 	MSG_READ_OPEN = 300,
 	MSG_READ,
@@ -84,6 +88,13 @@ struct msg_command {
 struct msg_win32_handle {
 	uint32_t	pid;
 	uint64_t	handle;
+};
+
+struct msg_win32_terminal_size {
+	uint32_t	sx;
+	uint32_t	sy;
+	uint32_t	xpixel;
+	uint32_t	ypixel;
 };
 
 struct msg_read_open {

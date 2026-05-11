@@ -2037,6 +2037,7 @@ struct client {
 #ifdef TMUX_WIN32
 	HANDLE			 win32_stdin;
 	HANDLE			 win32_stdout;
+	int			 win32_console;
 #endif
 	struct event		 event;
 	int			 retval;

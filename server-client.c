@@ -51,6 +51,10 @@ static int	server_client_dispatch_command(struct client *, struct imsg *);
 static int	server_client_dispatch_identify(struct client *, struct imsg *);
 static int	server_client_dispatch_shell(struct client *);
 static void	server_client_report_theme(struct client *, enum client_theme);
+#ifdef TMUX_WIN32
+static int	server_client_win32_resize(struct client *, struct imsg *);
+static int	server_client_win32_tty_input(struct client *, struct imsg *);
+#endif
 
 /* Compare client windows. */
 static int
@@ -361,6 +365,8 @@ server_client_open(struct client *c, char **cause)
 
 #ifdef TMUX_WIN32
 	if (c->win32_stdin != NULL && c->win32_stdout != NULL)
+		c->flags |= CLIENT_TERMINAL;
+	else if (c->win32_console)
 		c->flags |= CLIENT_TERMINAL;
 #endif
 	if (!(c->flags & CLIENT_TERMINAL)) {
@@ -2203,6 +2209,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 #ifdef TMUX_WIN32
 	case MSG_IDENTIFY_WIN32_STDIN:
 	case MSG_IDENTIFY_WIN32_STDOUT:
+	case MSG_IDENTIFY_WIN32_TERMINAL:
 #endif
 	case MSG_IDENTIFY_TERM:
 	case MSG_IDENTIFY_TERMINFO:
@@ -2233,6 +2240,16 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		if (c->session != NULL)
 			notify_client("client-resized", c);
 		break;
+#ifdef TMUX_WIN32
+	case MSG_WIN32_TTY_INPUT:
+		if (server_client_win32_tty_input(c, imsg) != 0)
+			goto bad;
+		break;
+	case MSG_WIN32_TTY_RESIZE:
+		if (server_client_win32_resize(c, imsg) != 0)
+			goto bad;
+		break;
+#endif
 	case MSG_EXITING:
 		if (datalen != 0)
 			goto bad;
@@ -2403,6 +2420,60 @@ error:
 	return (0);
 }
 
+#ifdef TMUX_WIN32
+static int
+server_client_win32_tty_input(struct client *c, struct imsg *imsg)
+{
+	struct tty	*tty = &c->tty;
+	ssize_t		 datalen;
+
+	if (!c->win32_console || !(c->flags & CLIENT_TERMINAL))
+		return (-1);
+	if (!(tty->flags & TTY_OPENED))
+		return (0);
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen == 0)
+		return (0);
+
+	evbuffer_add(tty->in, imsg->data, datalen);
+	log_debug("%s: %s read %zd bytes", __func__, c->name, datalen);
+	while (tty_keys_next(tty))
+		;
+	return (0);
+}
+
+static int
+server_client_win32_resize(struct client *c, struct imsg *imsg)
+{
+	struct msg_win32_terminal_size size;
+	ssize_t			      datalen;
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (!c->win32_console || datalen != sizeof size)
+		return (-1);
+	memcpy(&size, imsg->data, sizeof size);
+	if (size.sx == 0 || size.sy == 0)
+		return (-1);
+
+	log_debug("%s: %s now %ux%u (%ux%u)", __func__, c->name, size.sx,
+	    size.sy, size.xpixel, size.ypixel);
+	server_client_update_latest(c);
+	tty_set_size(&c->tty, size.sx, size.sy, size.xpixel, size.ypixel);
+	tty_invalidate(&c->tty);
+	tty_repeat_requests(&c->tty, 0);
+	recalculate_sizes();
+	if (c->overlay_resize == NULL)
+		server_client_clear_overlay(c);
+	else
+		c->overlay_resize(c, c->overlay_data);
+	server_redraw_client(c);
+	if (c->session != NULL)
+		notify_client("client-resized", c);
+	return (0);
+}
+#endif
+
 /* Handle identify message. */
 static int
 server_client_dispatch_identify(struct client *c, struct imsg *imsg)
@@ -2413,6 +2484,7 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	uint64_t	 longflags;
 	char		*name;
 #ifdef TMUX_WIN32
+	struct msg_win32_terminal_size size;
 	struct msg_win32_handle handle;
 #endif
 
@@ -2540,6 +2612,18 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			CloseHandle(process);
 		break;
 	}
+	case MSG_IDENTIFY_WIN32_TERMINAL:
+		if (datalen != sizeof size)
+			return (-1);
+		memcpy(&size, data, sizeof size);
+		if (size.sx == 0 || size.sy == 0)
+			return (-1);
+		c->win32_console = 1;
+		tty_set_size(&c->tty, size.sx, size.sy, size.xpixel,
+		    size.ypixel);
+		log_debug("client %p IDENTIFY_WIN32_TERMINAL %ux%u (%ux%u)",
+		    c, size.sx, size.sy, size.xpixel, size.ypixel);
+		break;
 #endif
 	case MSG_IDENTIFY_ENVIRON:
 		if (datalen == 0 || data[datalen - 1] != '\0')
@@ -2582,6 +2666,15 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	if (c->flags & CLIENT_CONTROL)
 		control_start(c);
 #ifdef TMUX_WIN32
+	else if (c->win32_console) {
+		u_int sx = c->tty.sx, sy = c->tty.sy;
+		u_int xpixel = c->tty.xpixel, ypixel = c->tty.ypixel;
+
+		if (tty_init(&c->tty, c) == 0) {
+			tty_set_size(&c->tty, sx, sy, xpixel, ypixel);
+			c->flags |= CLIENT_TERMINAL;
+		}
+	}
 	else if (c->win32_stdin != NULL && c->win32_stdout != NULL) {
 		if (tty_init(&c->tty, c) == 0) {
 			tty_resize(&c->tty);
