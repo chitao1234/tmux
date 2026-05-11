@@ -40,6 +40,10 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
+static struct event	 client_win32_resize_timer;
+static u_int		 client_win32_resize_sx;
+static u_int		 client_win32_resize_sy;
+static int		 client_win32_resize_timer_set;
 #else
 static int		 client_suspended;
 #endif
@@ -71,6 +75,10 @@ static int		 client_get_lock(char *);
 static int		 client_connect(struct event_base *, const char *,
 			     uint64_t);
 #ifdef TMUX_WIN32
+static void		 client_win32_resize_timer_callback(tmux_event_fd,
+			     short, void *);
+static void		 client_win32_resize_timer_start(void);
+static void		 client_win32_resize_timer_stop(void);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -290,8 +298,61 @@ client_exit(void)
 
 #ifdef TMUX_WIN32
 static void
+client_win32_resize_timer_callback(__unused tmux_event_fd fd,
+    __unused short events, __unused void *arg)
+{
+	struct timeval	tv = { .tv_usec = 250000 };
+	u_int		sx, sy, xpixel, ypixel;
+
+	if (client_peer != NULL &&
+	    client_attached &&
+	    !client_exitflag &&
+	    win32_terminal_get_size(NULL, &sx, &sy, &xpixel, &ypixel) == 0 &&
+	    (sx != client_win32_resize_sx || sy != client_win32_resize_sy)) {
+		log_debug("%s: console size is now %ux%u", __func__, sx, sy);
+		client_win32_resize_sx = sx;
+		client_win32_resize_sy = sy;
+		proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
+	}
+
+	if (!client_exitflag)
+		evtimer_add(&client_win32_resize_timer, &tv);
+}
+
+static void
+client_win32_resize_timer_start(void)
+{
+	struct timeval	tv = { .tv_usec = 250000 };
+	u_int		sx, sy, xpixel, ypixel;
+
+	if (client_win32_resize_timer_set)
+		return;
+	if (!client_is_console || (client_flags & CLIENT_CONTROL))
+		return;
+
+	if (win32_terminal_get_size(NULL, &sx, &sy, &xpixel, &ypixel) == 0) {
+		client_win32_resize_sx = sx;
+		client_win32_resize_sy = sy;
+	}
+	evtimer_set(&client_win32_resize_timer,
+	    client_win32_resize_timer_callback, NULL);
+	evtimer_add(&client_win32_resize_timer, &tv);
+	client_win32_resize_timer_set = 1;
+}
+
+static void
+client_win32_resize_timer_stop(void)
+{
+	if (!client_win32_resize_timer_set)
+		return;
+	evtimer_del(&client_win32_resize_timer);
+	client_win32_resize_timer_set = 0;
+}
+
+static void
 client_restore_terminal(void)
 {
+	client_win32_resize_timer_stop();
 	if (client_console_ready) {
 		win32_terminal_restore_client();
 		client_console_ready = 0;
@@ -459,6 +520,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		}
 		client_console_ready = 1;
 	}
+	client_win32_resize_timer_start();
 #endif
 
 	/* Send identify messages. */
