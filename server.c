@@ -49,6 +49,8 @@ static struct event	 server_ev_accept;
 static struct event	 server_ev_tidy;
 #ifdef TMUX_WIN32
 static struct event	 server_ev_win32_children;
+static int		 server_win32_wait_first_client;
+#define SERVER_WIN32_FIRST_CLIENT_TIMEOUT 10
 #endif
 
 struct cmd_find_state	 marked_pane;
@@ -250,6 +252,10 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	key_bindings_init();
 	TAILQ_INIT(&message_log);
 	gettimeofday(&start_time, NULL);
+#ifdef TMUX_WIN32
+	if (flags & CLIENT_WIN32_HELPER)
+		server_win32_wait_first_client = 1;
+#endif
 
 #ifdef HAVE_SYSTEMD
 	server_fd = systemd_create_socket(flags, &cause);
@@ -336,6 +342,15 @@ server_loop(void)
 	}
 #endif
 	server_client_loop();
+
+#ifdef TMUX_WIN32
+	if (server_win32_wait_first_client) {
+		if (current_time - start_time.tv_sec <
+		    SERVER_WIN32_FIRST_CLIENT_TIMEOUT)
+			return (0);
+		server_win32_wait_first_client = 0;
+	}
+#endif
 
 	if (!options_get_number(global_options, "exit-empty") && !server_exit)
 		return (0);
@@ -492,6 +507,9 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 		return;
 	}
 	c = server_client_create(newfd);
+#ifdef TMUX_WIN32
+	server_win32_wait_first_client = 0;
+#endif
 	if (!server_acl_join(c)) {
 		c->exit_message = xstrdup("access not allowed");
 		c->flags |= CLIENT_EXIT;
