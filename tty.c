@@ -123,6 +123,8 @@ tty_init(struct tty *tty, struct client *c)
 #ifndef TMUX_WIN32
 	if (tcgetattr(c->fd, &tty->tio) != 0)
 		return (-1);
+#else
+	tty->tio.c_cc[VERASE] = 0x7f;
 #endif
 	return (0);
 }
