@@ -35,6 +35,13 @@ Get-ChildItem .\tmux-*.log,.\tmux-out-*.log | Sort-Object LastWriteTime |
 If the artifact appears, keep the `tmux-server-*.log`, `tmux-client-*.log`,
 and `tmux-out-*.log` from that run.
 
+To mimic applications such as `ntop.exe` that briefly draw the new
+highlighted row before clearing the old one, use the phased mode:
+
+```powershell
+.\tmux.exe -vv -L trace-highlight-phase new-session -x 120 -y 36 -- "$PWD\tools\win32-highlight-repro.exe --phase --phase-delay 16"
+```
+
 ## Automatic model trace
 
 This checks tmux's pane model without relying on what the outer terminal
@@ -55,6 +62,18 @@ notepad $env:TEMP\trace-highlight-capture.txt
 Expected: only the title/header and one data row have the cyan background
 sequence. If multiple data rows are highlighted in this capture, the problem
 is before final console rendering.
+
+For the phased update path:
+
+```powershell
+$server = 'trace-highlight-phase-model'
+.\tmux.exe -L $server kill-server 2>$null
+.\tmux.exe -L $server new-session -d -x 120 -y 36 -- "$PWD\tools\win32-highlight-repro.exe --phase --phase-delay 16 --auto 12 --delay 80 --hold"
+Start-Sleep -Seconds 2
+.\tmux.exe -L $server capture-pane -e -p -S 0 -E 35 > $env:TEMP\trace-highlight-phase-capture.txt
+.\tmux.exe -L $server kill-server 2>$null
+notepad $env:TEMP\trace-highlight-phase-capture.txt
+```
 
 ## ntop trace
 

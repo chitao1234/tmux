@@ -25,6 +25,8 @@ static int selected;
 static int split_writes;
 static int full_redraw;
 static int hold_after_auto;
+static int phased_updates;
+static int phase_delay_ms = 16;
 
 static const char *names[] = {
 	"cmd.exe",
@@ -140,9 +142,10 @@ draw_all(void)
 	    "tmux win32 highlight repro");
 	write_printf("\033[3;1H\033[96mRows: \033[39m%d  "
 	    "\033[96mWidth: \033[39m%d  "
-	    "\033[96mMode: \033[39m%s%s",
+	    "\033[96mMode: \033[39m%s%s%s",
 	    rows, width, full_redraw ? "full" : "partial",
-	    split_writes ? "+split" : "");
+	    split_writes ? "+split" : "",
+	    phased_updates ? "+phase" : "");
 	write_printf("\033[5;1H\033[30m\033[106m%-6s  %-8s  %-3s  %-6s  "
 	    "%8s  %-4s  %-11s  %-11s  %s\033[39m\033[49m",
 	    "PID", "USER", "PRI", "CPU%", "MEM", "THRD", "DISK", "TIME",
@@ -168,6 +171,15 @@ move_selection(int delta)
 
 	if (full_redraw)
 		draw_all();
+	else if (phased_updates) {
+		draw_row(selected, 1);
+		FlushFileBuffers(output);
+		if (phase_delay_ms != 0)
+			Sleep((DWORD)phase_delay_ms);
+		draw_row(selected, 1);
+		draw_row(old, 0);
+		write_printf("\033[%d;1H", 8 + rows);
+	}
 	else {
 		draw_row(old, 0);
 		draw_row(selected, 1);
@@ -181,7 +193,7 @@ usage(void)
 	fprintf(stderr,
 	    "usage: win32-highlight-repro [--auto N] [--delay MS] [--rows N]\n"
 	    "                             [--width N] [--full] [--split]\n"
-	    "                             [--hold]\n");
+	    "                             [--phase] [--phase-delay MS] [--hold]\n");
 	exit(1);
 }
 
@@ -212,6 +224,14 @@ main(int argc, char **argv)
 			full_redraw = 1;
 		else if (strcmp(argv[i], "--split") == 0)
 			split_writes = 1;
+		else if (strcmp(argv[i], "--phase") == 0)
+			phased_updates = 1;
+		else if (strcmp(argv[i], "--phase-delay") == 0) {
+			if (++i == argc)
+				usage();
+			phase_delay_ms = atoi(argv[i]);
+			phased_updates = 1;
+		}
 		else if (strcmp(argv[i], "--hold") == 0)
 			hold_after_auto = 1;
 		else
@@ -222,6 +242,8 @@ main(int argc, char **argv)
 	if (width < 40 || width > 240)
 		usage();
 	if (delay_ms < 0)
+		usage();
+	if (phase_delay_ms < 0)
 		usage();
 
 	_setmode(_fileno(stdout), _O_BINARY);
