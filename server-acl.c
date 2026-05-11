@@ -80,8 +80,7 @@ void
 server_acl_display(struct cmdq_item *item)
 {
 #ifdef TMUX_WIN32
-	cmdq_print(item,
-	    "native Windows MVP: ACLs are limited to the current user");
+	cmdq_print(item, "Windows ACLs are limited to the current user");
 #else
 	struct server_acl_user	*loop;
 	struct passwd		*pw;

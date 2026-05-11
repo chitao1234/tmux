@@ -1569,6 +1569,11 @@ writable.
 .Fl l
 lists current access permissions.
 .Pp
+On Windows,
+.Ic server-access
+can only list the current user; changing server access for other users is not
+supported.
+.Pp
 By default, the access list is empty and
 .Nm
 creates sockets with file system permissions preventing access by any user

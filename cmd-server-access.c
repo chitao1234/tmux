@@ -80,6 +80,11 @@ cmd_server_access_exec(struct cmd *self, struct cmdq_item *item)
 		server_acl_display(item);
 		return (CMD_RETURN_NORMAL);
 	}
+#ifdef TMUX_WIN32
+	cmdq_error(item,
+	    "server-access can only list the current user on Windows");
+	return (CMD_RETURN_ERROR);
+#endif
 	if (args_count(args) == 0) {
 		cmdq_error(item, "missing user argument");
 		return (CMD_RETURN_ERROR);
