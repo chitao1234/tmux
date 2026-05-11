@@ -1985,6 +1985,9 @@ struct client_file {
 	struct evbuffer			*buffer;
 	struct bufferevent		*event;
 
+	int				 flags;
+#define CLIENT_FILE_TEXT 0x1
+#define CLIENT_FILE_LAST_CR 0x2
 	int				 fd;
 	int				 error;
 	int				 closed;

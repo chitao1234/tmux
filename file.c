@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef TMUX_WIN32
+#include <io.h>
+#endif
 
 #include "tmux.h"
 
@@ -642,6 +645,65 @@ file_write_sync(struct client_file *cf, const void *data, size_t size)
 	if (cf->cb != NULL)
 		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
 }
+
+static int
+file_write_sync_console_text(struct client_file *cf, const char *data,
+    size_t size)
+{
+	HANDLE		 handle;
+	intptr_t	 osfhandle;
+	DWORD		 mode;
+	struct evbuffer	*buffer;
+	const char	*ptr, *start, *end;
+	int		 error;
+
+	osfhandle = _get_osfhandle(cf->fd);
+	handle = (HANDLE)osfhandle;
+	if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode))
+		return (0);
+
+	buffer = evbuffer_new();
+	if (buffer == NULL)
+		fatalx("out of memory");
+
+	start = ptr = data;
+	end = data + size;
+	while (ptr != end) {
+		if (*ptr == '\n' && (~cf->flags & CLIENT_FILE_LAST_CR)) {
+			if (ptr != start)
+				evbuffer_add(buffer, start, ptr - start);
+			evbuffer_add(buffer, "\r\n", 2);
+			start = ptr + 1;
+		}
+		cf->flags &= ~CLIENT_FILE_LAST_CR;
+		if (*ptr == '\r')
+			cf->flags |= CLIENT_FILE_LAST_CR;
+		ptr++;
+	}
+	if (ptr != start)
+		evbuffer_add(buffer, start, ptr - start);
+
+	error = 0;
+	if (EVBUFFER_LENGTH(buffer) != 0 &&
+	    win32_handle_write(handle, EVBUFFER_DATA(buffer),
+	    EVBUFFER_LENGTH(buffer)) == -1)
+		error = errno;
+	evbuffer_free(buffer);
+
+	if (error != 0) {
+		log_debug("write error file %d: %s", cf->stream,
+		    strerror(error));
+		close(cf->fd);
+		cf->fd = -1;
+		if (cf->cb != NULL)
+			cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+		return (1);
+	}
+
+	if (cf->cb != NULL)
+		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+	return (1);
+}
 #endif
 
 /* Handle a file write open message (client). */
@@ -694,6 +756,12 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		error = errno;
 		goto reply;
 	}
+#ifdef TMUX_WIN32
+	if (msg->fd == STDOUT_FILENO || msg->fd == STDERR_FILENO) {
+		if (msg->stream == STDOUT_FILENO || msg->stream == STDERR_FILENO)
+			cf->flags |= CLIENT_FILE_TEXT;
+	}
+#endif
 
 #ifndef TMUX_WIN32
 	cf->event = bufferevent_new(cf->fd, NULL, file_write_callback,
@@ -728,8 +796,13 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 
 #ifdef TMUX_WIN32
 	if (cf->event == NULL) {
-		if (cf->fd != -1)
+		if (cf->fd != -1) {
+			if ((cf->flags & CLIENT_FILE_TEXT) &&
+			    file_write_sync_console_text(cf, (const char *)(msg + 1),
+			    size))
+				return;
 			file_write_sync(cf, msg + 1, size);
+		}
 		return;
 	}
 #endif
