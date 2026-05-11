@@ -1643,6 +1643,11 @@ $ tmux start \\; show \-g
 Suspend a client by sending
 .Dv SIGTSTP
 (tty stop).
+On Windows,
+.Ic suspend-client
+detaches the client instead because Windows consoles do not have
+.Dv SIGTSTP
+job control.
 .Tg switchc
 .It Xo Ic switch\-client
 .Op Fl ElnprZ

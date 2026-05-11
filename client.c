@@ -1113,9 +1113,7 @@ client_dispatch_attached(struct imsg *imsg)
 			fatalx("bad MSG_SUSPEND size");
 
 #ifdef TMUX_WIN32
-		client_exitreason = CLIENT_EXIT_MESSAGE_PROVIDED;
-		client_exitmessage = xstrdup(
-		    "suspend-client is not supported in the native Windows MVP");
+		client_exitreason = CLIENT_EXIT_DETACHED;
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 #else
 		memset(&sigact, 0, sizeof sigact);

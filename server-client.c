@@ -575,10 +575,12 @@ void
 server_client_suspend(struct client *c)
 {
 #ifdef TMUX_WIN32
-	if (c->session != NULL) {
-		status_message_set(c, -1, 1, 0, 0,
-		    "suspend-client is not supported in the native Windows MVP");
-	}
+	/*
+	 * Windows consoles do not have SIGTSTP job control. Detaching is the
+	 * useful part of suspend-client there: return the terminal to the
+	 * shell and leave the session running for a later attach.
+	 */
+	server_client_detach(c, MSG_DETACH);
 #else
 	struct session	*s = c->session;
 
