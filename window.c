@@ -1259,6 +1259,30 @@ window_pane_reset_mode_all(struct window_pane *wp)
 		window_pane_reset_mode(wp);
 }
 
+static int
+window_pane_input_ready(struct window_pane *wp)
+{
+	if (wp->flags & PANE_INPUTOFF)
+		return (0);
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL)
+		return (~wp->flags & PANE_EXITED);
+#endif
+	return (wp->fd != -1);
+}
+
+static void
+window_pane_write_data(struct window_pane *wp, const void *buf, size_t len)
+{
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL) {
+		win32_pane_write(wp, buf, len);
+		return;
+	}
+#endif
+	bufferevent_write(wp->event, buf, len);
+}
+
 static void
 window_pane_copy_paste(struct window_pane *wp, char *buf, size_t len)
 {
@@ -1267,12 +1291,11 @@ window_pane_copy_paste(struct window_pane *wp, char *buf, size_t len)
 	TAILQ_FOREACH(loop, &wp->window->panes, entry) {
 		if (loop != wp &&
 		    TAILQ_EMPTY(&loop->modes) &&
-		    loop->fd != -1 &&
-		    (~loop->flags & PANE_INPUTOFF) &&
+		    window_pane_input_ready(loop) &&
 		    window_pane_visible(loop) &&
 		    options_get_number(loop->options, "synchronize-panes")) {
 			log_debug("%s: %.*s", __func__, (int)len, buf);
-			bufferevent_write(loop->event, buf, len);
+			window_pane_write_data(loop, buf, len);
 		}
 	}
 }
@@ -1285,8 +1308,7 @@ window_pane_copy_key(struct window_pane *wp, key_code key)
 	TAILQ_FOREACH(loop, &wp->window->panes, entry) {
 		if (loop != wp &&
 		    TAILQ_EMPTY(&loop->modes) &&
-		    loop->fd != -1 &&
-		    (~loop->flags & PANE_INPUTOFF) &&
+		    window_pane_input_ready(loop) &&
 		    window_pane_visible(loop) &&
 		    options_get_number(loop->options, "synchronize-panes"))
 			input_key_pane(loop, key, NULL);
@@ -1299,14 +1321,14 @@ window_pane_paste(struct window_pane *wp, key_code key, char *buf, size_t len)
 	if (!TAILQ_EMPTY(&wp->modes))
 		return;
 
-	if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
+	if (!window_pane_input_ready(wp))
 		return;
 
 	if (KEYC_IS_PASTE(key) && (~wp->screen->mode & MODE_BRACKETPASTE))
 		return;
 
 	log_debug("%s: %.*s", __func__, (int)len, buf);
-	bufferevent_write(wp->event, buf, len);
+	window_pane_write_data(wp, buf, len);
 
 	if (options_get_number(wp->options, "synchronize-panes"))
 		window_pane_copy_paste(wp, buf, len);
@@ -1330,7 +1352,7 @@ window_pane_key(struct window_pane *wp, struct client *c, struct session *s,
 		return (0);
 	}
 
-	if (wp->fd == -1 || wp->flags & PANE_INPUTOFF)
+	if (!window_pane_input_ready(wp))
 		return (0);
 
 	if (input_key_pane(wp, key, m) != 0)
@@ -1354,6 +1376,10 @@ window_pane_visible(struct window_pane *wp)
 int
 window_pane_exited(struct window_pane *wp)
 {
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL)
+		return (wp->flags & PANE_EXITED);
+#endif
 	return (wp->fd == -1 || (wp->flags & PANE_EXITED));
 }
 
