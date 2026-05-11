@@ -37,12 +37,14 @@ struct win32_job {
 	HANDLE		 process;
 	HANDLE		 thread;
 	DWORD		 process_id;
+	HPCON		 hpcon;
 	HANDLE		 stdin_read;
 	HANDLE		 stdin_write;
 	HANDLE		 stdout_read;
 	HANDLE		 stdout_write;
 	struct win32_handle_event *output_event;
 	struct bufferevent *event;
+	int		 pty;
 	int		 status;
 };
 
@@ -495,24 +497,21 @@ win32_job_error_cb(void *arg)
 struct win32_job *
 win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
     struct environ *env, __unused struct session *s, const char *cwd,
-    int flags, __unused int sx, __unused int sy, char **cause)
+    int flags, int sx, int sy, char **cause)
 {
 	struct win32_job		*wj;
 	STARTUPINFOW		 si;
+	STARTUPINFOEXW		 six;
 	PROCESS_INFORMATION	 pi;
+	SIZE_T			 attr_size = 0;
+	COORD			 size;
 	wchar_t			*wcmd = NULL, *wcwd = NULL, *wenv = NULL;
+	DWORD			 creation_flags;
+	HRESULT			 hr;
 	BOOL			 ok;
 
-	if (flags & JOB_PTY) {
-		if (cause != NULL) {
-			xasprintf(cause,
-			    "PTY jobs are not supported in the native Windows MVP");
-		}
-		errno = ENOSYS;
-		return (NULL);
-	}
-
 	wj = xcalloc(1, sizeof *wj);
+	wj->pty = !!(flags & JOB_PTY);
 	if (win32_make_pipe(&wj->stdin_read, &wj->stdin_write, 1, 0) != 0 ||
 	    win32_make_pipe(&wj->stdout_read, &wj->stdout_write, 0, 1) != 0) {
 		if (cause != NULL) {
@@ -523,20 +522,64 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	}
 
 	memset(&si, 0, sizeof si);
+	memset(&six, 0, sizeof six);
 	memset(&pi, 0, sizeof pi);
-	si.cb = sizeof si;
-	si.dwFlags = STARTF_USESTDHANDLES;
-	si.hStdInput = wj->stdin_read;
-	si.hStdOutput = wj->stdout_write;
-	si.hStdError = (flags & JOB_SHOWSTDERR) ?
-	    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
-
 	wcmd = win32_build_job_command(cmd, shell, argc, argv);
 	if (cwd != NULL)
 		wcwd = win32_utf8_to_wide(cwd);
 	wenv = win32_build_environment(env);
-	ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-	    CREATE_UNICODE_ENVIRONMENT, wenv, wcwd, &si, &pi);
+	creation_flags = CREATE_UNICODE_ENVIRONMENT;
+
+	if (wj->pty) {
+		size.X = sx <= 0 ? 80 : sx;
+		size.Y = sy <= 0 ? 24 : sy;
+		hr = CreatePseudoConsole(size, wj->stdin_read,
+		    wj->stdout_write, 0, &wj->hpcon);
+		if (FAILED(hr)) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "CreatePseudoConsole job failed: 0x%08lx",
+				    (unsigned long)hr);
+			}
+			goto fail;
+		}
+
+		six.StartupInfo.cb = sizeof six;
+		six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+		InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+		six.lpAttributeList = xcalloc(1, attr_size);
+		if (!InitializeProcThreadAttributeList(six.lpAttributeList, 1,
+		    0, &attr_size)) {
+			if (cause != NULL) {
+				xasprintf(cause, "InitializeProcThreadAttributeList "
+				    "job failed: %s",
+				    win32_strerror(GetLastError()));
+			}
+			goto fail;
+		}
+		if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
+		    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, wj->hpcon,
+		    sizeof wj->hpcon, NULL, NULL)) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "UpdateProcThreadAttribute job failed: %s",
+				    win32_strerror(GetLastError()));
+			}
+			goto fail;
+		}
+		creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+		ok = CreateProcessW(NULL, wcmd, NULL, NULL, FALSE,
+		    creation_flags, wenv, wcwd, &six.StartupInfo, &pi);
+	} else {
+		si.cb = sizeof si;
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdInput = wj->stdin_read;
+		si.hStdOutput = wj->stdout_write;
+		si.hStdError = (flags & JOB_SHOWSTDERR) ?
+		    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
+		ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
+		    creation_flags, wenv, wcwd, &si, &pi);
+	}
 	if (!ok) {
 		if (cause != NULL) {
 			xasprintf(cause, "CreateProcess job failed: %s",
@@ -562,12 +605,20 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		goto fail;
 	}
 
+	if (six.lpAttributeList != NULL) {
+		DeleteProcThreadAttributeList(six.lpAttributeList);
+		free(six.lpAttributeList);
+	}
 	free(wcmd);
 	free(wcwd);
 	free(wenv);
 	return (wj);
 
 fail:
+	if (six.lpAttributeList != NULL) {
+		DeleteProcThreadAttributeList(six.lpAttributeList);
+		free(six.lpAttributeList);
+	}
 	free(wcmd);
 	free(wcwd);
 	free(wenv);
@@ -578,6 +629,8 @@ fail:
 			bufferevent_free(wj->event);
 		if (wj->process != NULL)
 			TerminateProcess(wj->process, 1);
+		if (wj->hpcon != NULL)
+			ClosePseudoConsole(wj->hpcon);
 		win32_close_handle(&wj->stdin_read);
 		win32_close_handle(&wj->stdin_write);
 		win32_close_handle(&wj->stdout_read);
@@ -599,6 +652,8 @@ win32_job_close(struct win32_job *wj)
 	if (wj->output_event != NULL)
 		win32_handle_event_free(wj->output_event);
 	wj->event = NULL;
+	if (wj->hpcon != NULL)
+		ClosePseudoConsole(wj->hpcon);
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdin_write);
 	win32_close_handle(&wj->stdout_read);
@@ -609,9 +664,15 @@ win32_job_close(struct win32_job *wj)
 }
 
 void
-win32_job_resize(__unused struct win32_job *wj, __unused u_int sx,
-    __unused u_int sy)
+win32_job_resize(struct win32_job *wj, u_int sx, u_int sy)
 {
+	COORD	size;
+
+	if (wj->hpcon == NULL)
+		return;
+	size.X = sx == 0 ? 80 : sx;
+	size.Y = sy == 0 ? 24 : sy;
+	ResizePseudoConsole(wj->hpcon, size);
 }
 
 int

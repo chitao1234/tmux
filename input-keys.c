@@ -33,6 +33,9 @@
 static void	 input_key_mouse(struct window_pane *, struct mouse_event *);
 
 static struct window_pane	*input_key_pane_target;
+#ifdef TMUX_WIN32
+static struct job		*input_key_job_target;
+#endif
 
 /* Entry in the key tree. */
 struct input_key_entry {
@@ -417,6 +420,20 @@ input_key_pane(struct window_pane *wp, key_code key, struct mouse_event *m)
 	return (ret);
 }
 
+#ifdef TMUX_WIN32
+/* Translate a key code into an output key sequence for a job. */
+int
+input_key_job(struct screen *s, struct job *job, key_code key)
+{
+	int	ret;
+
+	input_key_job_target = job;
+	ret = input_key(s, job_get_event(job), key);
+	input_key_job_target = NULL;
+	return (ret);
+}
+#endif
+
 static void
 input_key_write(const char *from, struct bufferevent *bev, const char *data,
     size_t size)
@@ -426,6 +443,10 @@ input_key_write(const char *from, struct bufferevent *bev, const char *data,
 	if (input_key_pane_target != NULL &&
 	    input_key_pane_target->win32 != NULL) {
 		win32_pane_write(input_key_pane_target, data, size);
+		return;
+	}
+	if (input_key_job_target != NULL) {
+		job_write(input_key_job_target, data, size);
 		return;
 	}
 #endif

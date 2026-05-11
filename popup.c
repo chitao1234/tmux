@@ -91,9 +91,11 @@ static const struct menu_item popup_menu_items[] = {
 	{ "", KEYC_NONE, NULL },
 	{ "Fill Space", 'F', NULL },
 	{ "Centre", 'C', NULL },
+#ifndef TMUX_WIN32
 	{ "", KEYC_NONE, NULL },
 	{ "To Horizontal Pane", 'h', NULL },
 	{ "To Vertical Pane", 'v', NULL },
+#endif
 
 	{ NULL, KEYC_NONE, NULL }
 };
@@ -458,6 +460,16 @@ popup_make_pane(struct popup_data *pd, enum layout_type type)
 }
 
 static void
+popup_job_write(struct popup_data *pd, const char *buf, size_t len)
+{
+#ifdef TMUX_WIN32
+	job_write(pd->job, buf, len);
+#else
+	bufferevent_write(job_get_event(pd->job), buf, len);
+#endif
+}
+
+static void
 popup_menu_done(__unused struct menu *menu, __unused u_int choice,
     key_code key, void *data)
 {
@@ -476,7 +488,7 @@ popup_menu_done(__unused struct menu *menu, __unused u_int choice,
 		pb = paste_get_top(NULL);
 		if (pb != NULL) {
 			buf = paste_buffer_data(pb, &len);
-			bufferevent_write(job_get_event(pd->job), buf, len);
+			popup_job_write(pd, buf, len);
 		}
 		break;
 	case 'F':
@@ -642,10 +654,14 @@ popup_key_cb(struct client *c, void *data, struct key_event *event)
 			}
 			if (!input_key_get_mouse(&pd->s, m, px, py, &buf, &len))
 				return (0);
-			bufferevent_write(job_get_event(pd->job), buf, len);
+			popup_job_write(pd, buf, len);
 			return (0);
 		}
+#ifdef TMUX_WIN32
+		input_key_job(&pd->s, pd->job, event->key);
+#else
 		input_key(&pd->s, job_get_event(pd->job), event->key);
+#endif
 	}
 	return (0);
 
