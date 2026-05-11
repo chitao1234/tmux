@@ -46,7 +46,7 @@ static struct tty_key *tty_keys_find(struct tty *, const char *, size_t,
 		    size_t *);
 static int	tty_keys_next1(struct tty *, const char *, size_t, key_code *,
 		    size_t *, int);
-static void	tty_keys_callback(int, short, void *);
+static void	tty_keys_callback(tmux_event_fd, short, void *);
 static int	tty_keys_extended_key(struct tty *, const char *, size_t,
 		    size_t *, key_code *);
 static int	tty_keys_mouse(struct tty *, const char *, size_t, size_t *,
@@ -1025,7 +1025,7 @@ discard_key:
 
 /* Key timer callback. */
 static void
-tty_keys_callback(__unused int fd, __unused short events, void *data)
+tty_keys_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	struct tty	*tty = data;
 

@@ -35,7 +35,7 @@ static enum args_parse_type	cmd_run_shell_args_parse(struct args *, u_int,
 static enum cmd_retval		cmd_run_shell_exec(struct cmd *,
 				    struct cmdq_item *);
 
-static void	cmd_run_shell_timer(int, short, void *);
+static void	cmd_run_shell_timer(tmux_event_fd, short, void *);
 static void	cmd_run_shell_callback(struct job *);
 static void	cmd_run_shell_free(void *);
 static void	cmd_run_shell_print(struct job *, const char *);
@@ -180,7 +180,7 @@ cmd_run_shell_exec(struct cmd *self, struct cmdq_item *item)
 }
 
 static void
-cmd_run_shell_timer(__unused int fd, __unused short events, void* arg)
+cmd_run_shell_timer(__unused tmux_event_fd fd, __unused short events, void* arg)
 {
 	struct cmd_run_shell_data	*cdata = arg;
 	struct client			*c = cdata->client;

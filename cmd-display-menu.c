@@ -107,7 +107,7 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 	char			*p;
 	int			 top;
 	u_int			 line, ox, oy, sx, sy, lines, position;
-	long			 n;
+	long			 limit, n;
 	struct format_tree	*ft;
 
 	/*
@@ -176,6 +176,8 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 	format_add(ft, "popup_width", "%u", w);
 	format_add(ft, "popup_height", "%u", h);
 
+	limit = tty->sy;
+
 	/* Position so popup is in the centre. */
 	n = (long)(tty->sx - 1) / 2 - w / 2;
 	if (n < 0)
@@ -183,7 +185,7 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 	else
 		format_add(ft, "popup_centre_x", "%ld", n);
 	n = (tty->sy - 1) / 2 + h / 2;
-	if (n >= tty->sy)
+	if (n >= limit)
 		format_add(ft, "popup_centre_y", "%u", tty->sy - h);
 	else
 		format_add(ft, "popup_centre_y", "%ld", n);
@@ -195,18 +197,18 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 			format_add(ft, "popup_mouse_centre_x", "%u", 0);
 		else
 			format_add(ft, "popup_mouse_centre_x", "%ld", n);
-		n = event->m.y - h / 2;
-		if (n + h >= tty->sy) {
+		n = (long)event->m.y - h / 2;
+		if (n + (long)h >= limit) {
 			format_add(ft, "popup_mouse_centre_y", "%u",
 			    tty->sy - h);
 		} else
 			format_add(ft, "popup_mouse_centre_y", "%ld", n);
 		n = (long)event->m.y + h;
-		if (n >= tty->sy)
+		if (n >= limit)
 			format_add(ft, "popup_mouse_top", "%u", tty->sy - 1);
 		else
 			format_add(ft, "popup_mouse_top", "%ld", n);
-		n = event->m.y - h;
+		n = (long)event->m.y - h;
 		if (n < 0)
 			format_add(ft, "popup_mouse_bottom", "%u", 0);
 		else
@@ -216,7 +218,7 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 	/* Position in pane. */
 	tty_window_offset(&tc->tty, &ox, &oy, &sx, &sy);
 	n = top + wp->yoff - oy + h;
-	if (n >= tty->sy)
+	if (n >= limit)
 		format_add(ft, "popup_pane_top", "%u", tty->sy - h);
 	else
 		format_add(ft, "popup_pane_top", "%ld", n);
@@ -242,7 +244,8 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 		xp = "#{popup_window_status_line_x}";
 	p = format_expand(ft, xp);
 	n = strtol(p, NULL, 10);
-	if (n + w >= tty->sx)
+	limit = tty->sx;
+	if (n + (long)w >= limit)
 		n = tty->sx - w;
 	else if (n < 0)
 		n = 0;
@@ -264,11 +267,13 @@ cmd_display_menu_get_pos(struct client *tc, struct cmdq_item *item,
 		yp = "#{popup_window_status_line_y}";
 	p = format_expand(ft, yp);
 	n = strtol(p, NULL, 10);
-	if (n < h)
+	limit = h;
+	if (n < limit)
 		n = 0;
 	else
 		n -= h;
-	if (n + h >= tty->sy)
+	limit = tty->sy;
+	if (n + (long)h >= limit)
 		n = tty->sy - h;
 	else if (n < 0)
 		n = 0;

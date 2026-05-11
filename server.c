@@ -57,7 +57,7 @@ time_t			 current_time;
 
 static int	server_loop(void);
 static void	server_send_exit(void);
-static void	server_accept(int, short, void *);
+static void	server_accept(tmux_event_fd, short, void *);
 static void	server_signal(int);
 #ifndef TMUX_WIN32
 static void	server_child_signal(void);
@@ -162,7 +162,7 @@ fail:
 
 /* Tidy up every hour. */
 static void
-server_tidy_event(__unused int fd, __unused short events, __unused void *data)
+server_tidy_event(__unused tmux_event_fd fd, __unused short events, __unused void *data)
 {
     struct timeval	tv = { .tv_sec = 3600 };
     uint64_t		t = get_timer();
@@ -401,7 +401,7 @@ server_update_socket(void)
 
 /* Callback for server socket. */
 static void
-server_accept(int fd, short events, __unused void *data)
+server_accept(tmux_event_fd fd, short events, __unused void *data)
 {
 #ifdef TMUX_WIN32
 	char			*cause = NULL;

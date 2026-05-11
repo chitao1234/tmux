@@ -31,13 +31,13 @@
 
 #include "tmux.h"
 
-static void	server_client_free(int, short, void *);
+static void	server_client_free(tmux_event_fd, short, void *);
 static void	server_client_check_pane_resize(struct window_pane *);
 static void	server_client_check_pane_buffer(struct window_pane *);
 static void	server_client_check_window_resize(struct window *);
 static key_code	server_client_check_mouse(struct client *, struct key_event *);
-static void	server_client_repeat_timer(int, short, void *);
-static void	server_client_click_timer(int, short, void *);
+static void	server_client_repeat_timer(tmux_event_fd, short, void *);
+static void	server_client_click_timer(tmux_event_fd, short, void *);
 static void	server_client_check_exit(struct client *);
 static void	server_client_check_redraw(struct client *);
 static void	server_client_check_modes(struct client *);
@@ -82,7 +82,7 @@ server_client_how_many(void)
 
 /* Overlay timer callback. */
 static void
-server_client_overlay_timer(__unused int fd, __unused short events, void *data)
+server_client_overlay_timer(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	server_client_clear_overlay(data);
 }
@@ -549,7 +549,7 @@ server_client_unref(struct client *c)
 
 /* Free dead client. */
 static void
-server_client_free(__unused int fd, __unused short events, void *arg)
+server_client_free(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct client	*c = arg;
 
@@ -1559,7 +1559,7 @@ server_client_check_window_resize(struct window *w)
 
 /* Resize timer event. */
 static void
-server_client_resize_timer(__unused int fd, __unused short events, void *data)
+server_client_resize_timer(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	struct window_pane	*wp = data;
 
@@ -1840,7 +1840,7 @@ server_client_reset_state(struct client *c)
 
 /* Repeat time callback. */
 static void
-server_client_repeat_timer(__unused int fd, __unused short events, void *data)
+server_client_repeat_timer(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	struct client	*c = data;
 
@@ -1853,7 +1853,7 @@ server_client_repeat_timer(__unused int fd, __unused short events, void *data)
 
 /* Double-click callback. */
 static void
-server_client_click_timer(__unused int fd, __unused short events, void *data)
+server_client_click_timer(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	struct client		*c = data;
 	struct key_event	*event;
@@ -1928,7 +1928,7 @@ server_client_check_exit(struct client *c)
 
 /* Redraw timer callback. */
 static void
-server_client_redraw_timer(__unused int fd, __unused short events,
+server_client_redraw_timer(__unused tmux_event_fd fd, __unused short events,
     __unused void *data)
 {
 	log_debug("redraw timer fired");

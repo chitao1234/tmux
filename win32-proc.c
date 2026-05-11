@@ -42,7 +42,7 @@ win32_check_children(void)
 }
 
 int
-win32_server_spawn(const char *socket_path, uint64_t flags, char **cause)
+win32_server_spawn(const char *path, uint64_t flags, char **cause)
 {
 	wchar_t		 exe[MAX_PATH], *cmd;
 	STARTUPINFOW	 si;
@@ -62,7 +62,7 @@ win32_server_spawn(const char *socket_path, uint64_t flags, char **cause)
 		xasprintf(cause, "couldn't convert executable path");
 		return (-1);
 	}
-	xasprintf(&utf8, "\"%s\" -D -vv -S \"%s\" -w", exe_utf8, socket_path);
+	xasprintf(&utf8, "\"%s\" -D -vv -S \"%s\" -w", exe_utf8, path);
 	free(exe_utf8);
 	cmd = win32_utf8_to_wide(utf8);
 	free(utf8);

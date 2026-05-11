@@ -123,7 +123,12 @@ struct winlink;
 #define DEFAULT_YPIXEL 32
 
 /* Attribute to make GCC check printf-like arguments. */
-#define printflike(a, b) __attribute__ ((format (printf, a, b)))
+#ifdef __MINGW32__
+#define PRINTF_FORMAT gnu_printf
+#else
+#define PRINTF_FORMAT printf
+#endif
+#define printflike(a, b) __attribute__ ((format (PRINTF_FORMAT, a, b)))
 
 /* Number of items in array. */
 #ifndef nitems

@@ -153,7 +153,7 @@ file_free(struct client_file *cf)
 
 /* Event to fire the done callback. */
 static void
-file_fire_done_cb(__unused int fd, __unused short events, void *arg)
+file_fire_done_cb(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct client_file	*cf = arg;
 	struct client		*c = cf->c;
@@ -456,7 +456,7 @@ file_cancel(struct client_file *cf)
 
 /* Push event, fired if there is more writing to be done. */
 static void
-file_push_cb(__unused int fd, __unused short events, void *arg)
+file_push_cb(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct client_file	*cf = arg;
 

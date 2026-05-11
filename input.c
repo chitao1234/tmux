@@ -149,7 +149,7 @@ struct input_ctx {
 
 /* Helper functions. */
 struct input_transition;
-static void 	input_request_timer_callback(int, short, void *);
+static void 	input_request_timer_callback(tmux_event_fd, short, void *);
 static void	input_start_request_timer(struct input_ctx *);
 static struct input_request *input_make_request(struct input_ctx *,
 		    enum input_request_type);
@@ -795,7 +795,7 @@ input_stop_utf8(struct input_ctx *ictx)
  * long, so reset to ground.
  */
 static void
-input_ground_timer_callback(__unused int fd, __unused short events, void *arg)
+input_ground_timer_callback(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct input_ctx	*ictx = arg;
 
@@ -3324,7 +3324,7 @@ input_set_buffer_size(size_t buffer_size)
 
 /* Request timer. Remove any requests that are too old. */
 static void
-input_request_timer_callback(__unused int fd, __unused short events, void *arg)
+input_request_timer_callback(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct input_ctx	*ictx = arg;
 	struct input_request	*ir, *ir1;

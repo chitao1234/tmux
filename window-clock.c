@@ -32,7 +32,7 @@ static void	window_clock_key(struct window_mode_entry *, struct client *,
 		     struct session *, struct winlink *, key_code,
 		     struct mouse_event *);
 
-static void	window_clock_timer_callback(int, short, void *);
+static void	window_clock_timer_callback(tmux_event_fd, short, void *);
 static void	window_clock_draw_screen(struct window_mode_entry *);
 
 const struct window_mode window_clock_mode = {
@@ -144,7 +144,7 @@ window_clock_start_timer(struct window_mode_entry *wme)
 }
 
 static void
-window_clock_timer_callback(__unused int fd, __unused short events, void *arg)
+window_clock_timer_callback(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct window_mode_entry	*wme = arg;
 	struct window_pane		*wp = wme->wp;

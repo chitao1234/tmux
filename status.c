@@ -29,8 +29,8 @@
 
 #include "tmux.h"
 
-static void	 status_message_callback(int, short, void *);
-static void	 status_timer_callback(int, short, void *);
+static void	 status_message_callback(tmux_event_fd, short, void *);
+static void	 status_timer_callback(tmux_event_fd, short, void *);
 
 static char	*status_prompt_find_history_file(void);
 static const char *status_prompt_up_history(u_int *, u_int);
@@ -177,7 +177,7 @@ status_prompt_save_history(void)
 
 /* Status timer callback. */
 static void
-status_timer_callback(__unused int fd, __unused short events, void *arg)
+status_timer_callback(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct client	*c = arg;
 	struct session	*s = c->session;
@@ -527,7 +527,7 @@ status_message_clear(struct client *c)
 
 /* Clear status line message after timer expires. */
 static void
-status_message_callback(__unused int fd, __unused short event, void *data)
+status_message_callback(__unused tmux_event_fd fd, __unused short event, void *data)
 {
 	struct client	*c = data;
 

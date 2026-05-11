@@ -23,6 +23,12 @@
 #define __bounded__(x, y, z)
 #endif
 
+#ifdef __MINGW32__
+#define XMALLOC_PRINTF_FORMAT gnu_printf
+#else
+#define XMALLOC_PRINTF_FORMAT printf
+#endif
+
 void	*xmalloc(size_t);
 void	*xcalloc(size_t, size_t);
 void	*xrealloc(void *, size_t);
@@ -31,17 +37,17 @@ void	*xrecallocarray(void *, size_t, size_t, size_t);
 char	*xstrdup(const char *);
 char	*xstrndup(const char *, size_t);
 int	 xasprintf(char **, const char *, ...)
-		__attribute__((__format__ (printf, 2, 3)))
+		__attribute__((__format__ (XMALLOC_PRINTF_FORMAT, 2, 3)))
 		__attribute__((__nonnull__ (2)));
 int	 xvasprintf(char **, const char *, va_list)
-		__attribute__((__format__ (printf, 2, 0)))
+		__attribute__((__format__ (XMALLOC_PRINTF_FORMAT, 2, 0)))
 		__attribute__((__nonnull__ (2)));
 int	 xsnprintf(char *, size_t, const char *, ...)
-		__attribute__((__format__ (printf, 3, 4)))
+		__attribute__((__format__ (XMALLOC_PRINTF_FORMAT, 3, 4)))
 		__attribute__((__nonnull__ (3)))
 		__attribute__((__bounded__ (__string__, 1, 2)));
 int	 xvsnprintf(char *, size_t, const char *, va_list)
-		__attribute__((__format__ (printf, 3, 0)))
+		__attribute__((__format__ (XMALLOC_PRINTF_FORMAT, 3, 0)))
 		__attribute__((__nonnull__ (3)))
 		__attribute__((__bounded__ (__string__, 1, 2)));
 

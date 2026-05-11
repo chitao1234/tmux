@@ -58,6 +58,12 @@
 #endif
 #endif
 
+#ifdef TMUX_WIN32
+typedef evutil_socket_t tmux_event_fd;
+#else
+typedef int tmux_event_fd;
+#endif
+
 #ifdef HAVE_MALLOC_TRIM
 #include <malloc.h>
 #endif

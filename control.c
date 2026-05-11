@@ -1039,7 +1039,7 @@ control_check_subs_all_windows_one(struct client *c, struct control_sub *csub,
 
 /* Check subscriptions timer. */
 static void
-control_check_subs_timer(__unused int fd, __unused short events, void *data)
+control_check_subs_timer(__unused tmux_event_fd fd, __unused short events, void *data)
 {
 	struct client		*c = data;
 	struct control_state	*cs = c->control_state;
