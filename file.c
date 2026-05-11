@@ -43,6 +43,9 @@ file_get_path(struct client *c, const char *file)
 {
 	const char	*home;
 	char		*path, *full_path;
+#ifdef TMUX_WIN32
+	u_char		 drive;
+#endif
 
 	if (strncmp(file, "~/", 2) != 0)
 		path = xstrdup(file);
@@ -54,6 +57,16 @@ file_get_path(struct client *c, const char *file)
 	}
 	if (*path == '/')
 		return (path);
+#ifdef TMUX_WIN32
+	drive = (u_char)path[0];
+	if (((drive >= 'A' && drive <= 'Z') ||
+	    (drive >= 'a' && drive <= 'z')) &&
+	    path[1] == ':' &&
+	    (path[2] == '/' || path[2] == '\\'))
+		return (path);
+	if (path[0] == '\\' && path[1] == '\\')
+		return (path);
+#endif
 	xasprintf(&full_path, "%s/%s", server_client_get_cwd(c, NULL), path);
 	free(path);
 	return (full_path);
@@ -565,6 +578,49 @@ file_write_callback(__unused struct bufferevent *bev, void *arg)
 
 #ifdef TMUX_WIN32
 static void
+file_read_sync(struct client_file *cf)
+{
+	struct msg_read_data	*msg;
+	struct msg_read_done	 done;
+	ssize_t			 n;
+	size_t			 msgsize, msglen, readsize;
+
+	readsize = MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg;
+	msgsize = sizeof *msg + readsize;
+	msg = xmalloc(msgsize);
+
+	for (;;) {
+		n = read(cf->fd, msg + 1, readsize);
+		if (n == -1) {
+			if (errno == EINTR)
+				continue;
+			log_debug("read error file %d: %s", cf->stream,
+			    strerror(errno));
+			done.error = errno;
+			break;
+		}
+		if (n == 0) {
+			done.error = 0;
+			break;
+		}
+
+		log_debug("read %zd from file %d", n, cf->stream);
+		msglen = (sizeof *msg) + n;
+		msg->stream = cf->stream;
+		proc_send(cf->peer, MSG_READ, -1, msg, msglen);
+	}
+
+	free(msg);
+	done.stream = cf->stream;
+	proc_send(cf->peer, MSG_READ_DONE, -1, &done, sizeof done);
+
+	close(cf->fd);
+	cf->fd = -1;
+	RB_REMOVE(client_files, cf->tree, cf);
+	file_free(cf);
+}
+
+static void
 file_write_sync(struct client_file *cf, const void *data, size_t size)
 {
 	const char	*ptr = data;
@@ -824,6 +880,12 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 		goto reply;
 	}
 
+#ifdef TMUX_WIN32
+	if (msg->fd == -1) {
+		file_read_sync(cf);
+		return;
+	}
+#endif
 	cf->event = bufferevent_new(cf->fd, file_read_callback, NULL,
 	    file_read_error_callback, cf);
 	if (cf->event == NULL)
