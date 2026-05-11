@@ -76,7 +76,7 @@ size_t		 win32_pane_buffered(struct window_pane *);
 struct bufferevent *win32_pane_get_event(struct window_pane *);
 int		 win32_pane_write(struct window_pane *, const void *, size_t);
 
-struct win32_job *win32_job_spawn(const char *, int, char **,
+struct win32_job *win32_job_spawn(const char *, const char *, int, char **,
 		     struct environ *, struct session *, const char *, int,
 		     int, int, char **);
 void		 win32_job_close(struct win32_job *);

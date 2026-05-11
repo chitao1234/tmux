@@ -122,7 +122,8 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	argv0 = shell_argv0(shell, 0);
 
 #ifdef TMUX_WIN32
-	wj = win32_job_spawn(cmd, argc, argv, env, s, cwd, flags, sx, sy, NULL);
+	wj = win32_job_spawn(cmd, shell, argc, argv, env, s, cwd, flags, sx,
+	    sy, NULL);
 	if (wj == NULL) {
 		environ_free(env);
 		free(argv0);

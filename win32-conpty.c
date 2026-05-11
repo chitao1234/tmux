@@ -191,40 +191,43 @@ win32_build_environment(struct environ *env)
 }
 
 static wchar_t *
-win32_build_job_command(const char *cmd, int argc, char **argv)
+win32_build_shell_command(const char *shell, const char *cmd)
 {
 	char	*line = NULL;
 	wchar_t	*wline;
 
+	if (shell == NULL || *shell == '\0')
+		shell = "cmd.exe";
 	if (cmd != NULL)
-		xasprintf(&line, "%s", cmd);
+		xasprintf(&line, "\"%s\" /d /s /c \"%s\"", shell, cmd);
 	else
-		return (win32_build_argv_command(argc, argv));
+		xasprintf(&line, "\"%s\"", shell);
 	wline = win32_utf8_to_wide(line);
 	free(line);
 	return (wline);
 }
 
 static wchar_t *
+win32_build_job_command(const char *cmd, const char *shell, int argc,
+    char **argv)
+{
+	if (cmd != NULL)
+		return (win32_build_shell_command(shell, cmd));
+	return (win32_build_argv_command(argc, argv));
+}
+
+static wchar_t *
 win32_build_command(struct window_pane *wp)
 {
 	const char	*shell, *cmd;
-	char		*line;
-	wchar_t		*wline;
 
 	shell = wp->shell;
-	if (shell == NULL || *shell == '\0')
-		shell = "cmd.exe";
 	if (wp->argc == 1) {
 		cmd = wp->argv[0];
-		xasprintf(&line, "\"%s\" /d /s /c \"%s\"", shell, cmd);
-	} else if (wp->argc > 1) {
+		return (win32_build_shell_command(shell, cmd));
+	} else if (wp->argc > 1)
 		return (win32_build_argv_command(wp->argc, wp->argv));
-	} else
-		xasprintf(&line, "\"%s\"", shell);
-	wline = win32_utf8_to_wide(line);
-	free(line);
-	return (wline);
+	return (win32_build_shell_command(shell, NULL));
 }
 
 static void
@@ -490,7 +493,7 @@ win32_job_error_cb(void *arg)
 }
 
 struct win32_job *
-win32_job_spawn(const char *cmd, int argc, char **argv,
+win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
     struct environ *env, __unused struct session *s, const char *cwd,
     int flags, __unused int sx, __unused int sy, char **cause)
 {
@@ -528,7 +531,7 @@ win32_job_spawn(const char *cmd, int argc, char **argv,
 	si.hStdError = (flags & JOB_SHOWSTDERR) ?
 	    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
 
-	wcmd = win32_build_job_command(cmd, argc, argv);
+	wcmd = win32_build_job_command(cmd, shell, argc, argv);
 	if (cwd != NULL)
 		wcwd = win32_utf8_to_wide(cwd);
 	wenv = win32_build_environment(env);
