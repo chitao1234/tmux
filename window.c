@@ -26,8 +26,8 @@
 #include <fcntl.h>
 #ifndef TMUX_WIN32
 #include <fnmatch.h>
-#include <regex.h>
 #endif
+#include <regex.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>

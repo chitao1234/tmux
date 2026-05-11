@@ -1068,6 +1068,10 @@ if test "x$PLATFORM" = xwin32; then
 		  #define WIN32_LEAN_AND_MEAN
 		  #include <windows.h>]]
 	)
+	AC_CHECK_HEADER(regex.h, [],
+		[AC_MSG_ERROR([native Windows build requires POSIX regex.h])])
+	AC_SEARCH_LIBS(regcomp, regex, [],
+		[AC_MSG_ERROR([native Windows build requires libregex])])
 	LIBS="$LIBS -lkernel32 -luser32 -ladvapi32 -lws2_32"
 fi
 

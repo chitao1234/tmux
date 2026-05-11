@@ -13,8 +13,7 @@
 
 #ifdef TMUX_WIN32
 #include "compat/win32-compat.h"
-#else
-#include_next <regex.h>
 #endif
+#include_next <regex.h>
 
 #endif /* TMUX_REGEX_H */

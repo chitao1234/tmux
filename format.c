@@ -4439,9 +4439,7 @@ static char *
 format_match(struct format_modifier *fm, const char *pattern, const char *text)
 {
 	const char	*s = "";
-#ifndef TMUX_WIN32
 	regex_t		 r;
-#endif
 	int		 flags = 0;
 
 	if (fm->argc >= 1)
