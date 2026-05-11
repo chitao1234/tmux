@@ -150,6 +150,31 @@ win32_build_argv_command(int argc, char **argv)
 	return (line);
 }
 
+static const char *
+win32_path_basename(const char *path)
+{
+	const char	*slash, *backslash;
+
+	if (path == NULL)
+		return ("");
+	slash = strrchr(path, '/');
+	backslash = strrchr(path, '\\');
+	if (slash == NULL || backslash > slash)
+		slash = backslash;
+	if (slash != NULL && slash[1] != '\0')
+		return (slash + 1);
+	return (path);
+}
+
+static int
+win32_shell_is_cmd(const char *shell)
+{
+	const char	*name = win32_path_basename(shell);
+
+	return (strcasecmp(name, "cmd.exe") == 0 ||
+	    strcasecmp(name, "cmd") == 0);
+}
+
 static wchar_t *
 win32_build_environment(struct environ *env)
 {
@@ -198,16 +223,26 @@ win32_build_shell_command(const char *shell, const char *cmd)
 {
 	char	*line = NULL;
 	wchar_t	*wline;
+	char	*argv[3];
 
 	if (shell == NULL || *shell == '\0')
 		shell = "cmd.exe";
-	if (cmd != NULL)
-		xasprintf(&line, "\"%s\" /d /s /c \"%s\"", shell, cmd);
-	else
-		xasprintf(&line, "\"%s\"", shell);
-	wline = win32_utf8_to_wide(line);
-	free(line);
-	return (wline);
+	if (win32_shell_is_cmd(shell)) {
+		if (cmd == NULL)
+			xasprintf(&line, "\"%s\"", shell);
+		else
+			xasprintf(&line, "\"%s\" /d /s /c \"%s\"", shell, cmd);
+		wline = win32_utf8_to_wide(line);
+		free(line);
+		return (wline);
+	}
+	argv[0] = (char *)shell;
+	if (cmd != NULL) {
+		argv[1] = (char *)"-c";
+		argv[2] = (char *)cmd;
+		return (win32_build_argv_command(3, argv));
+	}
+	return (win32_build_argv_command(1, argv));
 }
 
 static wchar_t *
