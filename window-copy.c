@@ -5489,8 +5489,14 @@ window_copy_pipe_run(struct window_mode_entry *wme, struct session *s,
 	if (cmd != NULL && *cmd != '\0') {
 		job = job_run(cmd, 0, NULL, NULL, s, NULL, NULL, NULL, NULL,
 		    NULL, JOB_NOWAIT, -1, -1);
-		if (job != NULL)
+		if (job != NULL) {
+#ifdef TMUX_WIN32
+			job_write(job, buf, *len);
+			job_close_stdin(job);
+#else
 			bufferevent_write(job_get_event(job), buf, *len);
+#endif
+		}
 	}
 	return (buf);
 }
