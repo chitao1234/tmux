@@ -47,6 +47,8 @@ win32_terminal_init_client(char **cause)
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
 	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	win32_log_handle("client stdin before init", hin);
+	win32_log_handle("client stdout before init", hout);
 	if (hin == INVALID_HANDLE_VALUE || hout == INVALID_HANDLE_VALUE) {
 		xasprintf(cause, "couldn't get console handles: %s",
 		    win32_strerror(GetLastError()));
@@ -57,8 +59,12 @@ win32_terminal_init_client(char **cause)
 		xasprintf(cause, "not a Windows console");
 		return (-1);
 	}
+	log_debug("%s: saved console modes in %#lx out %#lx", __func__,
+	    (unsigned long)saved_in_mode, (unsigned long)saved_out_mode);
 	saved_input_cp = GetConsoleCP();
 	saved_output_cp = GetConsoleOutputCP();
+	log_debug("%s: saved code pages in %u out %u", __func__,
+	    saved_input_cp, saved_output_cp);
 	saved_modes = 1;
 
 	mode = saved_in_mode;
@@ -88,6 +94,8 @@ win32_terminal_init_client(char **cause)
 	}
 	SetConsoleCP(CP_UTF8);
 	SetConsoleOutputCP(CP_UTF8);
+	win32_log_handle("client stdin after init", hin);
+	win32_log_handle("client stdout after init", hout);
 	return (0);
 
 fail:
@@ -118,6 +126,8 @@ win32_terminal_restore_client(void)
 		SetConsoleCP(saved_input_cp);
 	if (saved_output_cp != 0)
 		SetConsoleOutputCP(saved_output_cp);
+	win32_log_handle("client stdin after restore", hin);
+	win32_log_handle("client stdout after restore", hout);
 	saved_modes = 0;
 }
 
@@ -133,8 +143,11 @@ win32_terminal_get_size(__unused struct client *c, u_int *sx, u_int *sy,
 	else
 		hout = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (hout == INVALID_HANDLE_VALUE ||
-	    !GetConsoleScreenBufferInfo(hout, &csbi))
+	    !GetConsoleScreenBufferInfo(hout, &csbi)) {
+		log_debug("%s: GetConsoleScreenBufferInfo failed: %s", __func__,
+		    win32_strerror(GetLastError()));
 		return (-1);
+	}
 	*sx = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 	*sy = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
 	*xpixel = 0;

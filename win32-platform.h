@@ -49,6 +49,7 @@ size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
 int		 win32_handle_write(HANDLE, const void *, size_t);
+void		 win32_log_handle(const char *, HANDLE);
 
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);

@@ -309,17 +309,98 @@ win32_handle_event_write(__unused struct win32_handle_event *whe,
 	return (win32_handle_write(whe->handle, data, size));
 }
 
-int
-win32_handle_write(HANDLE handle, const void *data, size_t size)
+static int
+win32_handle_write_file(HANDLE handle, const void *data, size_t size)
 {
-	DWORD	written;
+	DWORD	written, nwrite;
 
-	if (!WriteFile(handle, data, size > MAXDWORD ? MAXDWORD : size,
-	    &written, NULL)) {
+	nwrite = size > INT_MAX ? INT_MAX : (DWORD)size;
+	if (nwrite == 0)
+		return (0);
+	if (!WriteFile(handle, data, nwrite, &written, NULL)) {
+		log_debug("%s: WriteFile failed: %s", __func__,
+		    win32_strerror(GetLastError()));
 		errno = EIO;
 		return (-1);
 	}
 	return ((int)written);
+}
+
+int
+win32_handle_write(HANDLE handle, const void *data, size_t size)
+{
+	DWORD	 written, mode, total;
+	wchar_t	*wdata;
+	int	 n, nbytes;
+
+	nbytes = size > INT_MAX ? INT_MAX : (int)size;
+	if (nbytes == 0)
+		return (0);
+
+	if (GetConsoleMode(handle, &mode)) {
+		n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data,
+		    nbytes, NULL, 0);
+		if (n == 0) {
+			log_debug("%s: MultiByteToWideChar failed: %s", __func__,
+			    win32_strerror(GetLastError()));
+			return (win32_handle_write_file(handle, data, size));
+		}
+		wdata = xcalloc(n, sizeof *wdata);
+		if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data,
+		    nbytes, wdata, n) == 0) {
+			log_debug("%s: MultiByteToWideChar failed: %s", __func__,
+			    win32_strerror(GetLastError()));
+			free(wdata);
+			return (win32_handle_write_file(handle, data, size));
+		}
+		total = 0;
+		while (total < (DWORD)n) {
+			if (!WriteConsoleW(handle, wdata + total, n - total,
+			    &written, NULL)) {
+				log_debug("%s: WriteConsoleW failed: %s",
+				    __func__, win32_strerror(GetLastError()));
+				free(wdata);
+				errno = EIO;
+				return (-1);
+			}
+			if (written == 0) {
+				log_debug("%s: WriteConsoleW wrote nothing",
+				    __func__);
+				free(wdata);
+				errno = EIO;
+				return (-1);
+			}
+			total += written;
+		}
+		free(wdata);
+		if (log_get_level() > 1) {
+			log_debug("%s: WriteConsoleW wrote %lu UTF-16 units "
+			    "from %d UTF-8 bytes", __func__,
+			    (unsigned long)total, nbytes);
+		}
+		return (nbytes);
+	}
+
+	return (win32_handle_write_file(handle, data, size));
+}
+
+void
+win32_log_handle(const char *name, HANDLE handle)
+{
+	DWORD	mode = 0, type, error = ERROR_SUCCESS;
+
+	if (handle == INVALID_HANDLE_VALUE || handle == NULL) {
+		log_debug("%s: invalid handle %p", name, handle);
+		return;
+	}
+
+	type = GetFileType(handle);
+	if (!GetConsoleMode(handle, &mode))
+		error = GetLastError();
+	log_debug("%s: handle %p type %#lx console %s mode %#lx error %lu "
+	    "cp in/out %u/%u", name, handle, (unsigned long)type,
+	    error == ERROR_SUCCESS ? "yes" : "no", (unsigned long)mode,
+	    (unsigned long)error, GetConsoleCP(), GetConsoleOutputCP());
 }
 
 #endif /* TMUX_WIN32 */

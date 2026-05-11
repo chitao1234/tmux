@@ -2508,6 +2508,9 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			log_debug("DuplicateHandle stdin failed: %s",
 			    win32_strerror(GetLastError()));
 		}
+		if (c->win32_stdin != NULL)
+			win32_log_handle("server duplicated stdin",
+			    c->win32_stdin);
 		if (process != NULL)
 			CloseHandle(process);
 		break;
@@ -2530,6 +2533,9 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			log_debug("DuplicateHandle stdout failed: %s",
 			    win32_strerror(GetLastError()));
 		}
+		if (c->win32_stdout != NULL)
+			win32_log_handle("server duplicated stdout",
+			    c->win32_stdout);
 		if (process != NULL)
 			CloseHandle(process);
 		break;
