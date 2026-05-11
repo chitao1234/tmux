@@ -3709,6 +3709,8 @@ void		 session_theme_changed(struct session *);
 void		 session_update_history(struct session *);
 
 /* utf8.c */
+enum utf8_state	 utf8_touc(const struct utf8_data *, u_int *);
+enum utf8_state	 utf8_fromuc(u_int, struct utf8_data *);
 enum utf8_state	 utf8_towc (const struct utf8_data *, wchar_t *);
 enum utf8_state	 utf8_fromwc(wchar_t wc, struct utf8_data *);
 void		 utf8_update_width_cache(void);

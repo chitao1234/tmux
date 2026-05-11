@@ -28,7 +28,7 @@
 #include "tmux.h"
 
 struct utf8_width_item {
-	wchar_t				wc;
+	u_int				wc;
 	u_int				width;
 	int				allocated;
 
@@ -284,7 +284,7 @@ utf8_item_by_index(u_int index)
 
 /* Find a codepoint in the cache. */
 static struct utf8_width_item *
-utf8_find_in_width_cache(wchar_t wc)
+utf8_find_in_width_cache(u_int wc)
 {
 	struct utf8_width_item	uw;
 
@@ -294,7 +294,7 @@ utf8_find_in_width_cache(wchar_t wc)
 
 /* Add to width cache. */
 static void
-utf8_insert_width_cache(wchar_t wc, u_int width)
+utf8_insert_width_cache(u_int wc, u_int width)
 {
 	struct utf8_width_item	*uw, *old;
 
@@ -319,10 +319,9 @@ static void
 utf8_add_to_width_cache(const char *s)
 {
 	char			*copy, *cp, *endptr;
-	u_int			 width;
+	u_int			 wc, wc_start, wc_end, width;
 	const char		*errstr;
 	struct utf8_data	*ud;
-	wchar_t			 wc, wc_start, wc_end;
 	unsigned long long	 n;
 
 	copy = xstrdup(s);
@@ -343,7 +342,8 @@ utf8_add_to_width_cache(const char *s)
 		n = strtoull(copy + 2, &endptr, 16);
 		if (copy[2] == '\0' ||
 		    n == 0 ||
-		    n > WCHAR_MAX ||
+		    n > 0x10ffff ||
+		    (n >= 0xd800 && n <= 0xdfff) ||
 		    (errno == ERANGE && n == ULLONG_MAX)) {
 			free(copy);
 			return;
@@ -359,9 +359,10 @@ utf8_add_to_width_cache(const char *s)
 			n = strtoull(endptr + 2, &endptr, 16);
 			if (*endptr != '\0' ||
 			    n == 0 ||
-			    n > WCHAR_MAX ||
+			    n > 0x10ffff ||
+			    (n >= 0xd800 && n <= 0xdfff) ||
 			    (errno == ERANGE && n == ULLONG_MAX) ||
-			    (wchar_t)n < wc_start) {
+			    n < wc_start) {
 				free(copy);
 				return;
 			}
@@ -385,11 +386,7 @@ utf8_add_to_width_cache(const char *s)
 			free(copy);
 			return;
 		}
-#ifdef HAVE_UTF8PROC
-		if (utf8proc_mbtowc(&wc, ud[0].data, ud[0].size) <= 0) {
-#else
-		if (mbtowc(&wc, ud[0].data, ud[0].size) <= 0) {
-#endif
+		if (utf8_touc(&ud[0], &wc) != UTF8_DONE) {
 			free(ud);
 			free(copy);
 			return;
@@ -548,37 +545,313 @@ utf8_copy(struct utf8_data *to, const struct utf8_data *from)
 		to->data[i] = '\0';
 }
 
+#ifdef TMUX_WIN32
+static int
+utf8_width_win32(u_int uc)
+{
+	if (uc == 0)
+		return (0);
+	if (uc < 0x20 || (uc >= 0x7f && uc < 0xa0))
+		return (-1);
+	if ((uc >= 0x0300 && uc <= 0x036f) ||
+	    (uc >= 0x0483 && uc <= 0x0489) ||
+	    (uc >= 0x0591 && uc <= 0x05bd) ||
+	    uc == 0x05bf ||
+	    (uc >= 0x05c1 && uc <= 0x05c2) ||
+	    (uc >= 0x05c4 && uc <= 0x05c5) ||
+	    uc == 0x05c7 ||
+	    (uc >= 0x0610 && uc <= 0x061a) ||
+	    (uc >= 0x064b && uc <= 0x065f) ||
+	    uc == 0x0670 ||
+	    (uc >= 0x06d6 && uc <= 0x06dc) ||
+	    (uc >= 0x06df && uc <= 0x06e4) ||
+	    (uc >= 0x06e7 && uc <= 0x06e8) ||
+	    (uc >= 0x06ea && uc <= 0x06ed) ||
+	    (uc >= 0x0711 && uc <= 0x0711) ||
+	    (uc >= 0x0730 && uc <= 0x074a) ||
+	    (uc >= 0x07a6 && uc <= 0x07b0) ||
+	    (uc >= 0x07eb && uc <= 0x07f3) ||
+	    (uc >= 0x0816 && uc <= 0x0819) ||
+	    (uc >= 0x081b && uc <= 0x0823) ||
+	    (uc >= 0x0825 && uc <= 0x0827) ||
+	    (uc >= 0x0829 && uc <= 0x082d) ||
+	    (uc >= 0x0859 && uc <= 0x085b) ||
+	    (uc >= 0x08d3 && uc <= 0x08e1) ||
+	    (uc >= 0x08e3 && uc <= 0x0902) ||
+	    (uc >= 0x093a && uc <= 0x093a) ||
+	    uc == 0x093c ||
+	    (uc >= 0x0941 && uc <= 0x0948) ||
+	    uc == 0x094d ||
+	    (uc >= 0x0951 && uc <= 0x0957) ||
+	    (uc >= 0x0962 && uc <= 0x0963) ||
+	    (uc >= 0x0981 && uc <= 0x0981) ||
+	    uc == 0x09bc ||
+	    (uc >= 0x09c1 && uc <= 0x09c4) ||
+	    uc == 0x09cd ||
+	    (uc >= 0x09e2 && uc <= 0x09e3) ||
+	    (uc >= 0x0a01 && uc <= 0x0a02) ||
+	    uc == 0x0a3c ||
+	    (uc >= 0x0a41 && uc <= 0x0a42) ||
+	    (uc >= 0x0a47 && uc <= 0x0a48) ||
+	    (uc >= 0x0a4b && uc <= 0x0a4d) ||
+	    uc == 0x0a51 ||
+	    (uc >= 0x0a70 && uc <= 0x0a71) ||
+	    uc == 0x0a75 ||
+	    (uc >= 0x0a81 && uc <= 0x0a82) ||
+	    uc == 0x0abc ||
+	    (uc >= 0x0ac1 && uc <= 0x0ac5) ||
+	    (uc >= 0x0ac7 && uc <= 0x0ac8) ||
+	    uc == 0x0acd ||
+	    (uc >= 0x0ae2 && uc <= 0x0ae3) ||
+	    (uc >= 0x0b01 && uc <= 0x0b01) ||
+	    uc == 0x0b3c ||
+	    uc == 0x0b3f ||
+	    (uc >= 0x0b41 && uc <= 0x0b44) ||
+	    uc == 0x0b4d ||
+	    (uc >= 0x0b56 && uc <= 0x0b56) ||
+	    (uc >= 0x0b62 && uc <= 0x0b63) ||
+	    uc == 0x0b82 ||
+	    uc == 0x0bc0 ||
+	    uc == 0x0bcd ||
+	    (uc >= 0x0c00 && uc <= 0x0c00) ||
+	    uc == 0x0c04 ||
+	    (uc >= 0x0c3e && uc <= 0x0c40) ||
+	    (uc >= 0x0c46 && uc <= 0x0c48) ||
+	    (uc >= 0x0c4a && uc <= 0x0c4d) ||
+	    (uc >= 0x0c55 && uc <= 0x0c56) ||
+	    (uc >= 0x0c62 && uc <= 0x0c63) ||
+	    uc == 0x0c81 ||
+	    uc == 0x0cbc ||
+	    (uc >= 0x0cbf && uc <= 0x0cbf) ||
+	    uc == 0x0cc6 ||
+	    (uc >= 0x0ccc && uc <= 0x0ccd) ||
+	    (uc >= 0x0ce2 && uc <= 0x0ce3) ||
+	    (uc >= 0x0d00 && uc <= 0x0d01) ||
+	    (uc >= 0x0d41 && uc <= 0x0d44) ||
+	    uc == 0x0d4d ||
+	    (uc >= 0x0d62 && uc <= 0x0d63) ||
+	    uc == 0x0dca ||
+	    (uc >= 0x0dd2 && uc <= 0x0dd4) ||
+	    uc == 0x0dd6 ||
+	    uc == 0x0e31 ||
+	    (uc >= 0x0e34 && uc <= 0x0e3a) ||
+	    (uc >= 0x0e47 && uc <= 0x0e4e) ||
+	    uc == 0x0eb1 ||
+	    (uc >= 0x0eb4 && uc <= 0x0ebc) ||
+	    (uc >= 0x0ec8 && uc <= 0x0ecd) ||
+	    (uc >= 0x0f18 && uc <= 0x0f19) ||
+	    uc == 0x0f35 ||
+	    uc == 0x0f37 ||
+	    uc == 0x0f39 ||
+	    (uc >= 0x0f71 && uc <= 0x0f7e) ||
+	    (uc >= 0x0f80 && uc <= 0x0f84) ||
+	    (uc >= 0x0f86 && uc <= 0x0f87) ||
+	    (uc >= 0x0f8d && uc <= 0x0f97) ||
+	    (uc >= 0x0f99 && uc <= 0x0fbc) ||
+	    uc == 0x0fc6 ||
+	    (uc >= 0x102d && uc <= 0x1030) ||
+	    (uc >= 0x1032 && uc <= 0x1037) ||
+	    (uc >= 0x1039 && uc <= 0x103a) ||
+	    (uc >= 0x103d && uc <= 0x103e) ||
+	    (uc >= 0x1058 && uc <= 0x1059) ||
+	    (uc >= 0x105e && uc <= 0x1060) ||
+	    (uc >= 0x1071 && uc <= 0x1074) ||
+	    (uc >= 0x1082 && uc <= 0x1082) ||
+	    (uc >= 0x1085 && uc <= 0x1086) ||
+	    uc == 0x108d ||
+	    uc == 0x109d ||
+	    (uc >= 0x135d && uc <= 0x135f) ||
+	    (uc >= 0x1712 && uc <= 0x1714) ||
+	    (uc >= 0x1732 && uc <= 0x1734) ||
+	    (uc >= 0x1752 && uc <= 0x1753) ||
+	    (uc >= 0x1772 && uc <= 0x1773) ||
+	    (uc >= 0x17b4 && uc <= 0x17b5) ||
+	    (uc >= 0x17b7 && uc <= 0x17bd) ||
+	    uc == 0x17c6 ||
+	    (uc >= 0x17c9 && uc <= 0x17d3) ||
+	    uc == 0x17dd ||
+	    (uc >= 0x180b && uc <= 0x180d) ||
+	    uc == 0x1885 ||
+	    uc == 0x1886 ||
+	    (uc >= 0x18a9 && uc <= 0x18a9) ||
+	    (uc >= 0x1920 && uc <= 0x1922) ||
+	    (uc >= 0x1927 && uc <= 0x1928) ||
+	    uc == 0x1932 ||
+	    (uc >= 0x1939 && uc <= 0x193b) ||
+	    (uc >= 0x1a17 && uc <= 0x1a18) ||
+	    (uc >= 0x1a56 && uc <= 0x1a56) ||
+	    (uc >= 0x1a58 && uc <= 0x1a5e) ||
+	    uc == 0x1a60 ||
+	    uc == 0x1a62 ||
+	    (uc >= 0x1a65 && uc <= 0x1a6c) ||
+	    (uc >= 0x1a73 && uc <= 0x1a7c) ||
+	    uc == 0x1a7f ||
+	    (uc >= 0x1ab0 && uc <= 0x1aff) ||
+	    (uc >= 0x1b00 && uc <= 0x1b03) ||
+	    uc == 0x1b34 ||
+	    (uc >= 0x1b36 && uc <= 0x1b3a) ||
+	    uc == 0x1b3c ||
+	    uc == 0x1b42 ||
+	    (uc >= 0x1b6b && uc <= 0x1b73) ||
+	    (uc >= 0x1b80 && uc <= 0x1b81) ||
+	    (uc >= 0x1ba2 && uc <= 0x1ba5) ||
+	    (uc >= 0x1ba8 && uc <= 0x1ba9) ||
+	    (uc >= 0x1bab && uc <= 0x1bad) ||
+	    (uc >= 0x1be6 && uc <= 0x1be6) ||
+	    (uc >= 0x1be8 && uc <= 0x1be9) ||
+	    uc == 0x1bed ||
+	    (uc >= 0x1bef && uc <= 0x1bf1) ||
+	    (uc >= 0x1c2c && uc <= 0x1c33) ||
+	    (uc >= 0x1c36 && uc <= 0x1c37) ||
+	    (uc >= 0x1cd0 && uc <= 0x1cd2) ||
+	    (uc >= 0x1cd4 && uc <= 0x1ce0) ||
+	    (uc >= 0x1ce2 && uc <= 0x1ce8) ||
+	    uc == 0x1ced ||
+	    uc == 0x1cf4 ||
+	    (uc >= 0x1cf8 && uc <= 0x1cf9) ||
+	    (uc >= 0x1dc0 && uc <= 0x1dff) ||
+	    (uc >= 0x20d0 && uc <= 0x20ff) ||
+	    (uc >= 0xfe00 && uc <= 0xfe0f) ||
+	    (uc >= 0xfe20 && uc <= 0xfe2f) ||
+	    (uc >= 0x1d167 && uc <= 0x1d169) ||
+	    (uc >= 0x1d17b && uc <= 0x1d182) ||
+	    (uc >= 0x1d185 && uc <= 0x1d18b) ||
+	    (uc >= 0x1d1aa && uc <= 0x1d1ad) ||
+	    (uc >= 0xe0100 && uc <= 0xe01ef))
+		return (0);
+	if (uc >= 0x1100 &&
+	    (uc <= 0x115f ||
+	    uc == 0x2329 || uc == 0x232a ||
+	    (uc >= 0x2e80 && uc <= 0xa4cf && uc != 0x303f) ||
+	    (uc >= 0xac00 && uc <= 0xd7a3) ||
+	    (uc >= 0xf900 && uc <= 0xfaff) ||
+	    (uc >= 0xfe10 && uc <= 0xfe19) ||
+	    (uc >= 0xfe30 && uc <= 0xfe6f) ||
+	    (uc >= 0xff00 && uc <= 0xff60) ||
+	    (uc >= 0xffe0 && uc <= 0xffe6) ||
+	    (uc >= 0x1f300 && uc <= 0x1faff) ||
+	    (uc >= 0x20000 && uc <= 0x2fffd) ||
+	    (uc >= 0x30000 && uc <= 0x3fffd)))
+		return (2);
+	return (1);
+}
+#endif
+
 /* Get width of Unicode character. */
 static enum utf8_state
 utf8_width(struct utf8_data *ud, int *width)
 {
 	struct utf8_width_item	*uw;
-	wchar_t			 wc;
+	u_int			 uc;
 
-	if (utf8_towc(ud, &wc) != UTF8_DONE)
+	if (utf8_touc(ud, &uc) != UTF8_DONE)
 		return (UTF8_ERROR);
-	uw = utf8_find_in_width_cache(wc);
+	uw = utf8_find_in_width_cache(uc);
 	if (uw != NULL) {
 		*width = uw->width;
-		log_debug("cached width for %08X is %d", (u_int)wc, *width);
+		log_debug("cached width for %08X is %d", uc, *width);
 		return (UTF8_DONE);
 	}
-#ifdef HAVE_UTF8PROC
-	*width = utf8proc_wcwidth(wc);
-	log_debug("utf8proc_wcwidth(%05X) returned %d", (u_int)wc, *width);
+#ifdef TMUX_WIN32
+	*width = utf8_width_win32(uc);
+	log_debug("win32_wcwidth(%05X) returned %d", uc, *width);
 #else
-	*width = wcwidth(wc);
-	log_debug("wcwidth(%05X) returned %d", (u_int)wc, *width);
+#ifdef HAVE_UTF8PROC
+	*width = utf8proc_wcwidth((wchar_t)uc);
+	log_debug("utf8proc_wcwidth(%05X) returned %d", uc, *width);
+#else
+	*width = wcwidth((wchar_t)uc);
+	log_debug("wcwidth(%05X) returned %d", uc, *width);
 	if (*width < 0) {
 		/*
 		 * C1 control characters are nonprintable, so they are always
 		 * zero width.
 		 */
-		*width = (wc >= 0x80 && wc <= 0x9f) ? 0 : 1;
+		*width = (uc >= 0x80 && uc <= 0x9f) ? 0 : 1;
 	}
+#endif
 #endif
 	if (*width >= 0 && *width <= 0xff)
 		return (UTF8_DONE);
+	return (UTF8_ERROR);
+}
+
+/* Convert UTF-8 character to a Unicode codepoint. */
+enum utf8_state
+utf8_touc(const struct utf8_data *ud, u_int *uc)
+{
+	const u_char	*s = ud->data;
+
+	if (ud->size == 1 && s[0] <= 0x7f) {
+		*uc = s[0];
+		return (UTF8_DONE);
+	}
+	if (ud->size == 2 &&
+	    s[0] >= 0xc2 && s[0] <= 0xdf &&
+	    s[1] >= 0x80 && s[1] <= 0xbf) {
+		*uc = ((s[0] & 0x1f) << 6)|(s[1] & 0x3f);
+		return (UTF8_DONE);
+	}
+	if (ud->size == 3 &&
+	    ((s[0] == 0xe0 && s[1] >= 0xa0 && s[1] <= 0xbf) ||
+	    (s[0] >= 0xe1 && s[0] <= 0xec && s[1] >= 0x80 &&
+	    s[1] <= 0xbf) ||
+	    (s[0] == 0xed && s[1] >= 0x80 && s[1] <= 0x9f) ||
+	    (s[0] >= 0xee && s[0] <= 0xef && s[1] >= 0x80 &&
+	    s[1] <= 0xbf)) &&
+	    s[2] >= 0x80 && s[2] <= 0xbf) {
+		*uc = ((s[0] & 0x0f) << 12)|((s[1] & 0x3f) << 6)|
+		    (s[2] & 0x3f);
+		return (UTF8_DONE);
+	}
+	if (ud->size == 4 &&
+	    ((s[0] == 0xf0 && s[1] >= 0x90 && s[1] <= 0xbf) ||
+	    (s[0] >= 0xf1 && s[0] <= 0xf3 && s[1] >= 0x80 &&
+	    s[1] <= 0xbf) ||
+	    (s[0] == 0xf4 && s[1] >= 0x80 && s[1] <= 0x8f)) &&
+	    s[2] >= 0x80 && s[2] <= 0xbf &&
+	    s[3] >= 0x80 && s[3] <= 0xbf) {
+		*uc = ((s[0] & 0x07) << 18)|((s[1] & 0x3f) << 12)|
+		    ((s[2] & 0x3f) << 6)|(s[3] & 0x3f);
+		return (UTF8_DONE);
+	}
+	return (UTF8_ERROR);
+}
+
+/* Convert Unicode codepoint to UTF-8 character. */
+enum utf8_state
+utf8_fromuc(u_int uc, struct utf8_data *ud)
+{
+	int	width;
+
+	memset(ud, 0, sizeof *ud);
+	if (uc <= 0x7f) {
+		ud->data[0] = uc;
+		ud->size = ud->have = 1;
+	} else if (uc <= 0x7ff) {
+		ud->data[0] = 0xc0|((uc >> 6) & 0x1f);
+		ud->data[1] = 0x80|(uc & 0x3f);
+		ud->size = ud->have = 2;
+	} else if (uc >= 0xd800 && uc <= 0xdfff)
+		return (UTF8_ERROR);
+	else if (uc <= 0xffff) {
+		ud->data[0] = 0xe0|((uc >> 12) & 0x0f);
+		ud->data[1] = 0x80|((uc >> 6) & 0x3f);
+		ud->data[2] = 0x80|(uc & 0x3f);
+		ud->size = ud->have = 3;
+	} else if (uc <= 0x10ffff) {
+		ud->data[0] = 0xf0|((uc >> 18) & 0x07);
+		ud->data[1] = 0x80|((uc >> 12) & 0x3f);
+		ud->data[2] = 0x80|((uc >> 6) & 0x3f);
+		ud->data[3] = 0x80|(uc & 0x3f);
+		ud->size = ud->have = 4;
+	} else
+		return (UTF8_ERROR);
+
+	if (utf8_width(ud, &width) == UTF8_DONE) {
+		ud->width = width;
+		return (UTF8_DONE);
+	}
 	return (UTF8_ERROR);
 }
 
@@ -586,20 +859,14 @@ utf8_width(struct utf8_data *ud, int *width)
 enum utf8_state
 utf8_towc(const struct utf8_data *ud, wchar_t *wc)
 {
-#ifdef HAVE_UTF8PROC
-	switch (utf8proc_mbtowc(wc, ud->data, ud->size)) {
-#else
-	switch (mbtowc(wc, ud->data, ud->size)) {
-#endif
-	case -1:
-		log_debug("UTF-8 %.*s, mbtowc() %d", (int)ud->size, ud->data,
-		    errno);
-		mbtowc(NULL, NULL, MB_CUR_MAX);
+	u_int	uc;
+
+	if (utf8_touc(ud, &uc) != UTF8_DONE)
 		return (UTF8_ERROR);
-	case 0:
+	if (uc > WCHAR_MAX)
 		return (UTF8_ERROR);
-	}
-	log_debug("UTF-8 %.*s is %05X", (int)ud->size, ud->data, (u_int)*wc);
+	*wc = uc;
+	log_debug("UTF-8 %.*s is %05X", (int)ud->size, ud->data, uc);
 	return (UTF8_DONE);
 }
 
@@ -607,26 +874,7 @@ utf8_towc(const struct utf8_data *ud, wchar_t *wc)
 enum utf8_state
 utf8_fromwc(wchar_t wc, struct utf8_data *ud)
 {
-	int	size, width;
-
-#ifdef HAVE_UTF8PROC
-	size = utf8proc_wctomb(ud->data, wc);
-#else
-	size = wctomb(ud->data, wc);
-#endif
-	if (size < 0) {
-		log_debug("UTF-8 %d, wctomb() %d", wc, errno);
-		wctomb(NULL, 0);
-		return (UTF8_ERROR);
-	}
-	if (size == 0)
-		return (UTF8_ERROR);
-	ud->size = ud->have = size;
-	if (utf8_width(ud, &width) == UTF8_DONE) {
-		ud->width = width;
-		return (UTF8_DONE);
-	}
-	return (UTF8_ERROR);
+	return (utf8_fromuc(wc, ud));
 }
 
 /*

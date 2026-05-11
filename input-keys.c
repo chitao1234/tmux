@@ -441,7 +441,7 @@ input_key_extended(struct bufferevent *bev, key_code key)
 {
 	char		 tmp[64], modifier;
 	struct utf8_data ud;
-	wchar_t		 wc;
+	u_int		 uc;
 
 	switch (key & KEYC_MASK_MODIFIERS) {
 	case KEYC_SHIFT:
@@ -471,8 +471,8 @@ input_key_extended(struct bufferevent *bev, key_code key)
 
 	if (KEYC_IS_UNICODE(key)) {
 		utf8_to_data(key & KEYC_MASK_KEY, &ud);
-		if (utf8_towc(&ud, &wc) == UTF8_DONE)
-			key = wc;
+		if (utf8_touc(&ud, &uc) == UTF8_DONE)
+			key = uc;
 		else
 			return (-1);
 	} else

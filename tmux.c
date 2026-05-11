@@ -142,8 +142,11 @@ static void
 expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 {
 	const char	*home = find_home();
-	char		*copy, *next, *tmp, resolved[PATH_MAX], *expanded;
+	char		*copy, *next, *tmp, *expanded;
 	char		*path;
+#ifndef TMUX_WIN32
+	char		 resolved[PATH_MAX];
+#endif
 	u_int		 i;
 
 	*paths = NULL;
@@ -193,7 +196,9 @@ make_label(const char *label, char **cause)
 {
 	char		**paths, *path, *base;
 	u_int		  i, n;
+#ifndef TMUX_WIN32
 	struct stat	  sb;
+#endif
 	uid_t		  uid;
 
 	*cause = NULL;
@@ -335,9 +340,11 @@ sig2name(int signo)
 const char *
 find_cwd(void)
 {
-	char		 resolved1[PATH_MAX], resolved2[PATH_MAX];
 	static char	 cwd[PATH_MAX];
 	const char	*pwd;
+#ifndef TMUX_WIN32
+	char		 resolved1[PATH_MAX], resolved2[PATH_MAX];
+#endif
 
 	if (getcwd(cwd, sizeof cwd) == NULL)
 		return (NULL);

@@ -1103,7 +1103,7 @@ tty_keys_extended_key(struct tty *tty, const char *buf, size_t len,
 
 	/* Convert UTF-32 codepoint into internal representation. */
 	if (nkey != KEYC_BSPACE && nkey & ~0x7f) {
-		if (utf8_fromwc(nkey, &ud) == UTF8_DONE &&
+		if (utf8_fromuc(nkey, &ud) == UTF8_DONE &&
 		    utf8_from_data(&ud, &uc) == UTF8_DONE)
 			nkey = uc;
 		else
