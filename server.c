@@ -241,8 +241,13 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	}
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
+#ifdef TMUX_WIN32
+	else if (~flags & CLIENT_WIN32_HELPER)
+		options_set_number(global_options, "exit-empty", 0);
+#else
 	else
 		options_set_number(global_options, "exit-empty", 0);
+#endif
 
 	if (lockfd >= 0) {
 		unlink(lockfile);
