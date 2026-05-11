@@ -388,6 +388,7 @@ win32_init(void)
 
 	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
 		return (-1);
+	SetConsoleCtrlHandler(NULL, FALSE);
 	SetConsoleCtrlHandler(win32_console_ctrl_handler, TRUE);
 	return (0);
 }
