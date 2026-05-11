@@ -43,6 +43,8 @@ void		 win32_handle_event_free(struct win32_handle_event *);
 struct evbuffer *win32_handle_event_input(struct win32_handle_event *);
 void		 win32_handle_event_drain(struct win32_handle_event *,
 		     struct evbuffer *);
+void		 win32_handle_event_drain_bev(struct win32_handle_event *,
+		     struct bufferevent *);
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);

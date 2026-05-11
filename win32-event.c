@@ -278,6 +278,19 @@ win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
 	LeaveCriticalSection(&whe->lock);
 }
 
+void
+win32_handle_event_drain_bev(struct win32_handle_event *whe,
+    struct bufferevent *bev)
+{
+	struct evbuffer	*dst = bev->input;
+
+	evbuffer_unfreeze(dst, 0);
+	EnterCriticalSection(&whe->lock);
+	evbuffer_add_buffer(dst, whe->input);
+	LeaveCriticalSection(&whe->lock);
+	evbuffer_freeze(dst, 0);
+}
+
 size_t
 win32_handle_event_buffered(struct win32_handle_event *whe)
 {

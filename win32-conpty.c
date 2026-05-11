@@ -120,13 +120,10 @@ win32_pane_read_cb(void *arg)
 void
 win32_pane_drain(struct window_pane *wp)
 {
-	struct evbuffer		*dst;
-
 	if (wp->win32 == NULL || wp->win32->output_event == NULL ||
 	    wp->event == NULL)
 		return;
-	dst = wp->event->input;
-	win32_handle_event_drain(wp->win32->output_event, dst);
+	win32_handle_event_drain_bev(wp->win32->output_event, wp->event);
 	window_pane_read_callback(wp->event, wp);
 }
 
@@ -343,7 +340,7 @@ win32_job_read_cb(void *arg)
 
 	if (wj->event == NULL || wj->output_event == NULL)
 		return;
-	win32_handle_event_drain(wj->output_event, wj->event->input);
+	win32_handle_event_drain_bev(wj->output_event, wj->event);
 	if (wj->event->readcb != NULL)
 		wj->event->readcb(wj->event, wj->event->cbarg);
 }
