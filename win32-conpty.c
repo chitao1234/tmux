@@ -399,8 +399,10 @@ win32_pane_close(struct window_pane *wp)
 
 	if (pw == NULL)
 		return;
-	if (pw->event != NULL)
-		bufferevent_free(pw->event);
+	if (wp->event != NULL) {
+		bufferevent_free(wp->event);
+		wp->event = NULL;
+	}
 	if (pw->output_event != NULL)
 		win32_handle_event_free(pw->output_event);
 	if (pw->hpcon != NULL)

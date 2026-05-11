@@ -257,21 +257,35 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	 */
 	hlimit = options_get_number(s->options, "history-limit");
 	if (sc->flags & SPAWN_RESPAWN) {
+#ifdef TMUX_WIN32
+		if (sc->wp0->win32 != NULL &&
+		    (~sc->wp0->flags & PANE_EXITED) &&
+		    (~sc->flags & SPAWN_KILL)) {
+#else
 		if (sc->wp0->fd != -1 && (~sc->flags & SPAWN_KILL)) {
+#endif
 			window_pane_index(sc->wp0, &idx);
 			xasprintf(cause, "pane %s:%d.%u still active",
 			    s->name, sc->wl->idx, idx);
 			free(cwd);
 			return (NULL);
 		}
+#ifdef TMUX_WIN32
+		if (sc->wp0->win32 != NULL)
+			win32_pane_close(sc->wp0);
+#else
 		if (sc->wp0->fd != -1) {
 			bufferevent_free(sc->wp0->event);
 			close(sc->wp0->fd);
 		}
+#endif
 		window_pane_reset_mode_all(sc->wp0);
 		screen_reinit(&sc->wp0->base);
 		input_free(sc->wp0->ictx);
 		sc->wp0->ictx = NULL;
+		sc->wp0->offset.used = 0;
+		sc->wp0->base_offset = 0;
+		sc->wp0->pipe_offset.used = 0;
 		new_wp = sc->wp0;
 		new_wp->flags &= ~(PANE_STATUSREADY|PANE_STATUSDRAWN);
 	} else if (sc->lc == NULL) {

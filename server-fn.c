@@ -332,6 +332,10 @@ server_destroy_pane(struct window_pane *wp, int notify)
 		close(wp->fd);
 		wp->fd = -1;
 	}
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL)
+		win32_pane_close(wp);
+#endif
 
 	remain_on_exit = options_get_number(wp->options, "remain-on-exit");
 	if (remain_on_exit != 0 && (~wp->flags & PANE_STATUSREADY))
