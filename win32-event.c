@@ -96,6 +96,7 @@ struct win32_handle_event {
 	void		(*readcb)(void *);
 	void		(*errorcb)(void *);
 	void		 *arg;
+	int		 event_added;
 	int		 error;
 };
 
@@ -238,7 +239,11 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 	event_set(&whe->event, (evutil_socket_t)whe->notify_read,
 	    EV_READ|EV_PERSIST,
 	    win32_handle_event_cb, whe);
-	event_add(&whe->event, NULL);
+	if (event_add(&whe->event, NULL) != 0) {
+		win32_handle_event_free(whe);
+		return (NULL);
+	}
+	whe->event_added = 1;
 	whe->thread = CreateThread(NULL, 0, win32_handle_event_thread, whe, 0,
 	    NULL);
 	if (whe->thread == NULL) {
@@ -259,7 +264,8 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		CancelSynchronousIo(whe->thread);
 		WaitForSingleObject(whe->thread, INFINITE);
 	}
-	event_del(&whe->event);
+	if (whe->event_added)
+		event_del(&whe->event);
 	if (whe->input != NULL)
 		evbuffer_free(whe->input);
 	if (whe->notify_read != INVALID_SOCKET)
