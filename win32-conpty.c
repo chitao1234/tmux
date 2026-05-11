@@ -175,6 +175,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 
 	si.StartupInfo.cb = sizeof si;
+	si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 	InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
 	si.lpAttributeList = xcalloc(1, attr_size);
 	if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0,
