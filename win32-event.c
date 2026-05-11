@@ -26,8 +26,19 @@ win32_socket_errno(int error)
 		return (EAGAIN);
 	case WSAEINTR:
 		return (EINTR);
+	case WSAECONNABORTED:
+		return (ECONNABORTED);
 	case WSAECONNREFUSED:
 		return (ECONNREFUSED);
+	case WSAECONNRESET:
+	case WSAENETRESET:
+		return (ECONNRESET);
+	case WSAENOTCONN:
+		return (ENOTCONN);
+	case WSAETIMEDOUT:
+		return (ETIMEDOUT);
+	case WSAEMFILE:
+		return (EMFILE);
 	default:
 		return (error);
 	}
