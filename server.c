@@ -59,9 +59,11 @@ static int	server_loop(void);
 static void	server_send_exit(void);
 static void	server_accept(int, short, void *);
 static void	server_signal(int);
+#ifndef TMUX_WIN32
 static void	server_child_signal(void);
 static void	server_child_exited(pid_t, int);
 static void	server_child_stopped(pid_t, int);
+#endif
 
 /* Set marked pane. */
 void

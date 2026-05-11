@@ -39,8 +39,9 @@ static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
-#endif
+#else
 static int		 client_suspended;
+#endif
 static enum {
 	CLIENT_EXIT_NONE,
 	CLIENT_EXIT_DETACHED,
@@ -63,7 +64,9 @@ static int		 client_attached;
 static struct client_files client_files = RB_INITIALIZER(&client_files);
 
 static __dead void	 client_exec(const char *,const char *);
+#ifndef TMUX_WIN32
 static int		 client_get_lock(char *);
+#endif
 static int		 client_connect(struct event_base *, const char *,
 			     uint64_t);
 static void		 client_send_identify(const char *, const char *,
@@ -74,6 +77,7 @@ static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
 static const char	*client_exit_message(void);
 
+#ifndef TMUX_WIN32
 /*
  * Get server create lock. If already held then server start is happening in
  * another client, so block until the lock is released and return -2 to
@@ -104,6 +108,7 @@ client_get_lock(char *lockfile)
 
 	return (lockfd);
 }
+#endif
 
 /* Connect client to server. */
 static int
@@ -539,6 +544,7 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	size_t	  sslen;
 #ifdef TMUX_WIN32
 	struct msg_win32_handle handle;
+	HANDLE	  h;
 #else
 	int	  fd;
 #endif
@@ -565,10 +571,12 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 
 #ifdef TMUX_WIN32
 	handle.pid = GetCurrentProcessId();
-	handle.handle = (uint64_t)(uintptr_t)GetStdHandle(STD_INPUT_HANDLE);
+	h = GetStdHandle(STD_INPUT_HANDLE);
+	handle.handle = (uint64_t)(uintptr_t)h;
 	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1, &handle,
 	    sizeof handle);
-	handle.handle = (uint64_t)(uintptr_t)GetStdHandle(STD_OUTPUT_HANDLE);
+	h = GetStdHandle(STD_OUTPUT_HANDLE);
+	handle.handle = (uint64_t)(uintptr_t)h;
 	proc_send(client_peer, MSG_IDENTIFY_WIN32_STDOUT, -1, &handle,
 	    sizeof handle);
 #else
