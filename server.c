@@ -351,6 +351,13 @@ server_send_exit(void)
 		session_destroy(s, 1, __func__);
 }
 
+void
+server_shutdown(void)
+{
+	server_exit = 1;
+	server_send_exit();
+}
+
 /* Update socket execute permissions based on whether sessions are attached. */
 void
 server_update_socket(void)
@@ -492,8 +499,7 @@ server_signal(int sig)
 {
 #ifdef TMUX_WIN32
 	if (sig == SIGINT || sig == SIGTERM) {
-		server_exit = 1;
-		server_send_exit();
+		server_shutdown();
 	}
 #else
 	int	fd;
@@ -502,8 +508,7 @@ server_signal(int sig)
 	switch (sig) {
 	case SIGINT:
 	case SIGTERM:
-		server_exit = 1;
-		server_send_exit();
+		server_shutdown();
 		break;
 	case SIGCHLD:
 		server_child_signal();
