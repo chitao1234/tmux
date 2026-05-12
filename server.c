@@ -307,6 +307,12 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	server_add_accept(0);
 	proc_loop(server_proc, server_loop);
 
+#ifdef TMUX_WIN32
+	if (server_fd != -1) {
+		win32_ipc_close(server_fd);
+		server_fd = -1;
+	}
+#endif
 	job_kill_all();
 	status_prompt_save_history();
 

@@ -30,12 +30,11 @@ struct win32_ipc_port {
 struct win32_ipc_socket_entry {
 	int			 id;
 	SOCKET			 socket;
+	char			*cleanup_path;
 	TAILQ_ENTRY(win32_ipc_socket_entry) entry;
 };
 
 #define WIN32_IPC_MAGIC 0x31584d54U /* TMX1 */
-#define WIN32_IPC_PORT_BASE 45000
-#define WIN32_IPC_PORT_SPAN 20000
 
 static TAILQ_HEAD(, win32_ipc_socket_entry) win32_ipc_sockets =
     TAILQ_HEAD_INITIALIZER(win32_ipc_sockets);
@@ -51,6 +50,22 @@ win32_ipc_save_socket(SOCKET socket)
 	entry->socket = socket;
 	TAILQ_INSERT_TAIL(&win32_ipc_sockets, entry, entry);
 	return (entry->id);
+}
+
+static int
+win32_ipc_set_cleanup_path(int fd, const char *path)
+{
+	struct win32_ipc_socket_entry	*entry;
+
+	TAILQ_FOREACH(entry, &win32_ipc_sockets, entry) {
+		if (entry->id != fd)
+			continue;
+		free(entry->cleanup_path);
+		entry->cleanup_path = xstrdup(path);
+		return (0);
+	}
+	errno = EBADF;
+	return (-1);
 }
 
 SOCKET
@@ -172,10 +187,11 @@ win32_ipc_recv_all(SOCKET fd, void *buf, size_t len, const char *what,
 }
 
 static int
-win32_ipc_listen(uint16_t port, char **cause)
+win32_ipc_listen(uint16_t port, uint16_t *bound_port, char **cause)
 {
 	SOCKET			 fd;
 	struct sockaddr_in	 sin;
+	int			 len = sizeof sin;
 	int			 on = 1;
 
 	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -196,8 +212,7 @@ win32_ipc_listen(uint16_t port, char **cause)
 	sin.sin_family = AF_INET;
 	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	sin.sin_port = htons(port);
-	if (bind(fd, (struct sockaddr *)&sin, sizeof sin) != 0 ||
-	    listen(fd, 128) != 0) {
+	if (bind(fd, (struct sockaddr *)&sin, sizeof sin) != 0) {
 		int error = WSAGetLastError();
 
 		if (cause != NULL) {
@@ -208,6 +223,37 @@ win32_ipc_listen(uint16_t port, char **cause)
 		closesocket(fd);
 		return (-1);
 	}
+	if (getsockname(fd, (struct sockaddr *)&sin, &len) != 0) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't query IPC listener port: %s",
+			    win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		closesocket(fd);
+		return (-1);
+	}
+	if (sin.sin_family != AF_INET || ntohs(sin.sin_port) == 0) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine IPC listener port");
+		errno = EIO;
+		closesocket(fd);
+		return (-1);
+	}
+	if (listen(fd, 128) != 0) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "error listening on port %u (%s)",
+			    (u_int)ntohs(sin.sin_port), win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		closesocket(fd);
+		return (-1);
+	}
+	if (bound_port != NULL)
+		*bound_port = ntohs(sin.sin_port);
 	return (win32_ipc_save_socket(fd));
 }
 
@@ -325,11 +371,15 @@ win32_ipc_server_create(const char *path, char **cause)
 	uint16_t		 port;
 	int			 fd;
 
-	port = WIN32_IPC_PORT_BASE +
-	    (win32_ipc_hash(path) % WIN32_IPC_PORT_SPAN);
-	fd = win32_ipc_listen(port, cause);
+	fd = win32_ipc_listen(0, &port, cause);
 	if (fd == -1)
 		return (-1);
+	if (win32_ipc_set_cleanup_path(fd, path) != 0) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't track Win32 IPC port file");
+		win32_ipc_close(fd);
+		return (-1);
+	}
 
 	if (win32_ipc_write_port_file(path, port, cause) != 0) {
 		win32_ipc_close(fd);
@@ -459,12 +509,21 @@ int
 win32_ipc_close(int fd)
 {
 	struct win32_ipc_socket_entry	*entry, *entry1;
+	char				*portpath;
 	int				 retval;
 
 	TAILQ_FOREACH_SAFE(entry, &win32_ipc_sockets, entry, entry1) {
 		if (entry->id != fd)
 			continue;
 		retval = closesocket(entry->socket);
+		if (entry->cleanup_path != NULL) {
+			portpath = win32_ipc_port_path(entry->cleanup_path);
+			if (portpath != NULL) {
+				(void)unlink(portpath);
+				free(portpath);
+			}
+			free(entry->cleanup_path);
+		}
 		TAILQ_REMOVE(&win32_ipc_sockets, entry, entry);
 		free(entry);
 		return (retval);
