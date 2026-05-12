@@ -21,12 +21,12 @@
 void
 win32_check_children(void)
 {
-	struct window		*w;
-	struct window_pane	*wp;
+	struct window		*w, *w1;
+	struct window_pane	*wp, *wp1;
 	int			 status;
 
-	RB_FOREACH(w, windows, &windows) {
-		TAILQ_FOREACH(wp, &w->panes, entry) {
+	RB_FOREACH_SAFE(w, windows, &windows, w1) {
+		TAILQ_FOREACH_SAFE(wp, &w->panes, entry, wp1) {
 			if (wp->win32 == NULL)
 				continue;
 			if (wp->flags & PANE_EXITED)
