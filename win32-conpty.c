@@ -24,6 +24,7 @@ struct win32_pane {
 	HANDLE		 input_write;
 	HANDLE		 output_read;
 	HANDLE		 output_write;
+	HANDLE		 job;
 	HANDLE		 process;
 	HANDLE		 thread;
 	DWORD		 process_id;
@@ -34,6 +35,7 @@ struct win32_pane {
 };
 
 struct win32_job {
+	HANDLE		 job;
 	HANDLE		 process;
 	HANDLE		 thread;
 	DWORD		 process_id;
@@ -48,6 +50,8 @@ struct win32_job {
 	int		 exited;
 	int		 status;
 };
+
+#define WIN32_CHILD_KILL_TIMEOUT 1000
 
 static int
 win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
@@ -301,6 +305,88 @@ win32_close_handle(HANDLE *h)
 }
 
 static void
+win32_close_pseudoconsole(HPCON *hpcon)
+{
+	if (*hpcon != NULL)
+		ClosePseudoConsole(*hpcon);
+	*hpcon = NULL;
+}
+
+static HANDLE
+win32_child_create_job(HANDLE process, DWORD pid)
+{
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION	info;
+	HANDLE					job;
+
+	job = CreateJobObjectW(NULL, NULL);
+	if (job == NULL) {
+		log_debug("%s %lu create job failed: %s", __func__,
+		    (unsigned long)pid, win32_strerror(GetLastError()));
+		return (NULL);
+	}
+	memset(&info, 0, sizeof info);
+	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+	    &info, sizeof info)) {
+		log_debug("%s %lu set job info failed: %s", __func__,
+		    (unsigned long)pid, win32_strerror(GetLastError()));
+		CloseHandle(job);
+		return (NULL);
+	}
+	if (!AssignProcessToJobObject(job, process)) {
+		log_debug("%s %lu assign job failed: %s", __func__,
+		    (unsigned long)pid, win32_strerror(GetLastError()));
+		CloseHandle(job);
+		return (NULL);
+	}
+	return (job);
+}
+
+static int
+win32_wait_process(HANDLE process, DWORD timeout, int *status)
+{
+	DWORD	code;
+
+	if (process == NULL)
+		return (0);
+	if (WaitForSingleObject(process, timeout) != WAIT_OBJECT_0)
+		return (0);
+	if (!GetExitCodeProcess(process, &code))
+		code = 1;
+	if (status != NULL)
+		*status = W_EXITCODE((int)code, 0);
+	return (1);
+}
+
+static void
+win32_child_kill(const char *name, DWORD pid, HANDLE job, HANDLE process)
+{
+	if (job != NULL) {
+		if (!TerminateJobObject(job, 1)) {
+			log_debug("%s %lu job kill failed: %s", name,
+			    (unsigned long)pid, win32_strerror(GetLastError()));
+		}
+	} else if (process != NULL && !win32_wait_process(process, 0, NULL)) {
+		if (!TerminateProcess(process, 1)) {
+			log_debug("%s %lu hard-kill failed: %s", name,
+			    (unsigned long)pid, win32_strerror(GetLastError()));
+			return;
+		}
+	}
+	(void)win32_wait_process(process, WIN32_CHILD_KILL_TIMEOUT, NULL);
+}
+
+static void
+win32_child_disconnect(HPCON *hpcon, HANDLE *input_read, HANDLE *input_write,
+    HANDLE *output_write)
+{
+	win32_close_handle(input_write);
+	win32_close_pseudoconsole(hpcon);
+	win32_close_handle(input_read);
+	win32_close_handle(output_write);
+}
+
+static void
 win32_pane_read_cb(void *arg)
 {
 	struct window_pane	*wp = arg;
@@ -329,17 +415,7 @@ win32_pane_error_cb(void *arg)
 static int
 win32_process_status(HANDLE process, int *status)
 {
-	DWORD	code;
-
-	if (process == NULL)
-		return (0);
-	if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0)
-		return (0);
-	if (!GetExitCodeProcess(process, &code))
-		code = 1;
-	if (status != NULL)
-		*status = W_EXITCODE((int)code, 0);
-	return (1);
+	return (win32_wait_process(process, 0, status));
 }
 
 int
@@ -403,7 +479,8 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	wenv = win32_build_environment(env);
 	memset(&pi, 0, sizeof pi);
 	ok = CreateProcessW(NULL, wcmd, NULL, NULL, FALSE,
-	    EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT,
+	    EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT|
+	    CREATE_SUSPENDED,
 	    wenv, wcwd, &si.StartupInfo, &pi);
 	if (!ok) {
 		xasprintf(cause, "CreateProcess failed: %s",
@@ -411,12 +488,17 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 		goto fail;
 	}
 
-	win32_close_handle(&pw->input_read);
-	win32_close_handle(&pw->output_write);
-
 	pw->process = pi.hProcess;
 	pw->thread = pi.hThread;
 	pw->process_id = pi.dwProcessId;
+	pw->job = win32_child_create_job(pw->process, pw->process_id);
+	if (ResumeThread(pw->thread) == (DWORD)-1) {
+		xasprintf(cause, "ResumeThread failed: %s",
+		    win32_strerror(GetLastError()));
+		goto fail;
+	}
+	win32_close_handle(&pw->input_read);
+	win32_close_handle(&pw->output_write);
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
 
@@ -446,16 +528,13 @@ fail:
 	if (pw != NULL) {
 		if (wp->win32 == pw)
 			wp->win32 = NULL;
+		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
+		win32_child_disconnect(&pw->hpcon, &pw->input_read,
+		    &pw->input_write, &pw->output_write);
 		if (pw->output_event != NULL)
 			win32_handle_event_free(pw->output_event);
-		if (pw->process != NULL)
-			TerminateProcess(pw->process, 1);
-		if (pw->hpcon != NULL)
-			ClosePseudoConsole(pw->hpcon);
-		win32_close_handle(&pw->input_read);
-		win32_close_handle(&pw->input_write);
 		win32_close_handle(&pw->output_read);
-		win32_close_handle(&pw->output_write);
+		win32_close_handle(&pw->job);
 		win32_close_handle(&pw->thread);
 		win32_close_handle(&pw->process);
 		free(pw);
@@ -478,26 +557,26 @@ win32_pane_resize(struct window_pane *wp, u_int sx, u_int sy)
 void
 win32_pane_close(struct window_pane *wp)
 {
-	struct win32_pane *pw = wp->win32;
+	struct win32_pane	*pw = wp->win32;
+	struct bufferevent	*event;
 
 	if (pw == NULL)
 		return;
-	if (wp->event != NULL) {
-		bufferevent_free(wp->event);
-		wp->event = NULL;
-	}
+	wp->win32 = NULL;
+	event = wp->event;
+	wp->event = NULL;
+	win32_child_kill("pane", pw->process_id, pw->job, pw->process);
+	win32_child_disconnect(&pw->hpcon, &pw->input_read, &pw->input_write,
+	    &pw->output_write);
 	if (pw->output_event != NULL)
 		win32_handle_event_free(pw->output_event);
-	if (pw->hpcon != NULL)
-		ClosePseudoConsole(pw->hpcon);
-	win32_close_handle(&pw->input_read);
-	win32_close_handle(&pw->input_write);
 	win32_close_handle(&pw->output_read);
-	win32_close_handle(&pw->output_write);
+	if (event != NULL)
+		bufferevent_free(event);
+	win32_close_handle(&pw->job);
 	win32_close_handle(&pw->thread);
 	win32_close_handle(&pw->process);
 	free(pw);
-	wp->win32 = NULL;
 }
 
 int
@@ -665,7 +744,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		si.hStdError = (flags & JOB_SHOWSTDERR) ?
 		    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
 		ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-		    creation_flags, wenv, wcwd, &si, &pi);
+		    creation_flags|CREATE_SUSPENDED, wenv, wcwd, &si, &pi);
 	}
 	if (!ok) {
 		if (cause != NULL) {
@@ -678,6 +757,14 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	wj->process = pi.hProcess;
 	wj->thread = pi.hThread;
 	wj->process_id = pi.dwProcessId;
+	wj->job = win32_child_create_job(wj->process, wj->process_id);
+	if (ResumeThread(wj->thread) == (DWORD)-1) {
+		if (cause != NULL) {
+			xasprintf(cause, "ResumeThread job failed: %s",
+			    win32_strerror(GetLastError()));
+		}
+		goto fail;
+	}
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
 
@@ -710,18 +797,17 @@ fail:
 	free(wcwd);
 	free(wenv);
 	if (wj != NULL) {
+		if (wj->event != NULL) {
+			bufferevent_free(wj->event);
+			wj->event = NULL;
+		}
+		win32_child_kill("job", wj->process_id, wj->job, wj->process);
+		win32_child_disconnect(&wj->hpcon, &wj->stdin_read,
+		    &wj->stdin_write, &wj->stdout_write);
 		if (wj->output_event != NULL)
 			win32_handle_event_free(wj->output_event);
-		if (wj->event != NULL)
-			bufferevent_free(wj->event);
-		if (wj->process != NULL)
-			TerminateProcess(wj->process, 1);
-		if (wj->hpcon != NULL)
-			ClosePseudoConsole(wj->hpcon);
-		win32_close_handle(&wj->stdin_read);
-		win32_close_handle(&wj->stdin_write);
 		win32_close_handle(&wj->stdout_read);
-		win32_close_handle(&wj->stdout_write);
+		win32_close_handle(&wj->job);
 		win32_close_handle(&wj->thread);
 		win32_close_handle(&wj->process);
 		free(wj);
@@ -734,17 +820,14 @@ win32_job_close(struct win32_job *wj)
 {
 	if (wj == NULL)
 		return;
-	if (wj->process != NULL)
-		TerminateProcess(wj->process, 1);
+	wj->event = NULL;
+	win32_child_kill("job", wj->process_id, wj->job, wj->process);
+	win32_child_disconnect(&wj->hpcon, &wj->stdin_read, &wj->stdin_write,
+	    &wj->stdout_write);
 	if (wj->output_event != NULL)
 		win32_handle_event_free(wj->output_event);
-	wj->event = NULL;
-	if (wj->hpcon != NULL)
-		ClosePseudoConsole(wj->hpcon);
-	win32_close_handle(&wj->stdin_read);
-	win32_close_handle(&wj->stdin_write);
 	win32_close_handle(&wj->stdout_read);
-	win32_close_handle(&wj->stdout_write);
+	win32_close_handle(&wj->job);
 	win32_close_handle(&wj->thread);
 	win32_close_handle(&wj->process);
 	free(wj);
