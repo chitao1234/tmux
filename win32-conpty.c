@@ -54,19 +54,30 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
     int inherit_write)
 {
 	SECURITY_ATTRIBUTES sa;
+	HANDLE		    read, write;
+	DWORD		    error;
 
 	memset(&sa, 0, sizeof sa);
 	sa.nLength = sizeof sa;
 	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(readp, writep, &sa, 0))
+	if (!CreatePipe(&read, &write, &sa, 0))
 		return (-1);
-	if (!inherit_read && !SetHandleInformation(*readp, HANDLE_FLAG_INHERIT,
-	    0))
-		return (-1);
-	if (!inherit_write && !SetHandleInformation(*writep, HANDLE_FLAG_INHERIT,
-	    0))
-		return (-1);
+	if (!inherit_read &&
+	    !SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0))
+		goto fail;
+	if (!inherit_write &&
+	    !SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0))
+		goto fail;
+	*readp = read;
+	*writep = write;
 	return (0);
+
+fail:
+	error = GetLastError();
+	CloseHandle(read);
+	CloseHandle(write);
+	SetLastError(error);
+	return (-1);
 }
 
 static wchar_t *
