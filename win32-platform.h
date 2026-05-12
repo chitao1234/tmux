@@ -57,7 +57,8 @@ void		 win32_log_handle(const char *, HANDLE);
 
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
-int		 win32_ipc_server_accept(int, char **);
+int		 win32_ipc_socket_accept(int, char **);
+uint32_t	 win32_ipc_path_token(const char *);
 int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
 int		 win32_server_spawn(const char *, uint64_t, char **);

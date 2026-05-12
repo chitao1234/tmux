@@ -48,6 +48,17 @@ static int		 server_exit;
 static struct event	 server_ev_accept;
 static struct event	 server_ev_tidy;
 #ifdef TMUX_WIN32
+struct server_win32_pending_client {
+	int			 fd;
+	struct event		 event;
+	uint32_t		 token;
+	size_t			 token_received;
+	size_t			 token_sent;
+	TAILQ_ENTRY(server_win32_pending_client) entry;
+};
+
+static TAILQ_HEAD(, server_win32_pending_client) server_win32_pending_clients =
+    TAILQ_HEAD_INITIALIZER(server_win32_pending_clients);
 static struct event	 server_ev_win32_children;
 static int		 server_win32_wait_first_client;
 #define SERVER_WIN32_FIRST_CLIENT_TIMEOUT 10
@@ -62,9 +73,19 @@ time_t			 current_time;
 
 static int	server_loop(void);
 static void	server_send_exit(void);
+static void	server_accept_client(int);
 static void	server_accept(tmux_event_fd, short, void *);
 static void	server_signal(int);
 #ifdef TMUX_WIN32
+static void	server_win32_pending_start(int);
+static void	server_win32_pending_update(
+		    struct server_win32_pending_client *);
+static void	server_win32_pending_cb(tmux_event_fd, short, void *);
+static void	server_win32_pending_finish(
+		    struct server_win32_pending_client *);
+static void	server_win32_pending_free(
+		    struct server_win32_pending_client *);
+static void	server_win32_pending_free_all(void);
 static void	server_win32_children_event(tmux_event_fd, short, void *);
 #endif
 #ifndef TMUX_WIN32
@@ -308,6 +329,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	proc_loop(server_proc, server_loop);
 
 #ifdef TMUX_WIN32
+	server_win32_pending_free_all();
 	if (server_fd != -1) {
 		win32_ipc_close(server_fd);
 		server_fd = -1;
@@ -385,6 +407,188 @@ server_loop(void)
 	return (1);
 }
 
+static void
+server_accept_client(int fd)
+{
+	struct client	*c;
+
+	c = server_client_create(fd);
+#ifdef TMUX_WIN32
+	server_win32_wait_first_client = 0;
+#endif
+	if (!server_acl_join(c)) {
+		c->exit_message = xstrdup("access not allowed");
+		c->flags |= CLIENT_EXIT;
+	}
+}
+
+#ifdef TMUX_WIN32
+static void
+server_win32_pending_start(int fd)
+{
+	struct server_win32_pending_client	*pending;
+
+	pending = xcalloc(1, sizeof *pending);
+	pending->fd = fd;
+	TAILQ_INSERT_TAIL(&server_win32_pending_clients, pending, entry);
+	server_win32_pending_update(pending);
+}
+
+static void
+server_win32_pending_update(struct server_win32_pending_client *pending)
+{
+	short	events;
+
+	if (pending->token_received < sizeof pending->token)
+		events = EV_READ;
+	else if (pending->token_sent < sizeof pending->token)
+		events = EV_WRITE;
+	else
+		return;
+
+	if (event_initialized(&pending->event))
+		event_del(&pending->event);
+	event_set(&pending->event,
+	    (evutil_socket_t)win32_ipc_socket(pending->fd), events,
+	    server_win32_pending_cb, pending);
+	event_add(&pending->event, NULL);
+}
+
+static void
+server_win32_pending_cb(__unused tmux_event_fd fd, short events, void *data)
+{
+	struct server_win32_pending_client	*pending = data;
+	SOCKET					 socket;
+	uint32_t				 expected;
+	char					*buf;
+	size_t					 len;
+	int					 n, error;
+
+	if (server_exit) {
+		server_win32_pending_free(pending);
+		return;
+	}
+
+	socket = win32_ipc_socket(pending->fd);
+	if (socket == INVALID_SOCKET) {
+		server_win32_pending_free(pending);
+		return;
+	}
+
+	if (pending->token_received < sizeof pending->token) {
+		if (!(events & EV_READ)) {
+			server_win32_pending_update(pending);
+			return;
+		}
+		buf = ((char *)&pending->token) + pending->token_received;
+		len = sizeof pending->token - pending->token_received;
+		n = recv(socket, buf, (int)len, 0);
+		if (n == SOCKET_ERROR) {
+			error = WSAGetLastError();
+			if (error == WSAEWOULDBLOCK || error == WSAEINTR) {
+				server_win32_pending_update(pending);
+				return;
+			}
+			log_debug("%s: recv failed: %s", __func__,
+			    win32_strerror(error));
+			server_win32_pending_free(pending);
+			return;
+		}
+		if (n == 0) {
+			log_debug("%s: connection closed during token read",
+			    __func__);
+			server_win32_pending_free(pending);
+			return;
+		}
+		pending->token_received += n;
+		if (pending->token_received < sizeof pending->token) {
+			server_win32_pending_update(pending);
+			return;
+		}
+
+		expected = pending->token;
+		if (socket_path != NULL)
+			expected = win32_ipc_path_token(socket_path);
+		if (pending->token != expected) {
+			log_debug("%s: Win32 IPC token mismatch", __func__);
+			server_win32_pending_free(pending);
+			return;
+		}
+
+		server_win32_pending_update(pending);
+		return;
+	}
+
+	if (!(events & EV_WRITE)) {
+		server_win32_pending_update(pending);
+		return;
+	}
+
+	buf = ((char *)&pending->token) + pending->token_sent;
+	len = sizeof pending->token - pending->token_sent;
+	n = send(socket, buf, (int)len, 0);
+	if (n == SOCKET_ERROR) {
+		error = WSAGetLastError();
+		if (error == WSAEWOULDBLOCK || error == WSAEINTR) {
+			server_win32_pending_update(pending);
+			return;
+		}
+		log_debug("%s: send failed: %s", __func__, win32_strerror(error));
+		server_win32_pending_free(pending);
+		return;
+	}
+	if (n == 0) {
+		log_debug("%s: connection closed during token reply", __func__);
+		server_win32_pending_free(pending);
+		return;
+	}
+	pending->token_sent += n;
+	if (pending->token_sent < sizeof pending->token) {
+		server_win32_pending_update(pending);
+		return;
+	}
+
+	server_win32_pending_finish(pending);
+}
+
+static void
+server_win32_pending_finish(struct server_win32_pending_client *pending)
+{
+	int	fd;
+
+	fd = pending->fd;
+	pending->fd = -1;
+	server_win32_pending_free(pending);
+
+	if (server_exit) {
+		win32_ipc_close(fd);
+		return;
+	}
+	server_accept_client(fd);
+}
+
+static void
+server_win32_pending_free(struct server_win32_pending_client *pending)
+{
+	if (event_initialized(&pending->event))
+		event_del(&pending->event);
+	TAILQ_REMOVE(&server_win32_pending_clients, pending, entry);
+	if (pending->fd != -1)
+		win32_ipc_close(pending->fd);
+	free(pending);
+}
+
+static void
+server_win32_pending_free_all(void)
+{
+	struct server_win32_pending_client	*pending, *pending1;
+
+	TAILQ_FOREACH_SAFE(pending, &server_win32_pending_clients, entry,
+	    pending1)
+		server_win32_pending_free(pending);
+}
+#endif
+
 /* Exit the server by killing all clients and windows. */
 static void
 server_send_exit(void)
@@ -393,6 +597,10 @@ server_send_exit(void)
 	struct session	*s, *s1;
 
 	cmd_wait_for_flush();
+
+#ifdef TMUX_WIN32
+	server_win32_pending_free_all();
+#endif
 
 	TAILQ_FOREACH_SAFE(c, &clients, entry, c1) {
 		if (c->flags & CLIENT_SUSPENDED)
@@ -466,7 +674,6 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 	socklen_t		 slen = sizeof sa;
 #endif
 	int			 newfd;
-	struct client		*c;
 
 	server_add_accept(0);
 	if (!(events & EV_READ))
@@ -474,7 +681,7 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 
 #ifdef TMUX_WIN32
 	(void)fd;
-	newfd = win32_ipc_server_accept(server_fd, &cause);
+	newfd = win32_ipc_socket_accept(server_fd, &cause);
 	if (newfd == -1) {
 		saved_errno = errno;
 		log_debug("%s", cause != NULL ? cause : "accept failed");
@@ -512,14 +719,11 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 #endif
 		return;
 	}
-	c = server_client_create(newfd);
 #ifdef TMUX_WIN32
-	server_win32_wait_first_client = 0;
+	server_win32_pending_start(newfd);
+#else
+	server_accept_client(newfd);
 #endif
-	if (!server_acl_join(c)) {
-		c->exit_message = xstrdup("access not allowed");
-		c->flags |= CLIENT_EXIT;
-	}
 }
 
 /*

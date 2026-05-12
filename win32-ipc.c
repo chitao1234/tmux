@@ -273,6 +273,12 @@ win32_ipc_hash(const char *path)
 	return (hash);
 }
 
+uint32_t
+win32_ipc_path_token(const char *path)
+{
+	return (htonl(win32_ipc_hash(path)));
+}
+
 static char *
 win32_ipc_port_path(const char *path)
 {
@@ -428,7 +434,7 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 		return (-1);
 	}
 
-	token = htonl(win32_ipc_hash(path));
+	token = win32_ipc_path_token(path);
 	if (win32_ipc_send_all(fd, &token, sizeof token,
 	    "couldn't verify Win32 IPC token", cause) != 0) {
 		saved_errno = errno;
@@ -454,12 +460,11 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 }
 
 int
-win32_ipc_server_accept(int fd, char **cause)
+win32_ipc_socket_accept(int fd, char **cause)
 {
 	SOCKET			 newfd;
 	struct sockaddr_storage	 ss;
 	int			 len = sizeof ss, saved_errno;
-	uint32_t		 token, expected;
 
 	newfd = accept(win32_ipc_socket(fd), (struct sockaddr *)&ss, &len);
 	if (newfd == INVALID_SOCKET) {
@@ -472,31 +477,7 @@ win32_ipc_server_accept(int fd, char **cause)
 		errno = win32_ipc_errno(error);
 		return (-1);
 	}
-
-	if (win32_ipc_set_blocking(newfd, 1, cause) != 0) {
-		saved_errno = errno;
-		closesocket(newfd);
-		errno = saved_errno;
-		return (-1);
-	}
-
-	if (win32_ipc_recv_all(newfd, &token, sizeof token,
-	    "couldn't read Win32 IPC token", cause) != 0) {
-		saved_errno = errno;
-		closesocket(newfd);
-		errno = saved_errno;
-		return (-1);
-	}
-	expected = htonl(socket_path == NULL ? token : win32_ipc_hash(socket_path));
-	if (token != expected) {
-		if (cause != NULL)
-			xasprintf(cause, "Win32 IPC token mismatch");
-		closesocket(newfd);
-		errno = EACCES;
-		return (-1);
-	}
-	if (win32_ipc_send_all(newfd, &token, sizeof token,
-	    "couldn't acknowledge Win32 IPC token", cause) != 0) {
+	if (win32_ipc_set_blocking(newfd, 0, cause) != 0) {
 		saved_errno = errno;
 		closesocket(newfd);
 		errno = saved_errno;
