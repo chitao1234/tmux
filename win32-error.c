@@ -162,6 +162,19 @@ win32_path_is_dir(const char *path)
 	return (ok);
 }
 
+const char *
+win32_default_cwd(void)
+{
+	const char	*home;
+
+	home = find_home();
+	if (home != NULL && win32_path_is_dir(home))
+		return (home);
+	if (win32_path_is_dir("C:\\"))
+		return ("C:\\");
+	return (NULL);
+}
+
 int
 win32_terminal_prepare_terminfo(void)
 {

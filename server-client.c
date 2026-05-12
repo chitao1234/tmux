@@ -2662,12 +2662,10 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	case MSG_IDENTIFY_CWD:
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			return (-1);
-		if (access(data, X_OK) == 0)
+		if (win32_path_is_dir(data))
 			c->cwd = xstrdup(data);
-		else if ((home = find_home()) != NULL)
+		else if ((home = win32_default_cwd()) != NULL)
 			c->cwd = xstrdup(home);
-		else
-			c->cwd = xstrdup("/");
 		log_debug("client %p IDENTIFY_CWD %s", c, data);
 		break;
 	case MSG_IDENTIFY_STDIN:
@@ -2862,9 +2860,9 @@ server_client_get_cwd(struct client *c, struct session *s)
 		return (s->cwd);
 	if (c != NULL && (s = c->session) != NULL && s->cwd != NULL)
 		return (s->cwd);
-	if ((home = find_home()) != NULL)
+	if ((home = win32_default_cwd()) != NULL)
 		return (home);
-	return ("/");
+	return (NULL);
 }
 
 /* Get control client flags. */

@@ -82,7 +82,7 @@ static LIST_HEAD(joblist, job) all_jobs = LIST_HEAD_INITIALIZER(all_jobs);
 static char *
 job_win32_resolve_cwd(struct environ *env, const char *cwd)
 {
-	const char	*actual_cwd = NULL, *home = NULL;
+	const char	*actual_cwd = NULL;
 
 	if (cwd == NULL)
 		return (NULL);
@@ -90,10 +90,8 @@ job_win32_resolve_cwd(struct environ *env, const char *cwd)
 		return (xstrdup(cwd));
 	if (win32_path_is_dir(cwd))
 		actual_cwd = cwd;
-	else if ((home = find_home()) != NULL && win32_path_is_dir(home))
-		actual_cwd = home;
-	else if (win32_path_is_dir("C:\\"))
-		actual_cwd = "C:\\";
+	else
+		actual_cwd = win32_default_cwd();
 	if (actual_cwd != NULL) {
 		environ_set(env, "PWD", 0, "%s", actual_cwd);
 		return (xstrdup(actual_cwd));

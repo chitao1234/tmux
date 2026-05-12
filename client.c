@@ -556,8 +556,13 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	client_peer = proc_add_peer(client_proc, fd, client_dispatch, NULL);
 
 	/* Save these before pledge(). */
-	if ((cwd = find_cwd()) == NULL && (cwd = find_home()) == NULL)
+	if ((cwd = find_cwd()) == NULL)
+#ifdef TMUX_WIN32
+		cwd = win32_default_cwd();
+#else
+	if ((cwd = find_home()) == NULL)
 		cwd = "/";
+#endif
 #ifdef TMUX_WIN32
 	ttynam = "";
 #else

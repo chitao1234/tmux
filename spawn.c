@@ -398,10 +398,8 @@ spawn_pane(struct spawn_context *sc, char **cause)
 #ifdef TMUX_WIN32
 	if (new_wp->cwd != NULL && win32_path_is_dir(new_wp->cwd))
 		actual_cwd = new_wp->cwd;
-	else if (home != NULL && win32_path_is_dir(home))
-		actual_cwd = home;
-	else if (win32_path_is_dir("C:\\"))
-		actual_cwd = "C:\\";
+	else
+		actual_cwd = win32_default_cwd();
 	if (actual_cwd != NULL)
 		cwd_target = xstrdup(actual_cwd);
 	else if (new_wp->cwd != NULL)
