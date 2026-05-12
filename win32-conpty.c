@@ -16,6 +16,8 @@
 
 #include "tmux.h"
 
+#include <winternl.h>
+
 #ifdef TMUX_WIN32
 
 struct win32_pane {
@@ -51,7 +53,41 @@ struct win32_job {
 	int		 status;
 };
 
+struct win32_curdir {
+	UNICODE_STRING	 DosPath;
+	HANDLE		 Handle;
+};
+
+struct win32_process_parameters {
+	ULONG			 MaximumLength;
+	ULONG			 Length;
+	ULONG			 Flags;
+	ULONG			 DebugFlags;
+	HANDLE			 ConsoleHandle;
+	ULONG			 ConsoleFlags;
+	HANDLE			 StandardInput;
+	HANDLE			 StandardOutput;
+	HANDLE			 StandardError;
+	struct win32_curdir	 CurrentDirectory;
+	UNICODE_STRING		 DllPath;
+	UNICODE_STRING		 ImagePathName;
+	UNICODE_STRING		 CommandLine;
+};
+
+struct win32_job_process {
+	DWORD		 pid;
+	DWORD		 ppid;
+	HANDLE		 process;
+	uint64_t	 created;
+	u_int		 depth;
+	int		 has_child;
+	int		 close_process;
+};
+
 #define WIN32_CHILD_KILL_TIMEOUT 1000
+
+typedef NTSTATUS (NTAPI *win32_nt_query_information_process)(HANDLE,
+    PROCESSINFOCLASS, PVOID, ULONG, PULONG);
 
 static int
 win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
@@ -82,6 +118,31 @@ fail:
 	CloseHandle(write);
 	SetLastError(error);
 	return (-1);
+}
+
+static win32_nt_query_information_process
+win32_get_nt_query_information_process(void)
+{
+	static win32_nt_query_information_process	 fn;
+	static int					 loaded;
+	HMODULE						 ntdll;
+	union {
+		FARPROC					 proc;
+		win32_nt_query_information_process	 fn;
+	}						 cast;
+
+	if (loaded)
+		return (fn);
+	loaded = 1;
+
+	ntdll = GetModuleHandleW(L"ntdll.dll");
+	if (ntdll == NULL)
+		return (NULL);
+	cast.proc = GetProcAddress(ntdll, "NtQueryInformationProcess");
+	if (cast.proc == NULL)
+		return (NULL);
+	fn = cast.fn;
+	return (fn);
 }
 
 static wchar_t *
@@ -310,6 +371,228 @@ win32_close_pseudoconsole(HPCON *hpcon)
 	if (*hpcon != NULL)
 		ClosePseudoConsole(*hpcon);
 	*hpcon = NULL;
+}
+
+static int
+win32_process_read(HANDLE process, const void *base, void *buf, size_t size)
+{
+	SIZE_T	nread = 0;
+
+	if (size == 0)
+		return (1);
+	if (!ReadProcessMemory(process, base, buf, size, &nread))
+		return (0);
+	return (nread == size);
+}
+
+static int
+win32_process_get_basic_information(HANDLE process,
+    PROCESS_BASIC_INFORMATION *pbi)
+{
+	win32_nt_query_information_process	 query_information_process;
+	ULONG					 len = 0;
+	NTSTATUS				 status;
+
+	if (process == NULL)
+		return (0);
+	query_information_process = win32_get_nt_query_information_process();
+	if (query_information_process == NULL)
+		return (0);
+	status = query_information_process(process, ProcessBasicInformation,
+	    pbi, sizeof *pbi, &len);
+	return (NT_SUCCESS(status));
+}
+
+static uint64_t
+win32_process_get_create_time(HANDLE process)
+{
+	FILETIME	 create, exit, kernel, user;
+	ULARGE_INTEGER when;
+
+	if (!GetProcessTimes(process, &create, &exit, &kernel, &user))
+		return (0);
+	when.LowPart = create.dwLowDateTime;
+	when.HighPart = create.dwHighDateTime;
+	return (when.QuadPart);
+}
+
+static char *
+win32_process_get_cwd(HANDLE process)
+{
+	struct win32_process_parameters	 params;
+	PROCESS_BASIC_INFORMATION	 pbi;
+	wchar_t				*wpath;
+	SIZE_T				 size;
+	PEB				 peb;
+	char				*cwd;
+
+	if (process == NULL)
+		return (NULL);
+	if (!win32_process_get_basic_information(process, &pbi) ||
+	    pbi.PebBaseAddress == NULL)
+		return (NULL);
+	if (!win32_process_read(process, pbi.PebBaseAddress, &peb, sizeof peb))
+		return (NULL);
+	if (peb.ProcessParameters == NULL)
+		return (NULL);
+	if (!win32_process_read(process, peb.ProcessParameters, &params,
+	    sizeof params))
+		return (NULL);
+	if (params.CurrentDirectory.DosPath.Length == 0 ||
+	    params.CurrentDirectory.DosPath.Buffer == NULL)
+		return (NULL);
+	size = (size_t)params.CurrentDirectory.DosPath.Length;
+	if (size % sizeof *wpath != 0)
+		return (NULL);
+	wpath = xcalloc((size / sizeof *wpath) + 1, sizeof *wpath);
+	if (!win32_process_read(process, params.CurrentDirectory.DosPath.Buffer,
+	    wpath, size)) {
+		free(wpath);
+		return (NULL);
+	}
+	wpath[size / sizeof *wpath] = L'\0';
+	cwd = win32_wide_to_utf8(wpath);
+	free(wpath);
+	return (cwd);
+}
+
+static ssize_t
+win32_job_find_process(struct win32_job_process *processes, u_int count,
+    DWORD pid)
+{
+	u_int	i;
+
+	for (i = 0; i < count; i++) {
+		if (processes[i].pid == pid)
+			return ((ssize_t)i);
+	}
+	return (-1);
+}
+
+static int
+win32_job_process_depth(struct win32_job_process *processes, u_int count,
+    u_int index, DWORD root_pid)
+{
+	ssize_t	parent;
+	DWORD	pid;
+	u_int	depth, limit;
+
+	pid = processes[index].pid;
+	if (pid == root_pid)
+		return (0);
+
+	depth = 0;
+	limit = count;
+	while (pid != root_pid) {
+		if (limit-- == 0)
+			return (-1);
+		parent = win32_job_find_process(processes, count,
+		    processes[index].ppid);
+		if (parent == -1)
+			return (-1);
+		index = (u_int)parent;
+		pid = processes[index].pid;
+		depth++;
+	}
+	return ((int)depth);
+}
+
+static char *
+win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
+{
+	JOBOBJECT_BASIC_PROCESS_ID_LIST	*list = NULL;
+	struct win32_job_process	*processes = NULL;
+	PROCESS_BASIC_INFORMATION	 pbi;
+	size_t				 size;
+	DWORD				 needed = 0, pid;
+	u_int				 assigned, count, used = 0, i, j, best;
+	int				 depth;
+	char				*cwd = NULL;
+	HANDLE				 process;
+	int				 have_best = 0;
+
+	if (root_process == NULL)
+		return (NULL);
+	if (job == NULL)
+		return (win32_process_get_cwd(root_process));
+
+	size = sizeof *list + (15 * sizeof(ULONG_PTR));
+	for (;;) {
+		list = xmalloc(size);
+		if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList,
+		    list, (DWORD)size, &needed)) {
+			free(list);
+			return (win32_process_get_cwd(root_process));
+		}
+		assigned = list->NumberOfAssignedProcesses;
+		if (list->NumberOfProcessIdsInList >= assigned)
+			break;
+		free(list);
+		size = sizeof *list;
+		if (assigned > 1)
+			size += (assigned - 1) * sizeof(ULONG_PTR);
+	}
+
+	count = list->NumberOfProcessIdsInList;
+	processes = xcalloc(count == 0 ? 1 : count, sizeof *processes);
+	for (i = 0; i < count; i++) {
+		pid = (DWORD)list->ProcessIdList[i];
+		if (pid == 0)
+			continue;
+		if (pid == root_pid)
+			process = root_process;
+		else {
+			process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|
+			    PROCESS_VM_READ, FALSE, pid);
+			if (process == NULL)
+				continue;
+		}
+		if (!win32_process_get_basic_information(process, &pbi)) {
+			if (process != root_process)
+				CloseHandle(process);
+			continue;
+		}
+		processes[used].pid = pid;
+		processes[used].ppid =
+		    (DWORD)(ULONG_PTR)pbi.InheritedFromUniqueProcessId;
+		processes[used].process = process;
+		processes[used].created = win32_process_get_create_time(process);
+		processes[used].close_process = (process != root_process);
+		used++;
+	}
+	free(list);
+
+	best = 0;
+	for (i = 0; i < used; i++) {
+		depth = win32_job_process_depth(processes, used, i, root_pid);
+		if (depth < 0)
+			continue;
+		processes[i].depth = (u_int)depth;
+		for (j = 0; j < used; j++) {
+			if (i != j && processes[j].ppid == processes[i].pid)
+				processes[i].has_child = 1;
+		}
+		if (!have_best ||
+		    (processes[best].has_child && !processes[i].has_child) ||
+		    (processes[best].has_child == processes[i].has_child &&
+		    (processes[i].depth > processes[best].depth ||
+		    (processes[i].depth == processes[best].depth &&
+		    processes[i].created > processes[best].created)))) {
+			best = i;
+			have_best = 1;
+		}
+	}
+	if (have_best)
+		cwd = win32_process_get_cwd(processes[best].process);
+	if (cwd == NULL)
+		cwd = win32_process_get_cwd(root_process);
+
+	for (i = 0; i < used; i++) {
+		if (processes[i].close_process)
+			CloseHandle(processes[i].process);
+	}
+	free(processes);
+	return (cwd);
 }
 
 static HANDLE
@@ -626,6 +909,15 @@ win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 		left -= written;
 	}
 	return ((int)(size - left));
+}
+
+char *
+win32_pane_get_cwd(struct window_pane *wp)
+{
+	if (wp == NULL || wp->win32 == NULL)
+		return (NULL);
+	return (win32_job_get_cwd(wp->win32->job, wp->win32->process,
+	    wp->win32->process_id));
 }
 
 struct bufferevent *

@@ -916,6 +916,11 @@ format_cb_current_path(struct format_tree *ft)
 	if (wp == NULL)
 		return (NULL);
 
+#ifdef TMUX_WIN32
+	cwd = win32_pane_get_cwd(wp);
+	if (cwd != NULL)
+		return (cwd);
+#endif
 	cwd = osdep_get_cwd(wp->fd);
 	if (cwd == NULL && wp->cwd != NULL)
 		return (xstrdup(wp->cwd));

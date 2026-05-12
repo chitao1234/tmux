@@ -77,6 +77,7 @@ void		 win32_pane_resize(struct window_pane *, u_int, u_int);
 void		 win32_pane_drain(struct window_pane *);
 int		 win32_pane_exited(struct window_pane *, int *);
 size_t		 win32_pane_buffered(struct window_pane *);
+char		*win32_pane_get_cwd(struct window_pane *);
 
 struct bufferevent *win32_pane_get_event(struct window_pane *);
 int		 win32_pane_write(struct window_pane *, const void *, size_t);
