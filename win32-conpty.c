@@ -512,17 +512,26 @@ win32_pane_buffered(struct window_pane *wp)
 int
 win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 {
-	DWORD	written;
+	const char	*buf = data;
+	size_t		 left = size;
+	DWORD		 written;
 
-	if (wp->win32 == NULL || wp->win32->input_write == NULL) {
-		errno = EIO;
-		return (-1);
+	while (left != 0) {
+		if (wp->win32 == NULL || wp->win32->input_write == NULL) {
+			errno = EPIPE;
+			return (-1);
+		}
+		if (!WriteFile(wp->win32->input_write, buf,
+		    left > MAXDWORD ? MAXDWORD : left, &written, NULL)) {
+			errno = EIO;
+			return (-1);
+		}
+		if (written == 0)
+			break;
+		buf += written;
+		left -= written;
 	}
-	if (!WriteFile(wp->win32->input_write, data, size, &written, NULL)) {
-		errno = EIO;
-		return (-1);
-	}
-	return ((int)written);
+	return ((int)(size - left));
 }
 
 struct bufferevent *
