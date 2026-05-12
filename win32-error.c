@@ -145,7 +145,7 @@ win32_getenv_utf8(const char *name)
 	return (out);
 }
 
-static int
+int
 win32_path_is_dir(const char *path)
 {
 	wchar_t	*wpath;

@@ -221,6 +221,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	char			  path[PATH_MAX];
 	const char		 *cmd, *tmp, *home = find_home();
 	const char		 *actual_cwd = NULL;
+	char			 *cwd_target = NULL;
 	int			  argc;
 	u_int			  idx;
 	u_int			  hlimit;
@@ -393,7 +394,35 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		goto complete;
 	}
 
-    /* Store current working directory and change to new one. */
+	/* Fork the new process. */
+#ifdef TMUX_WIN32
+	if (new_wp->cwd != NULL && win32_path_is_dir(new_wp->cwd))
+		actual_cwd = new_wp->cwd;
+	else if (home != NULL && win32_path_is_dir(home))
+		actual_cwd = home;
+	else if (win32_path_is_dir("C:\\"))
+		actual_cwd = "C:\\";
+	if (actual_cwd != NULL)
+		cwd_target = xstrdup(actual_cwd);
+	else if (new_wp->cwd != NULL)
+		cwd_target = xstrdup(new_wp->cwd);
+	if (actual_cwd != NULL)
+		environ_set(child, "PWD", 0, "%s", actual_cwd);
+	if (win32_pane_spawn(sc, new_wp, child, cwd_target, cause) != 0) {
+		new_wp->fd = -1;
+		if (~sc->flags & SPAWN_RESPAWN) {
+			server_client_remove_pane(new_wp);
+			layout_close_pane(new_wp);
+			window_remove_pane(w, new_wp);
+		}
+		free(cwd_target);
+		environ_free(child);
+		return (NULL);
+	}
+	free(cwd_target);
+	goto complete;
+#else
+	/* Store current working directory and change to new one. */
 	if (getcwd(path, sizeof path) != NULL) {
 		if (chdir(new_wp->cwd) == 0)
 			actual_cwd = new_wp->cwd;
@@ -402,22 +431,6 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		else if (chdir("/") == 0)
 			actual_cwd = "/";
 	}
-
-	/* Fork the new process. */
-#ifdef TMUX_WIN32
-	if (win32_pane_spawn(sc, new_wp, child, actual_cwd != NULL ?
-	    actual_cwd : new_wp->cwd, cause) != 0) {
-		new_wp->fd = -1;
-		if (~sc->flags & SPAWN_RESPAWN) {
-			server_client_remove_pane(new_wp);
-			layout_close_pane(new_wp);
-			window_remove_pane(w, new_wp);
-		}
-		environ_free(child);
-		return (NULL);
-	}
-	goto complete;
-#else
 	new_wp->pid = fdforkpty(ptm_fd, &new_wp->fd, new_wp->tty, NULL, &ws);
 	if (new_wp->pid == -1) {
 		xasprintf(cause, "fork failed: %s", strerror(errno));
