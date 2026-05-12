@@ -46,6 +46,7 @@ struct win32_job {
 	HANDLE		 stdin_write;
 	HANDLE		 stdout_read;
 	HANDLE		 stdout_write;
+	HANDLE		 stderr_write;
 	struct win32_handle_event *output_event;
 	struct bufferevent *event;
 	int		 pty;
@@ -1038,8 +1039,23 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		si.dwFlags = STARTF_USESTDHANDLES;
 		si.hStdInput = wj->stdin_read;
 		si.hStdOutput = wj->stdout_write;
-		si.hStdError = (flags & JOB_SHOWSTDERR) ?
-		    wj->stdout_write : GetStdHandle(STD_ERROR_HANDLE);
+		if (flags & JOB_SHOWSTDERR)
+			si.hStdError = wj->stdout_write;
+		else {
+			wj->stderr_write = CreateFileW(L"NUL",
+			    GENERIC_READ|GENERIC_WRITE,
+			    FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+			    FILE_ATTRIBUTE_NORMAL, NULL);
+			if (wj->stderr_write == INVALID_HANDLE_VALUE) {
+				wj->stderr_write = NULL;
+				if (cause != NULL) {
+					xasprintf(cause, "CreateFileW NUL failed: %s",
+					    win32_strerror(GetLastError()));
+				}
+				goto fail;
+			}
+			si.hStdError = wj->stderr_write;
+		}
 		ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
 		    creation_flags|CREATE_SUSPENDED, wenv, wcwd, &si, &pi);
 	}
@@ -1069,6 +1085,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	}
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
+	win32_close_handle(&wj->stderr_write);
 
 	wj->event = bufferevent_new(-1, NULL, NULL, NULL, NULL);
 	if (wj->event == NULL)
@@ -1108,6 +1125,7 @@ fail:
 		    &wj->stdin_write, &wj->stdout_write);
 		if (wj->output_event != NULL)
 			win32_handle_event_free(wj->output_event);
+		win32_close_handle(&wj->stderr_write);
 		win32_close_handle(&wj->stdout_read);
 		win32_close_handle(&wj->job);
 		win32_close_handle(&wj->thread);
@@ -1128,6 +1146,7 @@ win32_job_close(struct win32_job *wj)
 	    &wj->stdout_write);
 	if (wj->output_event != NULL)
 		win32_handle_event_free(wj->output_event);
+	win32_close_handle(&wj->stderr_write);
 	win32_close_handle(&wj->stdout_read);
 	win32_close_handle(&wj->job);
 	win32_close_handle(&wj->thread);
