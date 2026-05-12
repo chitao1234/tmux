@@ -43,6 +43,7 @@ static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
 #ifdef TMUX_WIN32
 static void	job_complete(struct job *);
+static char	*job_win32_resolve_cwd(struct environ *, const char *);
 #endif
 
 /* A single job. */
@@ -77,6 +78,30 @@ struct job {
 /* All jobs list. */
 static LIST_HEAD(joblist, job) all_jobs = LIST_HEAD_INITIALIZER(all_jobs);
 
+#ifdef TMUX_WIN32
+static char *
+job_win32_resolve_cwd(struct environ *env, const char *cwd)
+{
+	const char	*actual_cwd = NULL, *home = NULL;
+
+	if (cwd == NULL)
+		return (NULL);
+	if (cwd[0] == '/')
+		return (xstrdup(cwd));
+	if (win32_path_is_dir(cwd))
+		actual_cwd = cwd;
+	else if ((home = find_home()) != NULL && win32_path_is_dir(home))
+		actual_cwd = home;
+	else if (win32_path_is_dir("C:\\"))
+		actual_cwd = "C:\\";
+	if (actual_cwd != NULL) {
+		environ_set(env, "PWD", 0, "%s", actual_cwd);
+		return (xstrdup(actual_cwd));
+	}
+	return (xstrdup(cwd));
+}
+#endif
+
 /* Start a job running. */
 struct job *
 job_run(const char *cmd, int argc, char **argv, struct environ *e,
@@ -95,7 +120,7 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	char		**argvp, tty[TTY_NAME_MAX], *argv0;
 #else
 	const char	 *shell;
-	char		 *argv0;
+	char		 *argv0, *cwd_target;
 #endif
 	struct options	 *oo;
 #ifdef TMUX_WIN32
@@ -125,8 +150,18 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	argv0 = shell_argv0(shell, 0);
 
 #ifdef TMUX_WIN32
-	wj = win32_job_spawn(cmd, shell, argc, argv, env, s, cwd, flags, sx,
-	    sy, NULL);
+	cwd_target = job_win32_resolve_cwd(env, cwd);
+	if (cmd == NULL) {
+		cmd_log_argv(argc, argv, "%s:", __func__);
+		log_debug("%s: cwd=%s, shell=%s", __func__,
+		    cwd_target == NULL ? "" : cwd_target, shell);
+	} else {
+		log_debug("%s: cmd=%s, cwd=%s, shell=%s", __func__, cmd,
+		    cwd_target == NULL ? "" : cwd_target, shell);
+	}
+	wj = win32_job_spawn(cmd, shell, argc, argv, env, s, cwd_target, flags,
+	    sx, sy, NULL);
+	free(cwd_target);
 	if (wj == NULL) {
 		environ_free(env);
 		free(argv0);
