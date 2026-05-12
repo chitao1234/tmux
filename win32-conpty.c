@@ -137,7 +137,7 @@ win32_quote_argument(const char *arg)
 	return (wout);
 }
 
-static wchar_t *
+wchar_t *
 win32_build_argv_command(int argc, char **argv)
 {
 	wchar_t	*line = NULL, *quoted;

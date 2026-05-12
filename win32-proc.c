@@ -50,7 +50,8 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	PROCESS_INFORMATION pi;
 	DWORD		 n;
 	BOOL		 ok;
-	char		*exe_utf8, *utf8;
+	char		*exe_utf8, **argv;
+	int		 argc, i, log_level;
 
 	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
 	if (n == 0 || n == MAX_PATH) {
@@ -63,10 +64,22 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 		xasprintf(cause, "couldn't convert executable path");
 		return (-1);
 	}
-	xasprintf(&utf8, "\"%s\" -D -vv -S \"%s\" -w", exe_utf8, path);
-	free(exe_utf8);
-	cmd = win32_utf8_to_wide(utf8);
-	free(utf8);
+	log_level = log_get_level();
+	argc = 5 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0);
+	argv = xcalloc((size_t)argc, sizeof *argv);
+	i = 0;
+	argv[i++] = exe_utf8;
+	argv[i++] = xstrdup("-D");
+	while (log_level-- > 0)
+		argv[i++] = xstrdup("-v");
+	argv[i++] = xstrdup("-S");
+	argv[i++] = xstrdup(path);
+	if (flags & CLIENT_WIN32_HELPER)
+		argv[i++] = xstrdup("-w");
+	cmd = win32_build_argv_command(i, argv);
+	while (i-- > 0)
+		free(argv[i]);
+	free(argv);
 	if (cmd == NULL) {
 		xasprintf(cause, "couldn't build server command line");
 		return (-1);

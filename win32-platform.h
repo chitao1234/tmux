@@ -33,6 +33,7 @@ char		*win32_getenv_utf8(const char *);
 wchar_t		*win32_utf8_to_wide(const char *);
 char		*win32_wide_to_utf8(const wchar_t *);
 int		 win32_path_is_dir(const char *);
+wchar_t		*win32_build_argv_command(int, char **);
 
 int		 win32_init(void);
 void		 win32_fini(void);
