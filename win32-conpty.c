@@ -775,6 +775,10 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	pw->thread = pi.hThread;
 	pw->process_id = pi.dwProcessId;
 	pw->job = win32_child_create_job(pw->process, pw->process_id);
+	if (pw->job == NULL) {
+		xasprintf(cause, "AssignProcessToJobObject pane failed");
+		goto fail;
+	}
 	if (ResumeThread(pw->thread) == (DWORD)-1) {
 		xasprintf(cause, "ResumeThread failed: %s",
 		    win32_strerror(GetLastError()));
@@ -1027,7 +1031,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		}
 		creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
 		ok = CreateProcessW(NULL, wcmd, NULL, NULL, FALSE,
-		    creation_flags, wenv, wcwd, &six.StartupInfo, &pi);
+		    creation_flags|CREATE_SUSPENDED, wenv, wcwd,
+		    &six.StartupInfo, &pi);
 	} else {
 		si.cb = sizeof si;
 		si.dwFlags = STARTF_USESTDHANDLES;
@@ -1050,6 +1055,11 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	wj->thread = pi.hThread;
 	wj->process_id = pi.dwProcessId;
 	wj->job = win32_child_create_job(wj->process, wj->process_id);
+	if (wj->job == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "AssignProcessToJobObject job failed");
+		goto fail;
+	}
 	if (ResumeThread(wj->thread) == (DWORD)-1) {
 		if (cause != NULL) {
 			xasprintf(cause, "ResumeThread job failed: %s",
