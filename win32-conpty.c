@@ -186,6 +186,19 @@ win32_shell_is_cmd(const char *shell)
 	    strcasecmp(name, "cmd") == 0);
 }
 
+static int
+win32_validate_cwd(const char *cwd, char **cause)
+{
+	if (cwd == NULL || cwd[0] != '/')
+		return (0);
+	if (cause != NULL) {
+		xasprintf(cause, "working directory must be a Windows path on "
+		    "Win32: %s", cwd);
+	}
+	errno = EINVAL;
+	return (-1);
+}
+
 static wchar_t *
 win32_build_environment(struct environ *env)
 {
@@ -384,6 +397,8 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 
 	wcmd = win32_build_command(wp);
+	if (win32_validate_cwd(cwd, cause) != 0)
+		goto fail;
 	wcwd = win32_utf8_to_wide(cwd);
 	wenv = win32_build_environment(env);
 	memset(&pi, 0, sizeof pi);
@@ -595,6 +610,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	memset(&six, 0, sizeof six);
 	memset(&pi, 0, sizeof pi);
 	wcmd = win32_build_job_command(cmd, shell, argc, argv);
+	if (win32_validate_cwd(cwd, cause) != 0)
+		goto fail;
 	if (cwd != NULL)
 		wcwd = win32_utf8_to_wide(cwd);
 	wenv = win32_build_environment(env);
