@@ -214,12 +214,14 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	struct window_pane	 *new_wp;
 	struct environ		 *child;
 	struct environ_entry	 *ee;
-	char			**argv, *cp, *cwd, *new_cwd;
+	char			**argv, *cp, *cwd;
 #ifndef TMUX_WIN32
 	char			**argvp, *argv0;
-#endif
 	char			  path[PATH_MAX];
 	const char		 *cmd, *tmp, *home = find_home();
+#else
+	const char		 *cmd, *tmp;
+#endif
 	const char		 *actual_cwd = NULL;
 	char			 *cwd_target = NULL;
 	int			  argc;
@@ -240,13 +242,28 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	 */
 	if (sc->cwd != NULL) {
 		cwd = format_single(item, sc->cwd, c, target->s, NULL, NULL);
+#ifdef TMUX_WIN32
+		{
+			char	*resolved;
+
+			resolved = win32_resolve_cwd(cwd,
+			    server_client_get_cwd(c, target->s), cause);
+			free(cwd);
+			cwd = resolved;
+			if (cwd == NULL)
+				return (NULL);
+		}
+#else
 		if (!path_is_absolute(cwd)) {
+			char	*new_cwd;
+
 			xasprintf(&new_cwd, "%s%s%s",
 			    server_client_get_cwd(c, target->s),
 			    *cwd != '\0' ? "/" : "", cwd);
 			free(cwd);
 			cwd = new_cwd;
 		}
+#endif
 	} else if (~sc->flags & SPAWN_RESPAWN)
 		cwd = xstrdup(server_client_get_cwd(c, target->s));
 	else

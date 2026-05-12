@@ -2854,10 +2854,16 @@ server_client_get_cwd(struct client *c, struct session *s)
 
 	if (!cfg_finished && cfg_client != NULL)
 		return (cfg_client->cwd);
-	if (c != NULL && c->session == NULL && c->cwd != NULL)
-		return (c->cwd);
+#ifdef TMUX_WIN32
 	if (s != NULL && s->cwd != NULL)
 		return (s->cwd);
+#endif
+	if (c != NULL && c->session == NULL && c->cwd != NULL)
+		return (c->cwd);
+#ifndef TMUX_WIN32
+	if (s != NULL && s->cwd != NULL)
+		return (s->cwd);
+#endif
 	if (c != NULL && (s = c->session) != NULL && s->cwd != NULL)
 		return (s->cwd);
 	if ((home = win32_default_cwd()) != NULL)

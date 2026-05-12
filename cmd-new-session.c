@@ -172,6 +172,21 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 		cwd = format_single(item, tmp, c, NULL, NULL, NULL);
 	else
 		cwd = xstrdup(server_client_get_cwd(c, NULL));
+#ifdef TMUX_WIN32
+	{
+		char	*resolved;
+
+		resolved = win32_resolve_cwd(cwd, server_client_get_cwd(c, NULL),
+		    &cause);
+		free(cwd);
+		cwd = resolved;
+		if (cwd == NULL) {
+			cmdq_error(item, "%s", cause);
+			free(cause);
+			goto fail;
+		}
+	}
+#endif
 
 	/*
 	 * If this is a new client, check for nesting and save the termios
@@ -296,7 +311,7 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 	args_to_vector(args, &sc.argc, &sc.argv);
 
 	sc.idx = -1;
-	sc.cwd = args_get(args, 'c');
+	sc.cwd = cwd;
 
 	sc.flags = 0;
 

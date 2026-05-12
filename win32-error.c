@@ -162,6 +162,93 @@ win32_path_is_dir(const char *path)
 	return (ok);
 }
 
+char *
+win32_resolve_cwd(const char *cwd, const char *base, char **cause)
+{
+	wchar_t	*winput = NULL, *wbase = NULL, *wcombined = NULL;
+	wchar_t	*wresolved = NULL;
+	char	*resolved = NULL;
+	const char	*root;
+	DWORD	 n;
+	size_t	 len, base_len, input_len, used;
+
+	if (cwd == NULL)
+		return (NULL);
+	if (cwd[0] == '/') {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "working directory must be a Windows path on "
+			    "Win32: %s", cwd);
+		}
+		errno = EINVAL;
+		return (NULL);
+	}
+
+	winput = win32_utf8_to_wide(cwd);
+	if (winput == NULL)
+		goto fail;
+
+	if (path_is_absolute(cwd))
+		root = NULL;
+	else if (base != NULL && base[0] != '/')
+		root = base;
+	else
+		root = win32_default_cwd();
+
+	if (root != NULL) {
+		wbase = win32_utf8_to_wide(root);
+		if (wbase == NULL)
+			goto fail;
+
+		base_len = wcslen(wbase);
+		input_len = wcslen(winput);
+		used = base_len;
+		if (base_len != 0 &&
+		    wbase[base_len - 1] != L'\\' &&
+		    wbase[base_len - 1] != L'/')
+			used++;
+		wcombined = xcalloc(used + input_len + 1, sizeof *wcombined);
+		memcpy(wcombined, wbase, base_len * sizeof *wcombined);
+		if (used != base_len)
+			wcombined[base_len] = L'\\';
+		memcpy(wcombined + used, winput,
+		    (input_len + 1) * sizeof *wcombined);
+	} else {
+		len = wcslen(winput);
+		wcombined = xcalloc(len + 1, sizeof *wcombined);
+		memcpy(wcombined, winput, (len + 1) * sizeof *wcombined);
+	}
+	if (wcombined == NULL)
+		goto fail;
+
+	n = GetFullPathNameW(wcombined, 0, NULL, NULL);
+	if (n == 0)
+		goto fail;
+	wresolved = xcalloc(n, sizeof *wresolved);
+	if (GetFullPathNameW(wcombined, n, wresolved, NULL) == 0)
+		goto fail;
+
+	resolved = win32_wide_to_utf8(wresolved);
+	if (resolved == NULL)
+		goto fail;
+
+	free(winput);
+	free(wbase);
+	free(wcombined);
+	free(wresolved);
+	return (resolved);
+
+fail:
+	if (cause != NULL && *cause == NULL)
+		xasprintf(cause, "couldn't resolve working directory: %s", cwd);
+	free(winput);
+	free(wbase);
+	free(wcombined);
+	free(wresolved);
+	free(resolved);
+	return (NULL);
+}
+
 const char *
 win32_default_cwd(void)
 {

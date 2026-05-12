@@ -450,6 +450,21 @@ cmd_display_popup_exec(struct cmd *self, struct cmdq_item *item)
 			cwd = format_single_from_target(item, value);
 		else
 			cwd = xstrdup(server_client_get_cwd(tc, s));
+#ifdef TMUX_WIN32
+		{
+			char	*resolved;
+
+			resolved = win32_resolve_cwd(cwd,
+			    server_client_get_cwd(tc, s), &cause);
+			free(cwd);
+			cwd = resolved;
+			if (cwd == NULL) {
+				cmdq_error(item, "%s", cause);
+				free(cause);
+				goto fail;
+			}
+		}
+#endif
 		if (count == 0) {
 			shellcmd = options_get_string(s->options,
 			    "default-command");

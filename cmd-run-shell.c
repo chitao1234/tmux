@@ -157,6 +157,22 @@ cmd_run_shell_exec(struct cmd *self, struct cmdq_item *item)
 		cdata->cwd = xstrdup(args_get(args, 'c'));
 	else
 		cdata->cwd = xstrdup(server_client_get_cwd(c, s));
+#ifdef TMUX_WIN32
+	{
+		char	*resolved, *cause = NULL;
+
+		resolved = win32_resolve_cwd(cdata->cwd,
+		    server_client_get_cwd(c, s), &cause);
+		free(cdata->cwd);
+		cdata->cwd = resolved;
+		if (cdata->cwd == NULL) {
+			cmdq_error(item, "%s", cause);
+			free(cause);
+			cmd_run_shell_free(cdata);
+			return (CMD_RETURN_ERROR);
+		}
+	}
+#endif
 
 	if (args_has(args, 'E'))
 		cdata->flags |= JOB_SHOWSTDERR;

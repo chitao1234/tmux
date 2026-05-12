@@ -101,6 +101,21 @@ cmd_attach_session(struct cmdq_item *item, const char *tflag, int dflag,
 
 	if (cflag != NULL) {
 		cwd = format_single(item, cflag, c, s, wl, wp);
+#ifdef TMUX_WIN32
+		{
+			char	*resolved;
+
+			resolved = win32_resolve_cwd(cwd,
+			    server_client_get_cwd(c, s), &cause);
+			free(cwd);
+			if (resolved == NULL) {
+				cmdq_error(item, "%s", cause);
+				free(cause);
+				return (CMD_RETURN_ERROR);
+			}
+			cwd = resolved;
+		}
+#endif
 		free((void *)s->cwd);
 		s->cwd = cwd;
 	}
