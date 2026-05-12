@@ -43,7 +43,6 @@ static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
 #ifdef TMUX_WIN32
 static void	job_complete(struct job *);
-static char	*job_win32_resolve_cwd(struct environ *, const char *);
 #endif
 
 /* A single job. */
@@ -77,28 +76,6 @@ struct job {
 
 /* All jobs list. */
 static LIST_HEAD(joblist, job) all_jobs = LIST_HEAD_INITIALIZER(all_jobs);
-
-#ifdef TMUX_WIN32
-static char *
-job_win32_resolve_cwd(struct environ *env, const char *cwd)
-{
-	const char	*actual_cwd = NULL;
-
-	if (cwd == NULL)
-		return (NULL);
-	if (cwd[0] == '/')
-		return (xstrdup(cwd));
-	if (win32_path_is_dir(cwd))
-		actual_cwd = cwd;
-	else
-		actual_cwd = win32_default_cwd();
-	if (actual_cwd != NULL) {
-		environ_set(env, "PWD", 0, "%s", actual_cwd);
-		return (xstrdup(actual_cwd));
-	}
-	return (xstrdup(cwd));
-}
-#endif
 
 /* Start a job running. */
 struct job *
@@ -148,7 +125,9 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	argv0 = shell_argv0(shell, 0);
 
 #ifdef TMUX_WIN32
-	cwd_target = job_win32_resolve_cwd(env, cwd);
+	cwd_target = win32_sanitize_cwd(cwd);
+	if (cwd_target != NULL)
+		environ_set(env, "PWD", 0, "%s", cwd_target);
 	if (cmd == NULL) {
 		cmd_log_argv(argc, argv, "%s:", __func__);
 		log_debug("%s: cwd=%s, shell=%s", __func__,

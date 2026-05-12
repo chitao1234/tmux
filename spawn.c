@@ -222,7 +222,6 @@ spawn_pane(struct spawn_context *sc, char **cause)
 #else
 	const char		 *cmd, *tmp;
 #endif
-	const char		 *actual_cwd = NULL;
 	char			 *cwd_target = NULL;
 	int			  argc;
 	u_int			  idx;
@@ -413,16 +412,9 @@ spawn_pane(struct spawn_context *sc, char **cause)
 
 	/* Fork the new process. */
 #ifdef TMUX_WIN32
-	if (new_wp->cwd != NULL && win32_path_is_dir(new_wp->cwd))
-		actual_cwd = new_wp->cwd;
-	else
-		actual_cwd = win32_default_cwd();
-	if (actual_cwd != NULL)
-		cwd_target = xstrdup(actual_cwd);
-	else if (new_wp->cwd != NULL)
-		cwd_target = xstrdup(new_wp->cwd);
-	if (actual_cwd != NULL)
-		environ_set(child, "PWD", 0, "%s", actual_cwd);
+	cwd_target = win32_sanitize_cwd(new_wp->cwd);
+	if (cwd_target != NULL)
+		environ_set(child, "PWD", 0, "%s", cwd_target);
 	if (win32_pane_spawn(sc, new_wp, child, cwd_target, cause) != 0) {
 		new_wp->fd = -1;
 		if (~sc->flags & SPAWN_RESPAWN) {

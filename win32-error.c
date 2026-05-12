@@ -249,6 +249,21 @@ fail:
 	return (NULL);
 }
 
+char *
+win32_sanitize_cwd(const char *cwd)
+{
+	const char	*actual_cwd;
+
+	if (cwd == NULL)
+		return (NULL);
+	if (cwd[0] != '/' && path_is_absolute(cwd) && win32_path_is_dir(cwd))
+		return (xstrdup(cwd));
+	actual_cwd = win32_default_cwd();
+	if (actual_cwd != NULL)
+		return (xstrdup(actual_cwd));
+	return (NULL);
+}
+
 const char *
 win32_default_cwd(void)
 {
