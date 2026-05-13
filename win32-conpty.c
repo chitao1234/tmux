@@ -961,14 +961,16 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
     int flags, int sx, int sy, char **cause)
 {
 	struct win32_job		*wj;
-	STARTUPINFOW		 si;
 	STARTUPINFOEXW		 six;
 	PROCESS_INFORMATION	 pi;
 	SIZE_T			 attr_size = 0;
 	COORD			 size;
 	wchar_t			*wcmd = NULL, *wcwd = NULL, *wenv = NULL;
+	HANDLE			 handles[3];
 	DWORD			 creation_flags;
+	DWORD			 handle_count;
 	HRESULT			 hr;
+	SECURITY_ATTRIBUTES	 sa;
 	BOOL			 ok;
 
 	wj = xcalloc(1, sizeof *wj);
@@ -982,7 +984,6 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		goto fail;
 	}
 
-	memset(&si, 0, sizeof si);
 	memset(&six, 0, sizeof six);
 	memset(&pi, 0, sizeof pi);
 	wcmd = win32_build_job_command(cmd, shell, argc, argv);
@@ -1035,16 +1036,19 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		    creation_flags|CREATE_SUSPENDED, wenv, wcwd,
 		    &six.StartupInfo, &pi);
 	} else {
-		si.cb = sizeof si;
-		si.dwFlags = STARTF_USESTDHANDLES;
-		si.hStdInput = wj->stdin_read;
-		si.hStdOutput = wj->stdout_write;
+		six.StartupInfo.cb = sizeof six;
+		six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+		six.StartupInfo.hStdInput = wj->stdin_read;
+		six.StartupInfo.hStdOutput = wj->stdout_write;
 		if (flags & JOB_SHOWSTDERR)
-			si.hStdError = wj->stdout_write;
+			six.StartupInfo.hStdError = wj->stdout_write;
 		else {
+			memset(&sa, 0, sizeof sa);
+			sa.nLength = sizeof sa;
+			sa.bInheritHandle = TRUE;
 			wj->stderr_write = CreateFileW(L"NUL",
 			    GENERIC_READ|GENERIC_WRITE,
-			    FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+			    FILE_SHARE_READ|FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
 			    FILE_ATTRIBUTE_NORMAL, NULL);
 			if (wj->stderr_write == INVALID_HANDLE_VALUE) {
 				wj->stderr_write = NULL;
@@ -1054,10 +1058,38 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 				}
 				goto fail;
 			}
-			si.hStdError = wj->stderr_write;
+			six.StartupInfo.hStdError = wj->stderr_write;
 		}
+		handle_count = 0;
+		handles[handle_count++] = wj->stdin_read;
+		handles[handle_count++] = wj->stdout_write;
+		if (six.StartupInfo.hStdError != wj->stdout_write)
+			handles[handle_count++] = six.StartupInfo.hStdError;
+		InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+		six.lpAttributeList = xcalloc(1, attr_size);
+		if (!InitializeProcThreadAttributeList(six.lpAttributeList, 1,
+		    0, &attr_size)) {
+			if (cause != NULL) {
+				xasprintf(cause, "InitializeProcThreadAttributeList "
+				    "job failed: %s",
+				    win32_strerror(GetLastError()));
+			}
+			goto fail;
+		}
+		if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
+		    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
+		    handle_count * sizeof handles[0], NULL, NULL)) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "UpdateProcThreadAttribute handles job failed: %s",
+				    win32_strerror(GetLastError()));
+			}
+			goto fail;
+		}
+		creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
 		ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-		    creation_flags|CREATE_SUSPENDED, wenv, wcwd, &si, &pi);
+		    creation_flags|CREATE_SUSPENDED, wenv, wcwd,
+		    &six.StartupInfo, &pi);
 	}
 	if (!ok) {
 		if (cause != NULL) {
