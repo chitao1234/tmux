@@ -242,14 +242,14 @@ win32_ipc_path_is_root(const char *path)
 static char *
 win32_ipc_sid_to_string(PSID sid)
 {
-	LPSTR	 string_sid = NULL;
+	LPWSTR	 string_sid = NULL;
 	char	*copy;
 
 	if (sid == NULL)
 		return (NULL);
-	if (!ConvertSidToStringSidA(sid, &string_sid))
+	if (!ConvertSidToStringSidW(sid, &string_sid))
 		return (NULL);
-	copy = xstrdup(string_sid);
+	copy = win32_wide_to_utf8(string_sid);
 	LocalFree(string_sid);
 	return (copy);
 }
@@ -372,15 +372,16 @@ win32_ipc_cache_current_identity(void)
 static int
 win32_ipc_make_managed_root(char **path, char **cause)
 {
-	const char	*localappdata;
+	char		*localappdata;
 	char		*base = NULL, *normalized;
 
 	*path = NULL;
-	localappdata = getenv("LOCALAPPDATA");
+	localappdata = win32_getenv_utf8("LOCALAPPDATA");
 	if (localappdata == NULL || *localappdata == '\0' ||
 	    !path_is_absolute(localappdata)) {
 		if (cause != NULL)
 			xasprintf(cause, "LOCALAPPDATA is unavailable");
+		free(localappdata);
 		errno = ENOENT;
 		return (-1);
 	}
@@ -388,12 +389,14 @@ win32_ipc_make_managed_root(char **path, char **cause)
 	    win32_ipc_current_integrity_value == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't determine current integrity");
+		free(localappdata);
 		errno = EACCES;
 		return (-1);
 	}
 
 	xasprintf(&base, "%s/tmux-%s", localappdata,
 	    win32_ipc_current_integrity_value);
+	free(localappdata);
 	normalized = win32_ipc_normalize_path(base);
 	free(base);
 	if (normalized == NULL) {
@@ -412,6 +415,7 @@ win32_ipc_set_path_security(const char *path, char **cause)
 	PSECURITY_DESCRIPTOR	 sd = NULL;
 	PACL			 dacl = NULL, sacl = NULL;
 	char			*sddl = NULL;
+	wchar_t			*wsddl = NULL, *wpath = NULL;
 	BOOL			 dacl_present, dacl_defaulted;
 	BOOL			 sacl_present, sacl_defaulted;
 	DWORD			 error;
@@ -424,6 +428,13 @@ win32_ipc_set_path_security(const char *path, char **cause)
 			xasprintf(cause, "couldn't determine current token");
 		errno = EACCES;
 		return (-1);
+	}
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert IPC path: %s", path);
+		errno = EINVAL;
+		goto out;
 	}
 
 	if (strcmp(win32_ipc_current_integrity_value, "l") == 0) {
@@ -443,7 +454,14 @@ win32_ipc_set_path_security(const char *path, char **cause)
 		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;ME)",
 		    win32_ipc_current_user_sid_value);
 	}
-	if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl,
+	wsddl = win32_utf8_to_wide(sddl);
+	if (wsddl == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert security descriptor");
+		errno = EACCES;
+		goto out;
+	}
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(wsddl,
 	    SDDL_REVISION_1, &sd, NULL)) {
 		error = GetLastError();
 		if (cause != NULL) {
@@ -465,7 +483,7 @@ win32_ipc_set_path_security(const char *path, char **cause)
 		errno = EACCES;
 		goto out;
 	}
-	error = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+	error = SetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
 	    DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION|
 	    PROTECTED_DACL_SECURITY_INFORMATION|
 	    PROTECTED_SACL_SECURITY_INFORMATION,
@@ -473,7 +491,7 @@ win32_ipc_set_path_security(const char *path, char **cause)
 	if (error == ERROR_PRIVILEGE_NOT_HELD) {
 		log_debug("%s: integrity label skipped for %s (%s)", __func__,
 		    path, win32_strerror(error));
-		error = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+		error = SetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
 		    DACL_SECURITY_INFORMATION|
 		    PROTECTED_DACL_SECURITY_INFORMATION,
 		    NULL, NULL, dacl, NULL);
@@ -490,6 +508,8 @@ win32_ipc_set_path_security(const char *path, char **cause)
 
 out:
 	free(sddl);
+	free(wsddl);
+	free(wpath);
 	if (sd != NULL)
 		LocalFree(sd);
 	return (retval);
@@ -499,6 +519,7 @@ static int
 win32_ipc_ensure_dir(const char *path, char **cause)
 {
 	char		*normalized, *copy, *slash;
+	wchar_t		*wnormalized;
 	DWORD		 attr;
 
 	normalized = win32_ipc_normalize_path(path);
@@ -521,8 +542,20 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 		return (-1);
 	}
 
-	attr = GetFileAttributesA(normalized);
+	wnormalized = win32_utf8_to_wide(normalized);
+	if (wnormalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert directory path: %s",
+			    normalized);
+		free(normalized);
+		free(copy);
+		errno = EINVAL;
+		return (-1);
+	}
+
+	attr = GetFileAttributesW(wnormalized);
 	if (attr != INVALID_FILE_ATTRIBUTES) {
+		free(wnormalized);
 		free(normalized);
 		free(copy);
 		if (attr & FILE_ATTRIBUTE_DIRECTORY)
@@ -534,7 +567,7 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 		return (-1);
 	}
 
-	if (!CreateDirectoryA(normalized, NULL)) {
+	if (!CreateDirectoryW(wnormalized, NULL)) {
 		DWORD error = GetLastError();
 
 		if (error != ERROR_ALREADY_EXISTS) {
@@ -542,12 +575,14 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 				xasprintf(cause, "couldn't create directory %s"
 				    " (%s)", normalized, win32_strerror(error));
 			}
+			free(wnormalized);
 			free(normalized);
 			free(copy);
 			errno = EACCES;
 			return (-1);
 		}
 	}
+	free(wnormalized);
 	free(normalized);
 	free(copy);
 	return (0);
