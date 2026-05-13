@@ -2606,7 +2606,6 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	char		*name;
 #ifdef TMUX_WIN32
 	struct msg_win32_terminal_size size;
-	struct msg_win32_handle handle;
 #endif
 
 	if (c->flags & CLIENT_IDENTIFIED)
@@ -2682,55 +2681,19 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		break;
 #ifdef TMUX_WIN32
 	case MSG_IDENTIFY_WIN32_STDIN:
-	{
-		HANDLE process;
-
-		if (datalen != sizeof handle)
+		if (datalen != sizeof(struct msg_win32_handle))
 			return (-1);
-		memcpy(&handle, data, sizeof handle);
-		log_debug("client %p IDENTIFY_WIN32_STDIN pid %lu handle %#llx",
-		    c, (unsigned long)handle.pid,
-		    (unsigned long long)handle.handle);
-		process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.pid);
-		if (process == NULL ||
-		    !DuplicateHandle(process, (HANDLE)(uintptr_t)handle.handle,
-		    GetCurrentProcess(), &c->win32_stdin, 0, FALSE,
-		    DUPLICATE_SAME_ACCESS)) {
-			log_debug("DuplicateHandle stdin failed: %s",
-			    win32_strerror(GetLastError()));
-		}
-		if (c->win32_stdin != NULL)
-			win32_log_handle("server duplicated stdin",
-			    c->win32_stdin);
-		if (process != NULL)
-			CloseHandle(process);
-		break;
-	}
+		/*
+		 * Disabled until handle transfer carries its own authenticated
+		 * duplication flow instead of relying on peer PID discovery.
+		 */
+		log_debug("client %p IDENTIFY_WIN32_STDIN rejected", c);
+		return (-1);
 	case MSG_IDENTIFY_WIN32_STDOUT:
-	{
-		HANDLE process;
-
-		if (datalen != sizeof handle)
+		if (datalen != sizeof(struct msg_win32_handle))
 			return (-1);
-		memcpy(&handle, data, sizeof handle);
-		log_debug("client %p IDENTIFY_WIN32_STDOUT pid %lu handle %#llx",
-		    c, (unsigned long)handle.pid,
-		    (unsigned long long)handle.handle);
-		process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, handle.pid);
-		if (process == NULL ||
-		    !DuplicateHandle(process, (HANDLE)(uintptr_t)handle.handle,
-		    GetCurrentProcess(), &c->win32_stdout, 0, FALSE,
-		    DUPLICATE_SAME_ACCESS)) {
-			log_debug("DuplicateHandle stdout failed: %s",
-			    win32_strerror(GetLastError()));
-		}
-		if (c->win32_stdout != NULL)
-			win32_log_handle("server duplicated stdout",
-			    c->win32_stdout);
-		if (process != NULL)
-			CloseHandle(process);
-		break;
-	}
+		log_debug("client %p IDENTIFY_WIN32_STDOUT rejected", c);
+		return (-1);
 	case MSG_IDENTIFY_WIN32_TERMINAL:
 		if (datalen != sizeof size)
 			return (-1);

@@ -58,10 +58,11 @@ int		 win32_handle_event_write(struct win32_handle_event *,
 int		 win32_handle_write(HANDLE, const void *, size_t);
 void		 win32_log_handle(const char *, HANDLE);
 
+const char	*win32_default_socket_dir(void);
+int		 win32_ipc_ensure_socket_dir(const char *, char **);
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);
-uint32_t	 win32_ipc_path_token(const char *);
 int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
 int		 win32_server_spawn(const char *, uint64_t, char **);

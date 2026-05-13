@@ -363,7 +363,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	if (c != NULL && c->session == NULL) { /* only unattached clients */
 		ee = environ_find(c->environ, "PATH");
 		if (ee != NULL)
-			environ_set(child, "PATH", 0, "%s", ee->value);
+			environ_set(child, ee->name, 0, "%s", ee->value);
 	}
 	if (environ_find(child, "PATH") == NULL)
 		environ_set(child, "PATH", 0, "%s", _PATH_DEFPATH);

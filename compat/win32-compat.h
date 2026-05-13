@@ -160,7 +160,7 @@ void win32_refresh_environ(void);
 #endif
 
 #ifndef _PATH_TMP
-#define _PATH_TMP "."
+#define _PATH_TMP "C:/Temp/"
 #endif
 
 #ifndef _PATH_DEFPATH

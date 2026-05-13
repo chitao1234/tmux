@@ -9,23 +9,20 @@
  */
 
 #include <sys/types.h>
+#include <sys/un.h>
 
 #include <ctype.h>
 #include <errno.h>
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "tmux.h"
 
-#ifdef TMUX_WIN32
+#include <aclapi.h>
+#include <sddl.h>
 
-struct win32_ipc_port {
-	uint32_t	magic;
-	uint16_t	port;
-	uint16_t	reserved;
-};
+#ifdef TMUX_WIN32
 
 struct win32_ipc_socket_entry {
 	int			 id;
@@ -34,11 +31,27 @@ struct win32_ipc_socket_entry {
 	TAILQ_ENTRY(win32_ipc_socket_entry) entry;
 };
 
-#define WIN32_IPC_MAGIC 0x31584d54U /* TMX1 */
-
 static TAILQ_HEAD(, win32_ipc_socket_entry) win32_ipc_sockets =
     TAILQ_HEAD_INITIALIZER(win32_ipc_sockets);
 static int win32_ipc_next_id = 3;
+static char *win32_ipc_socket_dir;
+static char *win32_ipc_current_user_sid_value;
+static char *win32_ipc_current_integrity_value;
+
+static int	win32_ipc_errno(int);
+static int	win32_ipc_set_blocking(SOCKET, int, char **);
+static int	win32_ipc_path_to_sockaddr(const char *, struct sockaddr_un *,
+		    char **);
+static char    *win32_ipc_sid_to_string(PSID);
+static int	win32_ipc_capture_token_identity(HANDLE, char **, char **);
+static char    *win32_ipc_integrity_level_to_name(DWORD);
+static int	win32_ipc_capture_token_integrity(HANDLE, char **, char **);
+static int	win32_ipc_cache_current_identity(void);
+static int	win32_ipc_make_managed_root(char **, char **);
+static int	win32_ipc_set_path_security(const char *, char **);
+static int	win32_ipc_ensure_dir(const char *, char **);
+static char    *win32_ipc_normalize_path(const char *);
+static int	win32_ipc_path_is_root(const char *);
 
 static int
 win32_ipc_save_socket(SOCKET socket)
@@ -52,20 +65,31 @@ win32_ipc_save_socket(SOCKET socket)
 	return (entry->id);
 }
 
+static struct win32_ipc_socket_entry *
+win32_ipc_find_socket(int fd)
+{
+	struct win32_ipc_socket_entry	*entry;
+
+	TAILQ_FOREACH(entry, &win32_ipc_sockets, entry) {
+		if (entry->id == fd)
+			return (entry);
+	}
+	return (NULL);
+}
+
 static int
 win32_ipc_set_cleanup_path(int fd, const char *path)
 {
 	struct win32_ipc_socket_entry	*entry;
 
-	TAILQ_FOREACH(entry, &win32_ipc_sockets, entry) {
-		if (entry->id != fd)
-			continue;
-		free(entry->cleanup_path);
-		entry->cleanup_path = xstrdup(path);
-		return (0);
+	entry = win32_ipc_find_socket(fd);
+	if (entry == NULL) {
+		errno = EBADF;
+		return (-1);
 	}
-	errno = EBADF;
-	return (-1);
+	free(entry->cleanup_path);
+	entry->cleanup_path = xstrdup(path);
+	return (0);
 }
 
 SOCKET
@@ -73,11 +97,10 @@ win32_ipc_socket(int fd)
 {
 	struct win32_ipc_socket_entry	*entry;
 
-	TAILQ_FOREACH(entry, &win32_ipc_sockets, entry) {
-		if (entry->id == fd)
-			return (entry->socket);
-	}
-	return (INVALID_SOCKET);
+	entry = win32_ipc_find_socket(fd);
+	if (entry == NULL)
+		return (INVALID_SOCKET);
+	return (entry->socket);
 }
 
 static int
@@ -99,6 +122,16 @@ win32_ipc_errno(int error)
 		return (ENOTCONN);
 	case WSAETIMEDOUT:
 		return (ETIMEDOUT);
+	case WSAEAFNOSUPPORT:
+		return (EAFNOSUPPORT);
+	case WSAEADDRINUSE:
+		return (EADDRINUSE);
+	case WSAEADDRNOTAVAIL:
+		return (EADDRNOTAVAIL);
+	case WSAEACCES:
+		return (EACCES);
+	case WSAEINVAL:
+		return (EINVAL);
 	case WSAEMFILE:
 		return (EMFILE);
 	default:
@@ -124,289 +157,448 @@ win32_ipc_set_blocking(SOCKET fd, int state, char **cause)
 	return (0);
 }
 
+const char *
+win32_default_socket_dir(void)
+{
+	if (win32_ipc_socket_dir != NULL)
+		return (win32_ipc_socket_dir);
+	if (win32_ipc_make_managed_root(&win32_ipc_socket_dir, NULL) != 0)
+		return ("C:/Temp");
+	return (win32_ipc_socket_dir);
+}
+
 static int
-win32_ipc_send_all(SOCKET fd, const void *buf, size_t len, const char *what,
+win32_ipc_path_to_sockaddr(const char *path, struct sockaddr_un *sun,
     char **cause)
 {
-	const char	*ptr = buf;
-	int		 n;
+	size_t	 i, size;
 
-	while (len != 0) {
-		n = send(fd, ptr, (int)(len > INT_MAX ? INT_MAX : len), 0);
-		if (n == SOCKET_ERROR) {
-			int error = WSAGetLastError();
-
-			if (cause != NULL) {
-				xasprintf(cause, "%s: %s", what,
-				    win32_strerror(error));
-			}
-			errno = win32_ipc_errno(error);
-			return (-1);
-		}
-		if (n == 0) {
-			if (cause != NULL)
-				xasprintf(cause, "%s: connection closed", what);
-			errno = EIO;
-			return (-1);
-		}
-		ptr += n;
-		len -= n;
-	}
-	return (0);
-}
-
-static int
-win32_ipc_recv_all(SOCKET fd, void *buf, size_t len, const char *what,
-    char **cause)
-{
-	char	*ptr = buf;
-	int	 n;
-
-	while (len != 0) {
-		n = recv(fd, ptr, (int)(len > INT_MAX ? INT_MAX : len), 0);
-		if (n == SOCKET_ERROR) {
-			int error = WSAGetLastError();
-
-			if (cause != NULL) {
-				xasprintf(cause, "%s: %s", what,
-				    win32_strerror(error));
-			}
-			errno = win32_ipc_errno(error);
-			return (-1);
-		}
-		if (n == 0) {
-			if (cause != NULL)
-				xasprintf(cause, "%s: connection closed", what);
-			errno = ECONNRESET;
-			return (-1);
-		}
-		ptr += n;
-		len -= n;
-	}
-	return (0);
-}
-
-static int
-win32_ipc_listen(uint16_t port, uint16_t *bound_port, char **cause)
-{
-	SOCKET			 fd;
-	struct sockaddr_in	 sin;
-	int			 len = sizeof sin;
-	int			 on = 1;
-
-	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (fd == INVALID_SOCKET) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "socket failed: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		return (-1);
-	}
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&on,
-	    sizeof on);
-
-	memset(&sin, 0, sizeof sin);
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	sin.sin_port = htons(port);
-	if (bind(fd, (struct sockaddr *)&sin, sizeof sin) != 0) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "error creating port %u (%s)",
-			    (u_int)port, win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		closesocket(fd);
-		return (-1);
-	}
-	if (getsockname(fd, (struct sockaddr *)&sin, &len) != 0) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't query IPC listener port: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		closesocket(fd);
-		return (-1);
-	}
-	if (sin.sin_family != AF_INET || ntohs(sin.sin_port) == 0) {
+	if (path == NULL || !path_is_absolute(path)) {
 		if (cause != NULL)
-			xasprintf(cause, "couldn't determine IPC listener port");
-		errno = EIO;
-		closesocket(fd);
-		return (-1);
-	}
-	if (listen(fd, 128) != 0) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "error listening on port %u (%s)",
-			    (u_int)ntohs(sin.sin_port), win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		closesocket(fd);
-		return (-1);
-	}
-	if (bound_port != NULL)
-		*bound_port = ntohs(sin.sin_port);
-	return (win32_ipc_save_socket(fd));
-}
-
-static uint32_t
-win32_ipc_hash(const char *path)
-{
-	uint32_t	hash = 2166136261U;
-	u_char		ch;
-
-	while ((ch = *path++) != '\0') {
-		if (ch == '\\')
-			ch = '/';
-		ch = (u_char)tolower(ch);
-		hash ^= ch;
-		hash *= 16777619U;
-	}
-	return (hash);
-}
-
-uint32_t
-win32_ipc_path_token(const char *path)
-{
-	return (htonl(win32_ipc_hash(path)));
-}
-
-static char *
-win32_ipc_port_path(const char *path)
-{
-	char	*out;
-
-	xasprintf(&out, "%s.port", path);
-	return (out);
-}
-
-static int
-win32_ipc_write_port_file(const char *path, uint16_t port, char **cause)
-{
-	struct win32_ipc_port	 info;
-	char			*portpath;
-	FILE			*f;
-
-	portpath = win32_ipc_port_path(path);
-	f = fopen(portpath, "wb");
-	if (f == NULL) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't create %s: %s", portpath,
-			    strerror(errno));
-		}
-		free(portpath);
-		return (-1);
-	}
-
-	info.magic = WIN32_IPC_MAGIC;
-	info.port = port;
-	info.reserved = 0;
-	if (fwrite(&info, sizeof info, 1, f) != 1) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't write %s: %s", portpath,
-			    strerror(errno));
-		}
-		fclose(f);
-		unlink(portpath);
-		free(portpath);
-		return (-1);
-	}
-	if (fclose(f) != 0) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't close %s: %s", portpath,
-			    strerror(errno));
-		}
-		unlink(portpath);
-		free(portpath);
-		return (-1);
-	}
-	free(portpath);
-	return (0);
-}
-
-static int
-win32_ipc_read_port_file(const char *path, uint16_t *port, char **cause)
-{
-	struct win32_ipc_port	 info;
-	char			*portpath;
-	FILE			*f;
-
-	portpath = win32_ipc_port_path(path);
-	f = fopen(portpath, "rb");
-	if (f == NULL) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't open %s: %s", portpath,
-			    strerror(errno));
-		}
-		free(portpath);
-		return (-1);
-	}
-	if (fread(&info, sizeof info, 1, f) != 1) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't read %s: %s", portpath,
-			    strerror(errno));
-		}
-		fclose(f);
-		free(portpath);
-		return (-1);
-	}
-	fclose(f);
-	free(portpath);
-
-	if (info.magic != WIN32_IPC_MAGIC || info.port == 0) {
-		if (cause != NULL)
-			xasprintf(cause, "invalid Win32 IPC port file");
+			xasprintf(cause, "socket path must be absolute");
 		errno = EINVAL;
 		return (-1);
 	}
-	*port = info.port;
+
+	memset(sun, 0, sizeof *sun);
+	sun->sun_family = AF_UNIX;
+	size = strlen(path);
+	if (size >= sizeof sun->sun_path) {
+		if (cause != NULL)
+			xasprintf(cause, "socket path too long: %s", path);
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+	strlcpy(sun->sun_path, path, sizeof sun->sun_path);
+	for (i = 0; sun->sun_path[i] != '\0'; i++) {
+		if (sun->sun_path[i] == '/')
+			sun->sun_path[i] = '\\';
+	}
+	return (0);
+}
+
+static char *
+win32_ipc_normalize_path(const char *path)
+{
+	char	*copy;
+	u_int	 i;
+
+	if (path == NULL)
+		return (NULL);
+	copy = xstrdup(path);
+	for (i = 0; copy[i] != '\0'; i++) {
+		if (copy[i] == '\\')
+			copy[i] = '/';
+	}
+	while (strlen(copy) > 3 && copy[strlen(copy) - 1] == '/')
+		copy[strlen(copy) - 1] = '\0';
+	return (copy);
+}
+
+static int
+win32_ipc_path_is_root(const char *path)
+{
+	const char	*p;
+
+	if (path == NULL || *path == '\0')
+		return (0);
+
+	if (isalpha((u_char)path[0]) && path[1] == ':' &&
+	    (path[2] == '\0' || (path[2] == '/' && path[3] == '\0')))
+		return (1);
+
+	if (path[0] != '/' || path[1] != '/')
+		return (0);
+
+	p = strchr(path + 2, '/');
+	if (p == NULL)
+		return (1);
+	p = strchr(p + 1, '/');
+	if (p == NULL || p[1] == '\0')
+		return (1);
+	return (0);
+}
+
+static char *
+win32_ipc_sid_to_string(PSID sid)
+{
+	LPSTR	 string_sid = NULL;
+	char	*copy;
+
+	if (sid == NULL)
+		return (NULL);
+	if (!ConvertSidToStringSidA(sid, &string_sid))
+		return (NULL);
+	copy = xstrdup(string_sid);
+	LocalFree(string_sid);
+	return (copy);
+}
+
+static int
+win32_ipc_capture_token_identity(HANDLE token, char **user_sid, char **cause)
+{
+	DWORD		 size;
+	TOKEN_USER	*user = NULL;
+
+	*user_sid = NULL;
+
+	if (!GetTokenInformation(token, TokenUser, NULL, 0, &size) &&
+	    GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+		if (cause != NULL) {
+			xasprintf(cause, "GetTokenInformation(TokenUser) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		return (-1);
+	}
+	user = xmalloc(size);
+	if (!GetTokenInformation(token, TokenUser, user, size, &size)) {
+		if (cause != NULL) {
+			xasprintf(cause, "GetTokenInformation(TokenUser) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		free(user);
+		return (-1);
+	}
+	*user_sid = win32_ipc_sid_to_string(user->User.Sid);
+	free(user);
+	if (*user_sid == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert token user SID");
+		return (-1);
+	}
+	return (0);
+}
+
+static char *
+win32_ipc_integrity_level_to_name(DWORD rid)
+{
+	if (rid < SECURITY_MANDATORY_MEDIUM_RID)
+		return (xstrdup("l"));
+	if (rid < SECURITY_MANDATORY_HIGH_RID)
+		return (xstrdup("m"));
+	if (rid < SECURITY_MANDATORY_SYSTEM_RID)
+		return (xstrdup("h"));
+	return (xstrdup("s"));
+}
+
+static int
+win32_ipc_capture_token_integrity(HANDLE token, char **integrity,
+    char **cause)
+{
+	DWORD			 size;
+	TOKEN_MANDATORY_LABEL	*label = NULL;
+	DWORD			 count;
+	DWORD			*subauth;
+
+	*integrity = NULL;
+
+	if (!GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &size) &&
+	    GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "GetTokenInformation(TokenIntegrityLevel) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		return (-1);
+	}
+	label = xmalloc(size);
+	if (!GetTokenInformation(token, TokenIntegrityLevel, label, size,
+	    &size)) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "GetTokenInformation(TokenIntegrityLevel) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		free(label);
+		return (-1);
+	}
+	count = *GetSidSubAuthorityCount(label->Label.Sid);
+	subauth = GetSidSubAuthority(label->Label.Sid, count - 1);
+	*integrity = win32_ipc_integrity_level_to_name(*subauth);
+	free(label);
+	return (*integrity == NULL ? -1 : 0);
+}
+
+static int
+win32_ipc_cache_current_identity(void)
+{
+	HANDLE	token = NULL;
+	char	*user_sid = NULL;
+	char	*cause = NULL;
+	int	 retval;
+
+	if (win32_ipc_current_user_sid_value != NULL)
+		return (0);
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+		return (-1);
+	retval = win32_ipc_capture_token_identity(token, &user_sid, &cause);
+	if (retval == 0) {
+		retval = win32_ipc_capture_token_integrity(token,
+		    &win32_ipc_current_integrity_value, &cause);
+	}
+	CloseHandle(token);
+	free(cause);
+	if (retval != 0) {
+		free(user_sid);
+		free(win32_ipc_current_integrity_value);
+		win32_ipc_current_integrity_value = NULL;
+		return (-1);
+	}
+	win32_ipc_current_user_sid_value = user_sid;
+	return (0);
+}
+
+static int
+win32_ipc_make_managed_root(char **path, char **cause)
+{
+	const char	*localappdata;
+	char		*base = NULL, *normalized;
+
+	*path = NULL;
+	localappdata = getenv("LOCALAPPDATA");
+	if (localappdata == NULL || *localappdata == '\0' ||
+	    !path_is_absolute(localappdata)) {
+		if (cause != NULL)
+			xasprintf(cause, "LOCALAPPDATA is unavailable");
+		errno = ENOENT;
+		return (-1);
+	}
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_integrity_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine current integrity");
+		errno = EACCES;
+		return (-1);
+	}
+
+	xasprintf(&base, "%s/tmux-%s", localappdata,
+	    win32_ipc_current_integrity_value);
+	normalized = win32_ipc_normalize_path(base);
+	free(base);
+	if (normalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't normalize managed socket path");
+		errno = EINVAL;
+		return (-1);
+	}
+	*path = normalized;
+	return (0);
+}
+
+static int
+win32_ipc_set_path_security(const char *path, char **cause)
+{
+	PSECURITY_DESCRIPTOR	 sd = NULL;
+	PACL			 dacl = NULL, sacl = NULL;
+	char			*sddl = NULL;
+	BOOL			 dacl_present, dacl_defaulted;
+	BOOL			 sacl_present, sacl_defaulted;
+	DWORD			 error;
+	int			 retval = -1;
+
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_user_sid_value == NULL ||
+	    win32_ipc_current_integrity_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine current token");
+		errno = EACCES;
+		return (-1);
+	}
+
+	if (strcmp(win32_ipc_current_integrity_value, "l") == 0) {
+		xasprintf(&sddl,
+		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;LW)",
+		    win32_ipc_current_user_sid_value);
+	} else if (strcmp(win32_ipc_current_integrity_value, "h") == 0) {
+		xasprintf(&sddl,
+		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;HI)",
+		    win32_ipc_current_user_sid_value);
+	} else if (strcmp(win32_ipc_current_integrity_value, "s") == 0) {
+		xasprintf(&sddl,
+		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;SI)",
+		    win32_ipc_current_user_sid_value);
+	} else {
+		xasprintf(&sddl,
+		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;ME)",
+		    win32_ipc_current_user_sid_value);
+	}
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl,
+	    SDDL_REVISION_1, &sd, NULL)) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't build security descriptor:"
+			    " %s", win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (!GetSecurityDescriptorDacl(sd, &dacl_present, &dacl,
+	    &dacl_defaulted) ||
+	    !GetSecurityDescriptorSacl(sd, &sacl_present, &sacl,
+	    &sacl_defaulted)) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't read security descriptor:"
+			    " %s", win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	error = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+	    DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION|
+	    PROTECTED_DACL_SECURITY_INFORMATION|
+	    PROTECTED_SACL_SECURITY_INFORMATION,
+	    NULL, NULL, dacl, sacl);
+	if (error == ERROR_PRIVILEGE_NOT_HELD) {
+		log_debug("%s: integrity label skipped for %s (%s)", __func__,
+		    path, win32_strerror(error));
+		error = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
+		    DACL_SECURITY_INFORMATION|
+		    PROTECTED_DACL_SECURITY_INFORMATION,
+		    NULL, NULL, dacl, NULL);
+	}
+	if (error != ERROR_SUCCESS) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't secure %s: %s", path,
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	retval = 0;
+
+out:
+	free(sddl);
+	if (sd != NULL)
+		LocalFree(sd);
+	return (retval);
+}
+
+static int
+win32_ipc_ensure_dir(const char *path, char **cause)
+{
+	char		*normalized, *copy, *slash;
+	DWORD		 attr;
+
+	normalized = win32_ipc_normalize_path(path);
+	if (normalized == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	if (win32_ipc_path_is_root(normalized)) {
+		free(normalized);
+		return (0);
+	}
+
+	copy = xstrdup(normalized);
+	slash = strrchr(copy, '/');
+	if (slash != NULL)
+		*slash = '\0';
+	if (*copy != '\0' && win32_ipc_ensure_dir(copy, cause) != 0) {
+		free(normalized);
+		free(copy);
+		return (-1);
+	}
+
+	attr = GetFileAttributesA(normalized);
+	if (attr != INVALID_FILE_ATTRIBUTES) {
+		free(normalized);
+		free(copy);
+		if (attr & FILE_ATTRIBUTE_DIRECTORY)
+			return (0);
+		if (cause != NULL)
+			xasprintf(cause, "%s exists and is not a directory",
+			    normalized);
+		errno = ENOTDIR;
+		return (-1);
+	}
+
+	if (!CreateDirectoryA(normalized, NULL)) {
+		DWORD error = GetLastError();
+
+		if (error != ERROR_ALREADY_EXISTS) {
+			if (cause != NULL) {
+				xasprintf(cause, "couldn't create directory %s"
+				    " (%s)", normalized, win32_strerror(error));
+			}
+			free(normalized);
+			free(copy);
+			errno = EACCES;
+			return (-1);
+		}
+	}
+	free(normalized);
+	free(copy);
+	return (0);
+}
+
+int
+win32_ipc_ensure_socket_dir(const char *path, char **cause)
+{
+	if (win32_ipc_ensure_dir(path, cause) != 0)
+		return (-1);
+	if (win32_ipc_set_path_security(path, cause) != 0)
+		return (-1);
 	return (0);
 }
 
 int
 win32_ipc_server_create(const char *path, char **cause)
 {
-	uint16_t		 port;
-	int			 fd;
-
-	fd = win32_ipc_listen(0, &port, cause);
-	if (fd == -1)
-		return (-1);
-	if (win32_ipc_set_cleanup_path(fd, path) != 0) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't track Win32 IPC port file");
-		win32_ipc_close(fd);
-		return (-1);
-	}
-
-	if (win32_ipc_write_port_file(path, port, cause) != 0) {
-		win32_ipc_close(fd);
-		return (-1);
-	}
-	return (fd);
-}
-
-int
-win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause)
-{
+	struct sockaddr_un	 sun;
+	char			*normalized, *parent;
+	char			*slash;
 	SOCKET			 fd;
-	struct sockaddr_in	 sin;
-	uint16_t		 port;
-	uint32_t		 token, reply;
-	int			 saved_errno;
+	int			 saved_errno, wrapped_fd;
 
-	if (win32_ipc_read_port_file(path, &port, cause) != 0)
+	normalized = win32_ipc_normalize_path(path);
+	if (normalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid socket path");
+		errno = EINVAL;
 		return (-1);
+	}
+	if (win32_ipc_path_to_sockaddr(normalized, &sun, cause) != 0) {
+		free(normalized);
+		return (-1);
+	}
 
-	fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	parent = xstrdup(normalized);
+	slash = strrchr(parent, '/');
+	if (slash != NULL) {
+		*slash = '\0';
+		if (win32_ipc_ensure_dir(parent, cause) != 0) {
+			free(parent);
+			free(normalized);
+			return (-1);
+		}
+	}
+	free(parent);
+
+	(void)unlink(normalized);
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd == INVALID_SOCKET) {
 		int error = WSAGetLastError();
 
@@ -417,54 +609,107 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 		errno = win32_ipc_errno(error);
 		return (-1);
 	}
-
-	memset(&sin, 0, sizeof sin);
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	sin.sin_port = htons(port);
-	if (connect(fd, (struct sockaddr *)&sin, sizeof sin) != 0) {
+	if (bind(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
 		int error = WSAGetLastError();
 
 		if (cause != NULL) {
-			xasprintf(cause, "couldn't connect to %s port %u: %s",
-			    path, (u_int)port, win32_strerror(error));
+			xasprintf(cause, "error creating %s (%s)", normalized,
+			    win32_strerror(error));
 		}
 		errno = win32_ipc_errno(error);
 		closesocket(fd);
+		free(normalized);
+		return (-1);
+	}
+	if (listen(fd, 128) != 0) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "error listening on %s (%s)", normalized,
+			    win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		closesocket(fd);
+		free(normalized);
+		return (-1);
+	}
+	if (win32_ipc_set_blocking(fd, 0, cause) != 0) {
+		saved_errno = errno;
+		closesocket(fd);
+		free(normalized);
+		errno = saved_errno;
 		return (-1);
 	}
 
-	token = win32_ipc_path_token(path);
-	if (win32_ipc_send_all(fd, &token, sizeof token,
-	    "couldn't verify Win32 IPC token", cause) != 0) {
-		saved_errno = errno;
-		closesocket(fd);
-		errno = saved_errno;
-		return (-1);
-	}
-	if (win32_ipc_recv_all(fd, &reply, sizeof reply,
-	    "couldn't read Win32 IPC token reply", cause) != 0) {
-		saved_errno = errno;
-		closesocket(fd);
-		errno = saved_errno;
-		return (-1);
-	}
-	if (reply != token) {
+	wrapped_fd = win32_ipc_save_socket(fd);
+	if (win32_ipc_set_cleanup_path(wrapped_fd, normalized) != 0) {
 		if (cause != NULL)
-			xasprintf(cause, "Win32 IPC token mismatch");
-		closesocket(fd);
-		errno = EACCES;
+			xasprintf(cause, "couldn't track Win32 IPC socket path");
+		free(normalized);
+		win32_ipc_close(wrapped_fd);
 		return (-1);
 	}
-	return (win32_ipc_save_socket(fd));
+	free(normalized);
+	return (wrapped_fd);
+}
+
+int
+win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause)
+{
+	struct sockaddr_un	 sun;
+	char			*normalized;
+	SOCKET			 fd;
+	int			 wrapped_fd;
+
+	normalized = win32_ipc_normalize_path(path);
+	if (normalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid socket path");
+		errno = EINVAL;
+		return (-1);
+	}
+	if (win32_ipc_path_to_sockaddr(normalized, &sun, cause) != 0) {
+		free(normalized);
+		return (-1);
+	}
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd == INVALID_SOCKET) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "socket failed: %s",
+			    win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		free(normalized);
+		return (-1);
+	}
+	if (connect(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
+		int error = WSAGetLastError();
+
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't connect to %s: %s", normalized,
+			    win32_strerror(error));
+		}
+		errno = win32_ipc_errno(error);
+		closesocket(fd);
+		free(normalized);
+		return (-1);
+	}
+
+	wrapped_fd = win32_ipc_save_socket(fd);
+	free(normalized);
+	return (wrapped_fd);
 }
 
 int
 win32_ipc_socket_accept(int fd, char **cause)
 {
-	SOCKET			 newfd;
-	struct sockaddr_storage	 ss;
-	int			 len = sizeof ss, saved_errno;
+	SOCKET				 newfd;
+	struct sockaddr_storage		 ss;
+	int				 len = sizeof ss;
+	int				 saved_errno;
 
 	newfd = accept(win32_ipc_socket(fd), (struct sockaddr *)&ss, &len);
 	if (newfd == INVALID_SOCKET) {
@@ -489,28 +734,23 @@ win32_ipc_socket_accept(int fd, char **cause)
 int
 win32_ipc_close(int fd)
 {
-	struct win32_ipc_socket_entry	*entry, *entry1;
-	char				*portpath;
+	struct win32_ipc_socket_entry	*entry;
 	int				 retval;
 
-	TAILQ_FOREACH_SAFE(entry, &win32_ipc_sockets, entry, entry1) {
-		if (entry->id != fd)
-			continue;
-		retval = closesocket(entry->socket);
-		if (entry->cleanup_path != NULL) {
-			portpath = win32_ipc_port_path(entry->cleanup_path);
-			if (portpath != NULL) {
-				(void)unlink(portpath);
-				free(portpath);
-			}
-			free(entry->cleanup_path);
-		}
-		TAILQ_REMOVE(&win32_ipc_sockets, entry, entry);
-		free(entry);
-		return (retval);
+	entry = win32_ipc_find_socket(fd);
+	if (entry == NULL) {
+		errno = EBADF;
+		return (-1);
 	}
-	errno = EBADF;
-	return (-1);
+
+	retval = closesocket(entry->socket);
+	if (entry->cleanup_path != NULL) {
+		(void)unlink(entry->cleanup_path);
+		free(entry->cleanup_path);
+	}
+	TAILQ_REMOVE(&win32_ipc_sockets, entry, entry);
+	free(entry);
+	return (retval);
 }
 
 #endif /* TMUX_WIN32 */

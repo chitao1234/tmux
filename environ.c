@@ -36,7 +36,21 @@ RB_GENERATE_STATIC(environ, environ_entry, entry, environ_cmp);
 static int
 environ_cmp(struct environ_entry *envent1, struct environ_entry *envent2)
 {
+#ifdef TMUX_WIN32
+	return (strcasecmp(envent1->name, envent2->name));
+#else
 	return (strcmp(envent1->name, envent2->name));
+#endif
+}
+
+static int
+environ_match(const char *pattern, const char *name)
+{
+#ifdef TMUX_WIN32
+	return (fnmatch(pattern, name, FNM_CASEFOLD) == 0);
+#else
+	return (fnmatch(pattern, name, 0) == 0);
+#endif
 }
 
 /* Initialise the environment. */
@@ -199,7 +213,7 @@ environ_update(struct options *oo, struct environ *src, struct environ *dst)
 		ov = options_array_item_value(a);
 		found = 0;
 		RB_FOREACH_SAFE(envent, environ, src, envent1) {
-			if (fnmatch(ov->string, envent->name, 0) == 0) {
+			if (environ_match(ov->string, envent->name)) {
 				environ_set(dst, envent->name, 0, "%s", envent->value);
 				found = 1;
 			}

@@ -315,7 +315,9 @@ proc_add_peer(struct tmuxproc *tp, int fd,
     void (*dispatchcb)(struct imsg *, void *), void *arg)
 {
 	struct tmuxpeer	*peer;
+#ifndef TMUX_WIN32
 	gid_t		 gid;
+#endif
 
 	peer = xcalloc(1, sizeof *peer);
 	peer->parent = tp;
@@ -334,8 +336,12 @@ proc_add_peer(struct tmuxproc *tp, int fd,
 #endif
 	    EV_READ, proc_event_cb, peer);
 
+#ifdef TMUX_WIN32
+	peer->uid = (uid_t)-1;
+#else
 	if (getpeereid(fd, &peer->uid, &gid) != 0)
 		peer->uid = (uid_t)-1;
+#endif
 
 	log_debug("add peer %p: %d (%p)", peer, fd, arg);
 	TAILQ_INSERT_TAIL(&tp->peers, peer, entry);

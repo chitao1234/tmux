@@ -230,6 +230,16 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 	*paths = NULL;
 	*n = 0;
 
+#ifdef TMUX_WIN32
+	if (strcmp(s, TMUX_SOCK) == 0) {
+		path = xstrdup(win32_default_socket_dir());
+		*paths = xcalloc(1, sizeof **paths);
+		(*paths)[0] = path;
+		*n = 1;
+		return;
+	}
+#endif
+
 	copy = tmp = xstrdup(s);
 	while ((next = strsep(&tmp, ":")) != NULL) {
 		expanded = expand_path(next, home);
@@ -277,12 +287,16 @@ make_label(const char *label, char **cause)
 #ifndef TMUX_WIN32
 	struct stat	  sb;
 #endif
+#ifndef TMUX_WIN32
 	uid_t		  uid;
+#endif
 
 	*cause = NULL;
 	if (label == NULL)
 		label = "default";
+#ifndef TMUX_WIN32
 	uid = getuid();
+#endif
 
 	expand_paths(TMUX_SOCK, &paths, &n, 0);
 	if (n == 0) {
@@ -294,22 +308,28 @@ make_label(const char *label, char **cause)
 		free(paths[i]);
 	free(paths);
 
+#ifdef TMUX_WIN32
+	base = path;
+	path = NULL;
+	if (win32_ipc_ensure_socket_dir(base, cause) != 0)
+		goto fail;
+	xasprintf(&path, "%s/%s", base, label);
+	if (strlen(path) >= 100) {
+		xasprintf(cause, "socket path too long: %s", path);
+		free(path);
+		path = NULL;
+		goto fail;
+	}
+	free(base);
+	return (path);
+#else
 	xasprintf(&base, "%s/tmux-%ld", path, (long)uid);
 	free(path);
-	if (mkdir(base
-#ifndef TMUX_WIN32
-	    , S_IRWXU
-#endif
-	    ) != 0 && errno != EEXIST) {
+	if (mkdir(base, S_IRWXU) != 0 && errno != EEXIST) {
 		xasprintf(cause, "couldn't create directory %s (%s)", base,
 		    strerror(errno));
 		goto fail;
 	}
-#ifdef TMUX_WIN32
-	xasprintf(&path, "%s/%s", base, label);
-	free(base);
-	return (path);
-#else
 	if (lstat(base, &sb) != 0) {
 		xasprintf(cause, "couldn't read directory %s (%s)", base,
 		    strerror(errno));
@@ -330,6 +350,7 @@ make_label(const char *label, char **cause)
 
 fail:
 	free(base);
+	free(path);
 	return (NULL);
 }
 
