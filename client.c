@@ -133,6 +133,7 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 #ifdef TMUX_WIN32
 	char	*cause = NULL;
 	int	 fd, i, saved_errno;
+	HANDLE	 startup_lock;
 
 	fd = win32_ipc_client_connect(path, flags, &cause);
 	if (fd != -1) {
@@ -150,16 +151,49 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 		return (-1);
 	if (flags & CLIENT_NOFORK)
 		return (server_start(client_proc, flags, base, -1, NULL));
-	if (win32_server_spawn(path, flags, &cause) != 0) {
+	startup_lock = win32_ipc_startup_lock(path, &cause);
+	if (startup_lock == NULL) {
 		if (cause != NULL) {
 			log_debug("%s", cause);
 			free(cause);
 		}
 		return (-1);
 	}
+
+	/*
+	 * Another client may have started the server while this client was
+	 * waiting for the startup lock.
+	 */
+	fd = win32_ipc_client_connect(path, flags, &cause);
+	if (fd != -1) {
+		win32_ipc_startup_unlock(startup_lock);
+		setblocking(fd, 0);
+		return (fd);
+	}
+	if (cause != NULL) {
+		log_debug("%s", cause);
+		free(cause);
+		cause = NULL;
+	}
+	saved_errno = errno;
+	if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
+		win32_ipc_startup_unlock(startup_lock);
+		errno = saved_errno;
+		return (-1);
+	}
+
+	if (win32_server_spawn(path, flags, &cause) != 0) {
+		if (cause != NULL) {
+			log_debug("%s", cause);
+			free(cause);
+		}
+		win32_ipc_startup_unlock(startup_lock);
+		return (-1);
+	}
 	for (i = 0; i < 100; i++) {
 		fd = win32_ipc_client_connect(path, flags, &cause);
 		if (fd != -1) {
+			win32_ipc_startup_unlock(startup_lock);
 			setblocking(fd, 0);
 			return (fd);
 		}
@@ -169,10 +203,14 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 			cause = NULL;
 		}
 		saved_errno = errno;
-		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED)
+		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
+			win32_ipc_startup_unlock(startup_lock);
+			errno = saved_errno;
 			return (-1);
+		}
 		Sleep(50);
 	}
+	win32_ipc_startup_unlock(startup_lock);
 	errno = ETIMEDOUT;
 	return (-1);
 #else

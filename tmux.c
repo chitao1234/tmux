@@ -232,7 +232,11 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 
 #ifdef TMUX_WIN32
 	if (strcmp(s, TMUX_SOCK) == 0) {
-		path = xstrdup(win32_default_socket_dir());
+		const char	*socket_dir = win32_default_socket_dir();
+
+		if (socket_dir == NULL)
+			return;
+		path = xstrdup(socket_dir);
 		*paths = xcalloc(1, sizeof **paths);
 		(*paths)[0] = path;
 		*n = 1;
