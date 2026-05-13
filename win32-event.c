@@ -152,6 +152,8 @@ struct win32_io_service {
 
 static struct win32_io_service win32_io;
 
+#define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
+
 static int	win32_io_service_init(void);
 static void	win32_io_service_enqueue_reader(struct win32_handle_event *);
 static void	win32_io_service_enqueue_writer(struct win32_handle_writer *);
@@ -326,6 +328,7 @@ win32_io_service_dispatch_writers(void)
 {
 	struct win32_handle_writer	*whw;
 	int				 error;
+	size_t				 buffered;
 
 	for (;;) {
 		EnterCriticalSection(&win32_io.lock);
@@ -340,12 +343,13 @@ win32_io_service_dispatch_writers(void)
 
 		EnterCriticalSection(&whw->lock);
 		error = whw->error;
+		buffered = EVBUFFER_LENGTH(whw->output);
 		LeaveCriticalSection(&whw->lock);
 
 		if (error) {
 			if (whw->errorcb != NULL)
 				whw->errorcb(whw->arg);
-		} else if (whw->writecb != NULL)
+		} else if (buffered == 0 && whw->writecb != NULL)
 			whw->writecb(whw->arg);
 	}
 }
@@ -600,12 +604,13 @@ static DWORD WINAPI
 win32_handle_writer_thread(void *arg)
 {
 	struct win32_handle_writer	*whw = arg;
-	char				 buf[8192];
+	char				*buf;
 	HANDLE				 handle;
 	size_t				 size;
 	int				 written;
 	int				 notify;
 
+	buf = xmalloc(WIN32_HANDLE_WRITER_CHUNK);
 	for (;;) {
 		WaitForSingleObject(whw->ready, INFINITE);
 
@@ -623,8 +628,8 @@ win32_handle_writer_thread(void *arg)
 				LeaveCriticalSection(&whw->lock);
 				break;
 			}
-			if (size > sizeof buf)
-				size = sizeof buf;
+			if (size > WIN32_HANDLE_WRITER_CHUNK)
+				size = WIN32_HANDLE_WRITER_CHUNK;
 			memcpy(buf, EVBUFFER_DATA(whw->output), size);
 			handle = whw->handle;
 			LeaveCriticalSection(&whw->lock);
@@ -642,6 +647,7 @@ win32_handle_writer_thread(void *arg)
 				if (handle != NULL && !whw->borrowed)
 					CloseHandle(handle);
 				win32_io_service_enqueue_writer(whw);
+				free(buf);
 				return (0);
 			}
 
@@ -663,6 +669,7 @@ stop:
 	if (handle != NULL && !whw->borrowed)
 		CloseHandle(handle);
 	win32_io_service_enqueue_writer(whw);
+	free(buf);
 	return (0);
 }
 

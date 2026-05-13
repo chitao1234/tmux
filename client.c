@@ -41,6 +41,8 @@ static uint64_t		 client_flags;
 static int		 client_is_console;
 static int		 client_console_ready;
 static struct win32_handle_event *client_win32_input;
+static struct win32_handle_writer *client_win32_output;
+static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
 static u_int		 client_win32_resize_sy;
@@ -82,6 +84,10 @@ static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
 static void		 client_win32_input_start(void);
 static void		 client_win32_input_stop(void);
+static void		 client_win32_output_callback(void *);
+static void		 client_win32_output_error_callback(void *);
+static int		 client_win32_output_start(void);
+static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static void		 client_restore_terminal(void);
 #endif
@@ -334,6 +340,10 @@ client_exit_message(void)
 static void
 client_exit(void)
 {
+#ifdef TMUX_WIN32
+	if (client_win32_output_pending != 0)
+		return;
+#endif
 	if (!file_write_left(&client_files))
 		proc_exit(client_proc);
 }
@@ -474,6 +484,68 @@ client_win32_input_stop(void)
 }
 
 static void
+client_win32_output_callback(__unused void *arg)
+{
+	struct msg_win32_tty_output_ack	ack;
+
+	if (client_win32_output_pending == 0)
+		return;
+	ack.size = client_win32_output_pending;
+	client_win32_output_pending = 0;
+	if (client_peer != NULL) {
+		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
+		    sizeof ack);
+	}
+	if (client_exitflag)
+		client_exit();
+}
+
+static void
+client_win32_output_error_callback(__unused void *arg)
+{
+	log_debug("%s: console output failed", __func__);
+	client_win32_output_pending = 0;
+	client_exitreason = CLIENT_EXIT_LOST_TTY;
+	client_exitval = 1;
+	if (client_peer != NULL)
+		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+	if (client_exitflag)
+		client_exit();
+}
+
+static int
+client_win32_output_start(void)
+{
+	HANDLE	hout;
+
+	if (client_win32_output != NULL)
+		return (0);
+	if (!client_console_ready)
+		return (-1);
+
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	client_win32_output = win32_handle_writer_new_borrowed(&hout,
+	    client_win32_output_callback, client_win32_output_error_callback,
+	    NULL);
+	if (client_win32_output == NULL) {
+		log_debug("%s: couldn't create console output writer",
+		    __func__);
+		return (-1);
+	}
+	return (0);
+}
+
+static void
+client_win32_output_stop(void)
+{
+	if (client_win32_output == NULL)
+		return;
+	win32_handle_writer_free(client_win32_output);
+	client_win32_output = NULL;
+	client_win32_output_pending = 0;
+}
+
+static void
 client_win32_tty_output(char *data, ssize_t datalen)
 {
 	struct msg_win32_tty_output_ack ack;
@@ -491,23 +563,27 @@ client_win32_tty_output(char *data, ssize_t datalen)
 		    sizeof ack);
 		return;
 	}
-	if (datalen != 0 &&
-	    win32_handle_write(GetStdHandle(STD_OUTPUT_HANDLE), data,
+	if (datalen == 0) {
+		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
+		    sizeof ack);
+		return;
+	}
+	if (client_win32_output_start() != 0 ||
+	    win32_handle_writer_write(client_win32_output, data,
 	    datalen) == -1) {
-		log_debug("%s: console output failed", __func__);
 		client_exitreason = CLIENT_EXIT_LOST_TTY;
 		client_exitval = 1;
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 		return;
 	}
-	proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
-	    sizeof ack);
+	client_win32_output_pending += datalen;
 }
 
 static void
 client_restore_terminal(void)
 {
 	client_win32_input_stop();
+	client_win32_output_stop();
 	client_win32_resize_timer_stop();
 	if (client_console_ready) {
 		win32_terminal_restore_client();
@@ -959,7 +1035,12 @@ client_dispatch(struct imsg *imsg, __unused void *arg)
 			client_exitreason = CLIENT_EXIT_LOST_SERVER;
 			client_exitval = 1;
 		}
+#ifdef TMUX_WIN32
+		client_exitflag = 1;
+		client_exit();
+#else
 		proc_exit(client_proc);
+#endif
 		return;
 	}
 
@@ -1067,7 +1148,12 @@ client_dispatch_wait(struct imsg *imsg)
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 		break;
 	case MSG_EXITED:
+#ifdef TMUX_WIN32
+		client_exitflag = 1;
+		client_exit();
+#else
 		proc_exit(client_proc);
+#endif
 		break;
 	case MSG_READ_OPEN:
 		file_read_open(&client_files, client_peer, imsg, 1,
@@ -1157,7 +1243,12 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen != 0)
 			fatalx("bad MSG_EXITED size");
 
+#ifdef TMUX_WIN32
+		client_exitflag = 1;
+		client_exit();
+#else
 		proc_exit(client_proc);
+#endif
 		break;
 	case MSG_SHUTDOWN:
 		if (datalen != 0)

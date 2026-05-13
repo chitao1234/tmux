@@ -173,3 +173,19 @@ The active console relay path is intentionally not migrated in this slice. Its
 ACK is server backpressure and redraw accounting, so an asynchronous
 client-side writer must ACK only after bytes are actually drained to the
 console and must preserve the current UTF-8-to-`WriteConsoleW` behavior.
+
+## Console Relay Output Slice
+
+The active Win32 console relay output path now uses the shared service writer
+inside the client process:
+
+- `MSG_WIN32_TTY_OUTPUT` queues bytes to a borrowed stdout writer instead of
+  calling `win32_handle_write()` synchronously from the client event callback;
+- the client sends `MSG_WIN32_TTY_OUTPUT_ACK` only from the writer drain
+  callback, so server-side backpressure and redraw accounting still mean
+  output was drained to the console;
+- client shutdown waits for pending console output before exiting on normal
+  server exit messages;
+- the writer chunk matches the 256 KiB server-side Win32 tty pending cap,
+  avoiding new UTF-8 split points beyond the existing relay message boundary
+  while that backpressure limit is respected.
