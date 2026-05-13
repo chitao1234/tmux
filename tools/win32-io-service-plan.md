@@ -118,14 +118,17 @@ This is the rule that prevents losing trailing ConPTY or job output.
 
 ## First Implementation Slice
 
-The first slice intentionally keeps behavior equivalent while changing the
+The first slice intentionally kept behavior equivalent while changing the
 ownership shape:
 
 - keep `win32_handle_event_*` and `win32_handle_writer_*` as compatibility APIs;
 - replace per-read-endpoint socketpair/libevent events with one process-wide
   Win32 I/O service event;
 - keep the existing synchronous worker read backend for now;
-- keep writer workers unchanged until the shared endpoint contract is in place.
+- move writer drain/error notifications onto the shared service queue while
+  keeping the synchronous worker write backend;
+- close Win32 job stdin from the job write-drain callback for non-`JOB_KEEPWRITE`
+  jobs, matching the existing Unix job semantics.
 
 This gives the port a central completion bridge before introducing IOCP or
 changing pane/job lifecycle behavior.

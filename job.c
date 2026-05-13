@@ -408,13 +408,23 @@ static void
 job_write_callback(__unused struct bufferevent *bufev, void *data)
 {
 	struct job	*job = data;
-	size_t		 len = EVBUFFER_LENGTH(EVBUFFER_OUTPUT(job->event));
+	size_t		 len;
+
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL)
+		len = win32_job_stdin_buffered(job->win32);
+	else
+#endif
+	len = EVBUFFER_LENGTH(EVBUFFER_OUTPUT(job->event));
 
 	log_debug("job write %p: %s, pid %ld, output left %zu", job, job->cmd,
 	    (long) job->pid, len);
 
 	if (len == 0 && (~job->flags & JOB_KEEPWRITE)) {
-#ifndef TMUX_WIN32
+#ifdef TMUX_WIN32
+		if (job->win32 != NULL)
+			win32_job_close_stdin(job->win32);
+#else
 		shutdown(job->fd, SHUT_WR);
 #endif
 		bufferevent_disable(job->event, EV_WRITE);

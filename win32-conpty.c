@@ -996,6 +996,29 @@ win32_job_error_cb(void *arg)
 		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
 }
 
+static void
+win32_job_write_cb(void *arg)
+{
+	struct win32_job	*wj = arg;
+
+	if (wj->event != NULL && wj->event->writecb != NULL)
+		wj->event->writecb(wj->event, wj->event->cbarg);
+}
+
+static void
+win32_job_write_error_cb(void *arg)
+{
+	struct win32_job	*wj = arg;
+
+	/*
+	 * Stdin write failure is separate from stdout EOF and process exit.
+	 * Notify the write side only; output completion is delivered by the
+	 * output reader.
+	 */
+	if (wj->event != NULL && wj->event->writecb != NULL)
+		wj->event->writecb(wj->event, wj->event->cbarg);
+}
+
 struct win32_job *
 win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
     struct environ *env, __unused struct session *s, const char *cwd,
@@ -1159,7 +1182,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
 	win32_close_handle(&wj->stderr_write);
-	wj->stdin_writer = win32_handle_writer_new(&wj->stdin_write);
+	wj->stdin_writer = win32_handle_writer_new_cb(&wj->stdin_write,
+	    win32_job_write_cb, win32_job_write_error_cb, wj);
 	if (wj->stdin_writer == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't create job input writer");
@@ -1315,6 +1339,14 @@ win32_job_write(struct win32_job *wj, const void *data, size_t size)
 		return (-1);
 	}
 	return (win32_handle_writer_write(wj->stdin_writer, data, size));
+}
+
+size_t
+win32_job_stdin_buffered(struct win32_job *wj)
+{
+	if (wj == NULL || wj->stdin_writer == NULL)
+		return (0);
+	return (win32_handle_writer_buffered(wj->stdin_writer));
 }
 
 void

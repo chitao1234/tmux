@@ -58,10 +58,14 @@ int		 win32_handle_event_done(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
 struct win32_handle_writer *win32_handle_writer_new(HANDLE *);
+struct win32_handle_writer *win32_handle_writer_new_cb(HANDLE *,
+		     void (*)(void *), void (*)(void *), void *);
 void		 win32_handle_writer_free(struct win32_handle_writer *);
 int		 win32_handle_writer_write(struct win32_handle_writer *,
 		     const void *, size_t);
 void		 win32_handle_writer_close(struct win32_handle_writer *);
+size_t		 win32_handle_writer_buffered(struct win32_handle_writer *);
+int		 win32_handle_writer_done(struct win32_handle_writer *);
 int		 win32_handle_write(HANDLE, const void *, size_t);
 void		 win32_log_handle(const char *, HANDLE);
 
@@ -109,6 +113,7 @@ int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);
 int		 win32_job_write(struct win32_job *, const void *, size_t);
+size_t		 win32_job_stdin_buffered(struct win32_job *);
 void		 win32_job_close_stdin(struct win32_job *);
 
 #endif /* TMUX_WIN32 */
