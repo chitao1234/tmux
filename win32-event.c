@@ -96,19 +96,18 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 }
 
 struct win32_handle_event {
+	TAILQ_ENTRY(win32_handle_event) entry;
 	HANDLE		 handle;
 	HANDLE		 thread;
 	HANDLE		 stop;
-	SOCKET		 notify_read;
-	SOCKET		 notify_write;
-	struct event	 event;
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
 	void		(*readcb)(void *);
 	void		(*errorcb)(void *);
 	void		 *arg;
-	int		 event_added;
 	int		 error;
+	int		 pending;
+	int		 active;
 };
 
 struct win32_handle_writer {
@@ -121,6 +120,22 @@ struct win32_handle_writer {
 	int		 error;
 	int		 stop;
 };
+
+struct win32_io_service {
+	SOCKET		 notify_read;
+	SOCKET		 notify_write;
+	struct event	 event;
+	CRITICAL_SECTION lock;
+	TAILQ_HEAD(, win32_handle_event) pending;
+	int		 initialized;
+	int		 event_added;
+};
+
+static struct win32_io_service win32_io;
+
+static int	win32_io_service_init(void);
+static void	win32_io_service_enqueue(struct win32_handle_event *);
+static void	win32_io_service_cb(evutil_socket_t, short, void *);
 
 static int
 win32_socketpair(SOCKET pair[2])
@@ -162,11 +177,109 @@ fail:
 	return (-1);
 }
 
+static int
+win32_io_service_init(void)
+{
+	SOCKET	pair[2];
+	u_long	nonblock = 1;
+
+	if (win32_io.initialized)
+		return (0);
+
+	if (win32_socketpair(pair) != 0)
+		return (-1);
+	ioctlsocket(pair[0], FIONBIO, &nonblock);
+	ioctlsocket(pair[1], FIONBIO, &nonblock);
+
+	win32_io.notify_read = pair[0];
+	win32_io.notify_write = pair[1];
+	TAILQ_INIT(&win32_io.pending);
+	InitializeCriticalSection(&win32_io.lock);
+
+	event_set(&win32_io.event, (evutil_socket_t)win32_io.notify_read,
+	    EV_READ|EV_PERSIST, win32_io_service_cb, NULL);
+	if (event_add(&win32_io.event, NULL) != 0) {
+		DeleteCriticalSection(&win32_io.lock);
+		closesocket(pair[0]);
+		closesocket(pair[1]);
+		memset(&win32_io, 0, sizeof win32_io);
+		return (-1);
+	}
+	win32_io.event_added = 1;
+	win32_io.initialized = 1;
+	return (0);
+}
+
+void
+win32_io_service_fini(void)
+{
+	if (!win32_io.initialized)
+		return;
+	if (win32_io.event_added)
+		event_del(&win32_io.event);
+	if (win32_io.notify_read != INVALID_SOCKET)
+		closesocket(win32_io.notify_read);
+	if (win32_io.notify_write != INVALID_SOCKET)
+		closesocket(win32_io.notify_write);
+	DeleteCriticalSection(&win32_io.lock);
+	memset(&win32_io, 0, sizeof win32_io);
+}
+
+static void
+win32_io_service_enqueue(struct win32_handle_event *whe)
+{
+	char	one = 1;
+
+	EnterCriticalSection(&win32_io.lock);
+	if (whe->active && !whe->pending) {
+		TAILQ_INSERT_TAIL(&win32_io.pending, whe, entry);
+		whe->pending = 1;
+		send(win32_io.notify_write, &one, 1, 0);
+	}
+	LeaveCriticalSection(&win32_io.lock);
+}
+
+static void
+win32_io_service_cb(__unused evutil_socket_t fd, __unused short events,
+    __unused void *arg)
+{
+	struct win32_handle_event	*whe;
+	char				 buf[64];
+	size_t				 buffered;
+	int				 error;
+
+	while (recv(win32_io.notify_read, buf, sizeof buf, 0) > 0)
+		;
+
+	for (;;) {
+		EnterCriticalSection(&win32_io.lock);
+		whe = TAILQ_FIRST(&win32_io.pending);
+		if (whe != NULL) {
+			TAILQ_REMOVE(&win32_io.pending, whe, entry);
+			whe->pending = 0;
+		}
+		LeaveCriticalSection(&win32_io.lock);
+		if (whe == NULL)
+			break;
+
+		EnterCriticalSection(&whe->lock);
+		error = whe->error;
+		buffered = EVBUFFER_LENGTH(whe->input);
+		LeaveCriticalSection(&whe->lock);
+
+		if (error) {
+			if (whe->errorcb != NULL)
+				whe->errorcb(whe->arg);
+		} else if (buffered != 0 && whe->readcb != NULL)
+			whe->readcb(whe->arg);
+	}
+}
+
 static DWORD WINAPI
 win32_handle_event_thread(void *arg)
 {
 	struct win32_handle_event	*whe = arg;
-	char				 buf[8192], one = 1;
+	char				 buf[8192];
 	DWORD				 nread;
 	u_int				 i;
 
@@ -178,7 +291,7 @@ win32_handle_event_thread(void *arg)
 			EnterCriticalSection(&whe->lock);
 			whe->error = 1;
 			LeaveCriticalSection(&whe->lock);
-			send(whe->notify_write, &one, 1, 0);
+			win32_io_service_enqueue(whe);
 			break;
 		}
 		if (log_get_level() > 1) {
@@ -193,32 +306,9 @@ win32_handle_event_thread(void *arg)
 		EnterCriticalSection(&whe->lock);
 		evbuffer_add(whe->input, buf, nread);
 		LeaveCriticalSection(&whe->lock);
-		send(whe->notify_write, &one, 1, 0);
+		win32_io_service_enqueue(whe);
 	}
 	return (0);
-}
-
-static void
-win32_handle_event_cb(__unused evutil_socket_t fd, __unused short events,
-    void *arg)
-{
-	struct win32_handle_event	*whe = arg;
-	char				 buf[64];
-	int				 error;
-
-	while (recv(whe->notify_read, buf, sizeof buf, 0) > 0)
-		;
-	EnterCriticalSection(&whe->lock);
-	error = whe->error;
-	LeaveCriticalSection(&whe->lock);
-
-	if (error) {
-		if (whe->errorcb != NULL)
-			whe->errorcb(whe->arg);
-		return;
-	}
-	if (whe->readcb != NULL)
-		whe->readcb(whe->arg);
 }
 
 struct win32_handle_event *
@@ -226,22 +316,14 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
     void (*errorcb)(void *), void *arg)
 {
 	struct win32_handle_event	*whe;
-	SOCKET				 pair[2];
-	u_long				 nonblock = 1;
 
-	if (win32_socketpair(pair) != 0)
+	if (win32_io_service_init() != 0)
 		return (NULL);
-	ioctlsocket(pair[0], FIONBIO, &nonblock);
-	ioctlsocket(pair[1], FIONBIO, &nonblock);
 
 	whe = xcalloc(1, sizeof *whe);
 	whe->handle = handle;
-	whe->notify_read = pair[0];
-	whe->notify_write = pair[1];
 	whe->input = evbuffer_new();
 	if (whe->input == NULL) {
-		closesocket(pair[0]);
-		closesocket(pair[1]);
 		free(whe);
 		return (NULL);
 	}
@@ -251,21 +333,11 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (whe->stop == NULL) {
 		evbuffer_free(whe->input);
-		closesocket(pair[0]);
-		closesocket(pair[1]);
 		free(whe);
 		return (NULL);
 	}
 	InitializeCriticalSection(&whe->lock);
-
-	event_set(&whe->event, (evutil_socket_t)whe->notify_read,
-	    EV_READ|EV_PERSIST,
-	    win32_handle_event_cb, whe);
-	if (event_add(&whe->event, NULL) != 0) {
-		win32_handle_event_free(whe);
-		return (NULL);
-	}
-	whe->event_added = 1;
+	whe->active = 1;
 	whe->thread = CreateThread(NULL, 0, win32_handle_event_thread, whe, 0,
 	    NULL);
 	if (whe->thread == NULL) {
@@ -286,14 +358,17 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		CancelSynchronousIo(whe->thread);
 		WaitForSingleObject(whe->thread, INFINITE);
 	}
-	if (whe->event_added)
-		event_del(&whe->event);
+	if (win32_io.initialized) {
+		EnterCriticalSection(&win32_io.lock);
+		whe->active = 0;
+		if (whe->pending) {
+			TAILQ_REMOVE(&win32_io.pending, whe, entry);
+			whe->pending = 0;
+		}
+		LeaveCriticalSection(&win32_io.lock);
+	}
 	if (whe->input != NULL)
 		evbuffer_free(whe->input);
-	if (whe->notify_read != INVALID_SOCKET)
-		closesocket(whe->notify_read);
-	if (whe->notify_write != INVALID_SOCKET)
-		closesocket(whe->notify_write);
 	if (whe->thread != NULL)
 		CloseHandle(whe->thread);
 	if (whe->stop != NULL)

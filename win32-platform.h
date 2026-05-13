@@ -44,6 +44,7 @@ void		 win32_fini(void);
 long		 win32_console_ctrl_c_events(void);
 void		 win32_check_children(void);
 
+void		 win32_io_service_fini(void);
 struct win32_handle_event *win32_handle_event_new(HANDLE, void (*)(void *),
 		     void (*)(void *), void *);
 void		 win32_handle_event_free(struct win32_handle_event *);

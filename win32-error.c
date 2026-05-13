@@ -511,6 +511,7 @@ win32_init(void)
 void
 win32_fini(void)
 {
+	win32_io_service_fini();
 	SetConsoleCtrlHandler(win32_console_ctrl_handler, FALSE);
 	WSACleanup();
 }
