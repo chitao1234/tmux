@@ -32,6 +32,7 @@ struct win32_pane {
 	DWORD		 process_id;
 	struct bufferevent *event;
 	struct win32_handle_event *output_event;
+	struct win32_handle_writer *input_writer;
 	int		 exited;
 	int		 status;
 };
@@ -48,6 +49,7 @@ struct win32_job {
 	HANDLE		 stdout_write;
 	HANDLE		 stderr_write;
 	struct win32_handle_event *output_event;
+	struct win32_handle_writer *stdin_writer;
 	struct bufferevent *event;
 	int		 pty;
 	int		 exited;
@@ -671,6 +673,28 @@ win32_child_disconnect(HPCON *hpcon, HANDLE *input_read, HANDLE *input_write,
 }
 
 static void
+win32_pane_disconnect(struct win32_pane *pw)
+{
+	if (pw->input_writer != NULL) {
+		win32_handle_writer_free(pw->input_writer);
+		pw->input_writer = NULL;
+	}
+	win32_child_disconnect(&pw->hpcon, &pw->input_read, &pw->input_write,
+	    &pw->output_write);
+}
+
+static void
+win32_job_disconnect(struct win32_job *wj)
+{
+	if (wj->stdin_writer != NULL) {
+		win32_handle_writer_free(wj->stdin_writer);
+		wj->stdin_writer = NULL;
+	}
+	win32_child_disconnect(&wj->hpcon, &wj->stdin_read, &wj->stdin_write,
+	    &wj->stdout_write);
+}
+
+static void
 win32_pane_read_cb(void *arg)
 {
 	struct window_pane	*wp = arg;
@@ -692,7 +716,13 @@ static void
 win32_pane_error_cb(void *arg)
 {
 	struct window_pane	*wp = arg;
+	int			 status;
 
+	win32_pane_drain(wp);
+	if (win32_pane_exited(wp, &status)) {
+		wp->status = status;
+		wp->flags |= PANE_STATUSREADY;
+	}
 	window_pane_error_callback(wp->event, 0, wp);
 }
 
@@ -787,6 +817,11 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 	win32_close_handle(&pw->input_read);
 	win32_close_handle(&pw->output_write);
+	pw->input_writer = win32_handle_writer_new(&pw->input_write);
+	if (pw->input_writer == NULL) {
+		xasprintf(cause, "couldn't create pane input writer");
+		goto fail;
+	}
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
 
@@ -817,8 +852,7 @@ fail:
 		if (wp->win32 == pw)
 			wp->win32 = NULL;
 		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
-		win32_child_disconnect(&pw->hpcon, &pw->input_read,
-		    &pw->input_write, &pw->output_write);
+		win32_pane_disconnect(pw);
 		if (pw->output_event != NULL)
 			win32_handle_event_free(pw->output_event);
 		win32_close_handle(&pw->output_read);
@@ -854,8 +888,7 @@ win32_pane_close(struct window_pane *wp)
 	event = wp->event;
 	wp->event = NULL;
 	win32_child_kill("pane", pw->process_id, pw->job, pw->process);
-	win32_child_disconnect(&pw->hpcon, &pw->input_read, &pw->input_write,
-	    &pw->output_write);
+	win32_pane_disconnect(pw);
 	if (pw->output_event != NULL)
 		win32_handle_event_free(pw->output_event);
 	win32_close_handle(&pw->output_read);
@@ -871,15 +904,25 @@ int
 win32_pane_exited(struct window_pane *wp, int *status)
 {
 	int	found;
+	struct win32_pane	*pw;
 
 	if (wp->win32 == NULL || wp->win32->process == NULL)
 		return (0);
-	found = win32_process_status(wp->win32->process, status);
+	pw = wp->win32;
+	if (pw->exited) {
+		if (status != NULL)
+			*status = pw->status;
+		return (1);
+	}
+	found = win32_process_status(pw->process, status);
 	if (!found)
 		return (0);
-	wp->win32->exited = 1;
+	pw->exited = 1;
 	if (status != NULL)
-		wp->win32->status = *status;
+		pw->status = *status;
+	else
+		(void)win32_process_status(pw->process, &pw->status);
+	win32_pane_disconnect(pw);
 	return (1);
 }
 
@@ -892,28 +935,21 @@ win32_pane_buffered(struct window_pane *wp)
 }
 
 int
+win32_pane_output_done(struct window_pane *wp)
+{
+	if (wp->win32 == NULL || wp->win32->output_event == NULL)
+		return (1);
+	return (win32_handle_event_done(wp->win32->output_event));
+}
+
+int
 win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 {
-	const char	*buf = data;
-	size_t		 left = size;
-	DWORD		 written;
-
-	while (left != 0) {
-		if (wp->win32 == NULL || wp->win32->input_write == NULL) {
-			errno = EPIPE;
-			return (-1);
-		}
-		if (!WriteFile(wp->win32->input_write, buf,
-		    left > MAXDWORD ? MAXDWORD : left, &written, NULL)) {
-			errno = EIO;
-			return (-1);
-		}
-		if (written == 0)
-			break;
-		buf += written;
-		left -= written;
+	if (wp->win32 == NULL || wp->win32->input_writer == NULL) {
+		errno = EPIPE;
+		return (-1);
 	}
-	return ((int)(size - left));
+	return (win32_handle_writer_write(wp->win32->input_writer, data, size));
 }
 
 char *
@@ -949,6 +985,11 @@ win32_job_error_cb(void *arg)
 	struct win32_job	*wj = arg;
 	int		 status;
 
+	if (wj->event != NULL) {
+		win32_job_drain(wj);
+		if (wj->event->readcb != NULL)
+			wj->event->readcb(wj->event, wj->event->cbarg);
+	}
 	if (win32_job_exited(wj, &status))
 		wj->status = status;
 	if (wj->event != NULL && wj->event->errorcb != NULL)
@@ -1118,6 +1159,12 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
 	win32_close_handle(&wj->stderr_write);
+	wj->stdin_writer = win32_handle_writer_new(&wj->stdin_write);
+	if (wj->stdin_writer == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't create job input writer");
+		goto fail;
+	}
 
 	wj->event = bufferevent_new(-1, NULL, NULL, NULL, NULL);
 	if (wj->event == NULL)
@@ -1153,8 +1200,7 @@ fail:
 			wj->event = NULL;
 		}
 		win32_child_kill("job", wj->process_id, wj->job, wj->process);
-		win32_child_disconnect(&wj->hpcon, &wj->stdin_read,
-		    &wj->stdin_write, &wj->stdout_write);
+		win32_job_disconnect(wj);
 		if (wj->output_event != NULL)
 			win32_handle_event_free(wj->output_event);
 		win32_close_handle(&wj->stderr_write);
@@ -1174,8 +1220,7 @@ win32_job_close(struct win32_job *wj)
 		return;
 	wj->event = NULL;
 	win32_child_kill("job", wj->process_id, wj->job, wj->process);
-	win32_child_disconnect(&wj->hpcon, &wj->stdin_read, &wj->stdin_write,
-	    &wj->stdout_write);
+	win32_job_disconnect(wj);
 	if (wj->output_event != NULL)
 		win32_handle_event_free(wj->output_event);
 	win32_close_handle(&wj->stderr_write);
@@ -1218,6 +1263,7 @@ win32_job_exited(struct win32_job *wj, int *status)
 		wj->status = *status;
 	else
 		(void)win32_process_status(wj->process, &wj->status);
+	win32_job_disconnect(wj);
 	return (1);
 }
 
@@ -1264,32 +1310,22 @@ win32_job_get_event(struct win32_job *wj)
 int
 win32_job_write(struct win32_job *wj, const void *data, size_t size)
 {
-	const char	*buf = data;
-	size_t		 left = size;
-	DWORD		 written;
-
-	while (left != 0) {
-		if (wj->stdin_write == NULL) {
-			errno = EPIPE;
-			return (-1);
-		}
-		if (!WriteFile(wj->stdin_write, buf,
-		    left > MAXDWORD ? MAXDWORD : left, &written, NULL)) {
-			errno = EIO;
-			return (-1);
-		}
-		if (written == 0)
-			break;
-		buf += written;
-		left -= written;
+	if (wj == NULL || wj->stdin_writer == NULL) {
+		errno = EPIPE;
+		return (-1);
 	}
-	return ((int)(size - left));
+	return (win32_handle_writer_write(wj->stdin_writer, data, size));
 }
 
 void
 win32_job_close_stdin(struct win32_job *wj)
 {
-	win32_close_handle(&wj->stdin_write);
+	if (wj == NULL)
+		return;
+	if (wj->stdin_writer != NULL)
+		win32_handle_writer_close(wj->stdin_writer);
+	else
+		win32_close_handle(&wj->stdin_write);
 }
 
 #endif /* TMUX_WIN32 */

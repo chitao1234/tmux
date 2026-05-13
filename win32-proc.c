@@ -29,12 +29,12 @@ win32_check_children(void)
 		TAILQ_FOREACH_SAFE(wp, &w->panes, entry, wp1) {
 			if (wp->win32 == NULL)
 				continue;
-			if (wp->flags & PANE_EXITED)
+			if (wp->flags & PANE_STATUSREADY)
 				continue;
 			if (!win32_pane_exited(wp, &status))
 				continue;
 			wp->status = status;
-			wp->flags |= PANE_STATUSREADY|PANE_EXITED;
+			wp->flags |= PANE_STATUSREADY;
 			if (window_pane_destroy_ready(wp))
 				server_destroy_pane(wp, 1);
 		}

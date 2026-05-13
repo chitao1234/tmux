@@ -111,6 +111,17 @@ struct win32_handle_event {
 	int		 error;
 };
 
+struct win32_handle_writer {
+	HANDLE		 handle;
+	HANDLE		 thread;
+	HANDLE		 ready;
+	struct evbuffer	*output;
+	CRITICAL_SECTION lock;
+	int		 closing;
+	int		 error;
+	int		 stop;
+};
+
 static int
 win32_socketpair(SOCKET pair[2])
 {
@@ -338,6 +349,164 @@ win32_handle_event_done(struct win32_handle_event *whe)
 	done = whe->error;
 	LeaveCriticalSection(&whe->lock);
 	return (done);
+}
+
+static DWORD WINAPI
+win32_handle_writer_thread(void *arg)
+{
+	struct win32_handle_writer	*whw = arg;
+	char				 buf[8192];
+	HANDLE				 handle;
+	size_t				 size;
+	DWORD				 written;
+
+	for (;;) {
+		WaitForSingleObject(whw->ready, INFINITE);
+
+		for (;;) {
+			EnterCriticalSection(&whw->lock);
+			if (whw->stop)
+				goto stop;
+			if (whw->error || whw->handle == NULL)
+				goto stop;
+			size = EVBUFFER_LENGTH(whw->output);
+			if (size == 0) {
+				if (whw->closing)
+					goto stop;
+				ResetEvent(whw->ready);
+				LeaveCriticalSection(&whw->lock);
+				break;
+			}
+			if (size > sizeof buf)
+				size = sizeof buf;
+			memcpy(buf, EVBUFFER_DATA(whw->output), size);
+			handle = whw->handle;
+			LeaveCriticalSection(&whw->lock);
+
+			if (!WriteFile(handle, buf, (DWORD)size, &written, NULL) ||
+			    written == 0) {
+				EnterCriticalSection(&whw->lock);
+				whw->error = 1;
+				evbuffer_drain(whw->output,
+				    EVBUFFER_LENGTH(whw->output));
+				handle = whw->handle;
+				whw->handle = NULL;
+				LeaveCriticalSection(&whw->lock);
+				if (handle != NULL)
+					CloseHandle(handle);
+				return (0);
+			}
+
+			EnterCriticalSection(&whw->lock);
+			evbuffer_drain(whw->output, written);
+			LeaveCriticalSection(&whw->lock);
+		}
+	}
+
+stop:
+	evbuffer_drain(whw->output, EVBUFFER_LENGTH(whw->output));
+	handle = whw->handle;
+	whw->handle = NULL;
+	LeaveCriticalSection(&whw->lock);
+	if (handle != NULL)
+		CloseHandle(handle);
+	return (0);
+}
+
+struct win32_handle_writer *
+win32_handle_writer_new(HANDLE *handle)
+{
+	struct win32_handle_writer	*whw;
+
+	if (handle == NULL || *handle == NULL || *handle == INVALID_HANDLE_VALUE)
+		return (NULL);
+
+	whw = xcalloc(1, sizeof *whw);
+	whw->handle = *handle;
+	whw->output = evbuffer_new();
+	if (whw->output == NULL) {
+		free(whw);
+		return (NULL);
+	}
+	whw->ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (whw->ready == NULL) {
+		evbuffer_free(whw->output);
+		free(whw);
+		return (NULL);
+	}
+	InitializeCriticalSection(&whw->lock);
+	whw->thread = CreateThread(NULL, 0, win32_handle_writer_thread, whw, 0,
+	    NULL);
+	if (whw->thread == NULL) {
+		DeleteCriticalSection(&whw->lock);
+		CloseHandle(whw->ready);
+		evbuffer_free(whw->output);
+		free(whw);
+		return (NULL);
+	}
+	*handle = NULL;
+	return (whw);
+}
+
+void
+win32_handle_writer_free(struct win32_handle_writer *whw)
+{
+	if (whw == NULL)
+		return;
+	EnterCriticalSection(&whw->lock);
+	whw->stop = 1;
+	SetEvent(whw->ready);
+	LeaveCriticalSection(&whw->lock);
+	CancelSynchronousIo(whw->thread);
+	WaitForSingleObject(whw->thread, INFINITE);
+	CloseHandle(whw->thread);
+	CloseHandle(whw->ready);
+	evbuffer_free(whw->output);
+	DeleteCriticalSection(&whw->lock);
+	free(whw);
+}
+
+int
+win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
+    size_t size)
+{
+	size_t	nwrite;
+
+	if (whw == NULL) {
+		errno = EPIPE;
+		return (-1);
+	}
+	nwrite = size;
+	if (nwrite > INT_MAX)
+		nwrite = INT_MAX;
+	if (nwrite == 0)
+		return (0);
+
+	EnterCriticalSection(&whw->lock);
+	if (whw->closing || whw->error || whw->stop || whw->handle == NULL) {
+		LeaveCriticalSection(&whw->lock);
+		errno = EPIPE;
+		return (-1);
+	}
+	if (evbuffer_add(whw->output, data, nwrite) != 0) {
+		LeaveCriticalSection(&whw->lock);
+		errno = ENOMEM;
+		return (-1);
+	}
+	SetEvent(whw->ready);
+	LeaveCriticalSection(&whw->lock);
+	return ((int)nwrite);
+}
+
+void
+win32_handle_writer_close(struct win32_handle_writer *whw)
+{
+	if (whw == NULL)
+		return;
+	EnterCriticalSection(&whw->lock);
+	whw->closing = 1;
+	SetEvent(whw->ready);
+	LeaveCriticalSection(&whw->lock);
 }
 
 int

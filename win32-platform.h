@@ -27,6 +27,7 @@ struct window_pane;
 struct win32_pane;
 struct win32_job;
 struct win32_handle_event;
+struct win32_handle_writer;
 
 const char	*win32_strerror(DWORD);
 char		*win32_getenv_utf8(const char *);
@@ -55,6 +56,11 @@ size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_done(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
 		     const void *, size_t);
+struct win32_handle_writer *win32_handle_writer_new(HANDLE *);
+void		 win32_handle_writer_free(struct win32_handle_writer *);
+int		 win32_handle_writer_write(struct win32_handle_writer *,
+		     const void *, size_t);
+void		 win32_handle_writer_close(struct win32_handle_writer *);
 int		 win32_handle_write(HANDLE, const void *, size_t);
 void		 win32_log_handle(const char *, HANDLE);
 
@@ -82,6 +88,7 @@ void		 win32_pane_resize(struct window_pane *, u_int, u_int);
 void		 win32_pane_drain(struct window_pane *);
 int		 win32_pane_exited(struct window_pane *, int *);
 size_t		 win32_pane_buffered(struct window_pane *);
+int		 win32_pane_output_done(struct window_pane *);
 char		*win32_pane_get_cwd(struct window_pane *);
 
 struct bufferevent *win32_pane_get_event(struct window_pane *);

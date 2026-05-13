@@ -480,8 +480,7 @@ job_check_died(void)
 		log_debug("job died %p: %s, pid %ld", job, job->cmd,
 		    (long) job->pid);
 
-		if ((job->flags & JOB_PTY) ||
-		    win32_job_output_done(job->win32)) {
+		if (win32_job_output_done(job->win32)) {
 			job->state = JOB_DEAD;
 			job_complete(job);
 		} else {

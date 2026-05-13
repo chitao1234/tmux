@@ -381,8 +381,14 @@ window_pane_destroy_ready(struct window_pane *wp)
 #endif
 
 #ifdef TMUX_WIN32
-	if (wp->win32 != NULL && win32_pane_buffered(wp) > 0)
-		return (0);
+	if (wp->win32 != NULL) {
+		if (~wp->flags & PANE_STATUSREADY)
+			return (0);
+		if (!win32_pane_output_done(wp))
+			return (0);
+		if (win32_pane_buffered(wp) > 0)
+			return (0);
+	}
 #else
 	if (wp->pipe_fd != -1) {
 		if (EVBUFFER_LENGTH(wp->pipe_event->output) != 0)
