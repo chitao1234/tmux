@@ -152,3 +152,24 @@ bridge:
 The next cleanup should remove the fallback polling once process events have
 enough runtime coverage, then move the pipe read/write backends from blocking
 worker threads to overlapped I/O/IOCP where the handle type allows it.
+
+## Terminal Handle Output Slice
+
+The server-side direct terminal output handle path now uses the shared service
+writer for queued tty output:
+
+- `struct tty` owns a `win32_handle_writer` for `client->win32_stdout`;
+- the writer borrows this handle so existing client lifetime cleanup remains
+  the close owner;
+- normal queued tty writes are copied into the writer and drained on the
+  writer completion callback, keeping `WriteFile`/`WriteConsoleW` off the tmux
+  server thread;
+- `tty->win32_out_pending` preserves redraw deferral semantics by treating
+  bytes as complete only after the service reports writer drain;
+- synchronous `tty_raw()` teardown writes remain a temporary compatibility
+  path until terminal shutdown is given explicit flush/cancel semantics.
+
+The active console relay path is intentionally not migrated in this slice. Its
+ACK is server backpressure and redraw accounting, so an asynchronous
+client-side writer must ACK only after bytes are actually drained to the
+console and must preserve the current UTF-8-to-`WriteConsoleW` behavior.

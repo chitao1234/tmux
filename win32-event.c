@@ -122,6 +122,7 @@ struct win32_handle_writer {
 	void		 *arg;
 	int		 closing;
 	int		 error;
+	int		 borrowed;
 	int		 stop;
 	int		 pending;
 	int		 active;
@@ -602,7 +603,7 @@ win32_handle_writer_thread(void *arg)
 	char				 buf[8192];
 	HANDLE				 handle;
 	size_t				 size;
-	DWORD				 written;
+	int				 written;
 	int				 notify;
 
 	for (;;) {
@@ -628,8 +629,8 @@ win32_handle_writer_thread(void *arg)
 			handle = whw->handle;
 			LeaveCriticalSection(&whw->lock);
 
-			if (!WriteFile(handle, buf, (DWORD)size, &written, NULL) ||
-			    written == 0) {
+			written = win32_handle_write(handle, buf, size);
+			if (written == -1 || written == 0) {
 				EnterCriticalSection(&whw->lock);
 				whw->error = 1;
 				whw->closed = 1;
@@ -638,7 +639,7 @@ win32_handle_writer_thread(void *arg)
 				handle = whw->handle;
 				whw->handle = NULL;
 				LeaveCriticalSection(&whw->lock);
-				if (handle != NULL)
+				if (handle != NULL && !whw->borrowed)
 					CloseHandle(handle);
 				win32_io_service_enqueue_writer(whw);
 				return (0);
@@ -659,15 +660,15 @@ stop:
 	whw->handle = NULL;
 	whw->closed = 1;
 	LeaveCriticalSection(&whw->lock);
-	if (handle != NULL)
+	if (handle != NULL && !whw->borrowed)
 		CloseHandle(handle);
 	win32_io_service_enqueue_writer(whw);
 	return (0);
 }
 
-struct win32_handle_writer *
-win32_handle_writer_new_cb(HANDLE *handle, void (*writecb)(void *),
-    void (*errorcb)(void *), void *arg)
+static struct win32_handle_writer *
+win32_handle_writer_new1(HANDLE *handle, void (*writecb)(void *),
+    void (*errorcb)(void *), void *arg, int borrowed)
 {
 	struct win32_handle_writer	*whw;
 
@@ -681,6 +682,7 @@ win32_handle_writer_new_cb(HANDLE *handle, void (*writecb)(void *),
 	whw->writecb = writecb;
 	whw->errorcb = errorcb;
 	whw->arg = arg;
+	whw->borrowed = borrowed;
 	whw->output = evbuffer_new();
 	if (whw->output == NULL) {
 		free(whw);
@@ -703,10 +705,25 @@ win32_handle_writer_new_cb(HANDLE *handle, void (*writecb)(void *),
 		free(whw);
 		return (NULL);
 	}
-	*handle = NULL;
+	if (!borrowed)
+		*handle = NULL;
 	if (whw->writecb != NULL)
 		win32_io_service_enqueue_writer(whw);
 	return (whw);
+}
+
+struct win32_handle_writer *
+win32_handle_writer_new_cb(HANDLE *handle, void (*writecb)(void *),
+    void (*errorcb)(void *), void *arg)
+{
+	return (win32_handle_writer_new1(handle, writecb, errorcb, arg, 0));
+}
+
+struct win32_handle_writer *
+win32_handle_writer_new_borrowed(HANDLE *handle, void (*writecb)(void *),
+    void (*errorcb)(void *), void *arg)
+{
+	return (win32_handle_writer_new1(handle, writecb, errorcb, arg, 1));
 }
 
 struct win32_handle_writer *

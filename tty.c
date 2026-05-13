@@ -43,6 +43,10 @@ static int	tty_log_fd = -1;
 
 static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
+#ifdef TMUX_WIN32
+static void	tty_win32_out_callback(void *);
+static void	tty_win32_out_error_callback(void *);
+#endif
 static void	tty_start_timer_callback(tmux_event_fd, short, void *);
 static void	tty_clipboard_query_callback(tmux_event_fd, short, void *);
 static void	tty_set_italics(struct tty *);
@@ -296,6 +300,9 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 	size_t		 size = EVBUFFER_LENGTH(tty->out);
 	int		 nwrite;
 
+	if (size == 0)
+		return;
+
 #ifdef TMUX_WIN32
 	if (c->win32_console) {
 		size_t	left = size, nsend;
@@ -324,11 +331,25 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		evbuffer_drain(tty->out, nwrite);
 		goto write_done;
 	}
-	if (c->win32_stdout != NULL) {
-		nwrite = win32_handle_write(c->win32_stdout,
-		    EVBUFFER_DATA(tty->out), size);
+	if (tty->win32_out != NULL) {
+		size_t	nsend = size;
+
+		if (tty->win32_out_pending != 0 ||
+		    win32_handle_writer_buffered(tty->win32_out) != 0)
+			return;
+		if (tty->win32_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
+			return;
+		if (nsend > TTY_WIN32_OUT_PENDING_LIMIT -
+		    tty->win32_out_pending)
+			nsend = TTY_WIN32_OUT_PENDING_LIMIT -
+			    tty->win32_out_pending;
+		if (nsend == 0)
+			return;
+		nwrite = win32_handle_writer_write(tty->win32_out,
+		    EVBUFFER_DATA(tty->out), nsend);
 		if (nwrite == -1)
 			return;
+		tty->win32_out_pending += nwrite;
 		evbuffer_drain(tty->out, nwrite);
 		goto write_done;
 	}
@@ -343,7 +364,7 @@ write_done:
 
 	if (c->redraw > 0) {
 #ifdef TMUX_WIN32
-		if (c->win32_console) {
+		if (c->win32_console || tty->win32_out != NULL) {
 			log_debug("%s: waiting for redraw, %zu bytes left",
 			    c->name, c->redraw);
 			goto after_redraw;
@@ -367,7 +388,7 @@ after_redraw:
 			tty_write_callback(-1, EV_WRITE, tty);
 			return;
 		}
-		if (c->win32_stdout != NULL) {
+		if (tty->win32_out != NULL) {
 			tty_write_callback(-1, EV_WRITE, tty);
 			return;
 		}
@@ -388,7 +409,7 @@ tty_write_pending(struct tty *tty)
 		tty_write_callback(-1, EV_WRITE, tty);
 		return;
 	}
-	if (c->win32_stdout != NULL) {
+	if (tty->win32_out != NULL) {
 		tty_write_callback(-1, EV_WRITE, tty);
 		return;
 	}
@@ -409,6 +430,35 @@ tty_win32_error_callback(void *data)
 {
 	struct tty	*tty = data;
 
+	server_client_lost(tty->client);
+}
+
+static void
+tty_win32_out_callback(void *data)
+{
+	struct tty	*tty = data;
+	struct client	*c = tty->client;
+	size_t		 size;
+
+	size = tty->win32_out_pending;
+	tty->win32_out_pending = 0;
+	if (c->redraw > 0 && size != 0) {
+		if (size >= c->redraw)
+			c->redraw = 0;
+		else
+			c->redraw -= size;
+		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
+		    c->redraw);
+	}
+	tty_write_callback(-1, EV_WRITE, tty);
+}
+
+static void
+tty_win32_out_error_callback(void *data)
+{
+	struct tty	*tty = data;
+
+	tty->win32_out_pending = 0;
 	server_client_lost(tty->client);
 }
 #endif
@@ -456,6 +506,16 @@ tty_open(struct tty *tty, char **cause)
 	if (c->win32_stdout == NULL && !c->win32_console && c->fd != -1) {
 		event_set(&tty->event_out, c->fd, EV_WRITE, tty_write_callback,
 		    tty);
+	}
+	if (c->win32_stdout != NULL) {
+		tty->win32_out = win32_handle_writer_new_borrowed(
+		    &c->win32_stdout, tty_win32_out_callback,
+		    tty_win32_out_error_callback, tty);
+		if (tty->win32_out == NULL) {
+			*cause = xstrdup("couldn't create Win32 tty output writer");
+			tty_close(tty);
+			return (-1);
+		}
 	}
 #endif
 	tty->out = evbuffer_new();
@@ -637,7 +697,7 @@ tty_stop_tty(struct tty *tty)
 #ifdef TMUX_WIN32
 	if (!c->win32_console && tty->win32_in == NULL)
 		event_del(&tty->event_in);
-	if (!c->win32_console && c->win32_stdout == NULL)
+	if (!c->win32_console && tty->win32_out == NULL)
 		event_del(&tty->event_out);
 #else
 	event_del(&tty->event_in);
@@ -718,8 +778,14 @@ tty_close(struct tty *tty)
 			tty->win32_in = NULL;
 		} else if (!tty->client->win32_console)
 			event_del(&tty->event_in);
-		if (!tty->client->win32_console &&
-		    tty->client->win32_stdout == NULL)
+		if (tty->win32_out != NULL) {
+			win32_handle_writer_free(tty->win32_out);
+			tty->win32_out = NULL;
+			tty->win32_out_pending = 0;
+		}
+		if (event_initialized(&tty->event_out) &&
+		    !tty->client->win32_console &&
+		    tty->win32_out == NULL)
 			event_del(&tty->event_out);
 #else
 		event_del(&tty->event_in);
@@ -865,7 +931,7 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 			tty_write_callback(-1, EV_WRITE, tty);
 			return;
 		}
-		if (c->win32_stdout != NULL) {
+		if (tty->win32_out != NULL) {
 			tty_write_callback(-1, EV_WRITE, tty);
 			return;
 		}

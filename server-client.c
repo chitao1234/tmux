@@ -1992,7 +1992,7 @@ server_client_check_redraw(struct client *c)
 	static struct event	 ev;
 	size_t			 left;
 #ifdef TMUX_WIN32
-	size_t			 pending, win32_pending;
+	size_t			 pending, win32_pending, tty_pending;
 #endif
 
 	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
@@ -2041,9 +2041,10 @@ server_client_check_redraw(struct client *c)
 		return;
 	}
 #ifdef TMUX_WIN32
-	if (needed && c->win32_tty_out_pending != 0) {
+	tty_pending = c->win32_tty_out_pending + tty->win32_out_pending;
+	if (needed && tty_pending != 0) {
 		log_debug("%s: redraw deferred (%zu Win32 output bytes)",
-		    c->name, c->win32_tty_out_pending);
+		    c->name, tty_pending);
 		if (!evtimer_initialized(&ev))
 			evtimer_set(&ev, server_client_redraw_timer, NULL);
 		if (!evtimer_pending(&ev, NULL)) {
@@ -2090,7 +2091,7 @@ server_client_check_redraw(struct client *c)
 		log_debug("%s: redraw needed", c->name);
 
 #ifdef TMUX_WIN32
-	win32_pending = c->win32_tty_out_pending;
+	win32_pending = c->win32_tty_out_pending + tty->win32_out_pending;
 #endif
 	tty_flags = tty->flags & (TTY_BLOCK|TTY_FREEZE|TTY_NOCURSOR);
 	tty->flags = (tty->flags & ~(TTY_BLOCK|TTY_FREEZE))|TTY_NOCURSOR;
@@ -2153,8 +2154,10 @@ server_client_check_redraw(struct client *c)
 		 */
 		c->redraw = EVBUFFER_LENGTH(tty->out);
 #ifdef TMUX_WIN32
-		if (c->win32_tty_out_pending > win32_pending)
-			c->redraw += c->win32_tty_out_pending - win32_pending;
+		tty_pending = c->win32_tty_out_pending +
+		    tty->win32_out_pending;
+		if (tty_pending > win32_pending)
+			c->redraw += tty_pending - win32_pending;
 #endif
 		log_debug("%s: redraw added %zu bytes", c->name, c->redraw);
 	}

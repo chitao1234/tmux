@@ -1692,6 +1692,8 @@ struct tty {
 	size_t		 discarded;
 #ifdef TMUX_WIN32
 	struct win32_handle_event *win32_in;
+	struct win32_handle_writer *win32_out;
+	size_t		 win32_out_pending;
 #endif
 
 	struct termios	 tio;
