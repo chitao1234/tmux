@@ -28,6 +28,7 @@ struct win32_pane;
 struct win32_job;
 struct win32_handle_event;
 struct win32_handle_writer;
+struct win32_process_event;
 
 const char	*win32_strerror(DWORD);
 char		*win32_getenv_utf8(const char *);
@@ -66,6 +67,10 @@ int		 win32_handle_writer_write(struct win32_handle_writer *,
 void		 win32_handle_writer_close(struct win32_handle_writer *);
 size_t		 win32_handle_writer_buffered(struct win32_handle_writer *);
 int		 win32_handle_writer_done(struct win32_handle_writer *);
+struct win32_process_event *win32_process_event_new(HANDLE,
+		     void (*)(void *), void *);
+void		 win32_process_event_free(struct win32_process_event *);
+void		 win32_process_event_notify(struct win32_process_event *);
 int		 win32_handle_write(HANDLE, const void *, size_t);
 void		 win32_log_handle(const char *, HANDLE);
 
@@ -112,6 +117,8 @@ void		 win32_job_drain(struct win32_job *);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);
+void		 win32_job_set_exit_callback(struct win32_job *,
+		     void (*)(void *), void *);
 int		 win32_job_write(struct win32_job *, const void *, size_t);
 size_t		 win32_job_stdin_buffered(struct win32_job *);
 void		 win32_job_close_stdin(struct win32_job *);

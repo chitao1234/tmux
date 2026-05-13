@@ -132,3 +132,23 @@ ownership shape:
 
 This gives the port a central completion bridge before introducing IOCP or
 changing pane/job lifecycle behavior.
+
+## Process Exit Slice
+
+Process-handle readiness is now delivered through the same Win32 I/O service
+bridge:
+
+- `win32_process_event_*` wraps `RegisterWaitForSingleObject`;
+- the Windows threadpool wait callback only enqueues a process completion;
+- pane and job exit callbacks run on the tmux thread from the service event;
+- process exit records status and closes child input, but still does not imply
+  output EOF or close the ConPTY/output side;
+- pane destruction remains gated on status ready, output EOF, empty output
+  buffer, and the pane output error path;
+- job completion remains gated on process exit plus output completion;
+- the old child polling pass remains as a temporary fallback while the migration
+  continues.
+
+The next cleanup should remove the fallback polling once process events have
+enough runtime coverage, then move the pipe read/write backends from blocking
+worker threads to overlapped I/O/IOCP where the handle type allows it.

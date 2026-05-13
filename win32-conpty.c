@@ -33,6 +33,7 @@ struct win32_pane {
 	struct bufferevent *event;
 	struct win32_handle_event *output_event;
 	struct win32_handle_writer *input_writer;
+	struct win32_process_event *process_event;
 	int		 exited;
 	int		 status;
 };
@@ -50,7 +51,11 @@ struct win32_job {
 	HANDLE		 stderr_write;
 	struct win32_handle_event *output_event;
 	struct win32_handle_writer *stdin_writer;
+	struct win32_process_event *process_event;
 	struct bufferevent *event;
+	void		(*exitcb)(void *);
+	void		 *exitarg;
+	int		 exit_pending;
 	int		 pty;
 	int		 exited;
 	int		 status;
@@ -684,6 +689,17 @@ win32_pane_disconnect(struct win32_pane *pw)
 }
 
 static void
+win32_pane_close_stdin(struct win32_pane *pw)
+{
+	if (pw->input_writer != NULL) {
+		win32_handle_writer_free(pw->input_writer);
+		pw->input_writer = NULL;
+	}
+	win32_close_handle(&pw->input_write);
+	win32_close_handle(&pw->input_read);
+}
+
+static void
 win32_job_disconnect(struct win32_job *wj)
 {
 	if (wj->stdin_writer != NULL) {
@@ -692,6 +708,17 @@ win32_job_disconnect(struct win32_job *wj)
 	}
 	win32_child_disconnect(&wj->hpcon, &wj->stdin_read, &wj->stdin_write,
 	    &wj->stdout_write);
+}
+
+static void
+win32_job_close_input(struct win32_job *wj)
+{
+	if (wj->stdin_writer != NULL) {
+		win32_handle_writer_free(wj->stdin_writer);
+		wj->stdin_writer = NULL;
+	}
+	win32_close_handle(&wj->stdin_write);
+	win32_close_handle(&wj->stdin_read);
 }
 
 static void
@@ -730,6 +757,43 @@ static int
 win32_process_status(HANDLE process, int *status)
 {
 	return (win32_wait_process(process, 0, status));
+}
+
+static int
+win32_pane_set_exited(struct window_pane *wp, int *status)
+{
+	struct win32_pane	*pw;
+
+	if (wp->win32 == NULL || wp->win32->process == NULL)
+		return (0);
+	pw = wp->win32;
+	if (pw->exited) {
+		if (status != NULL)
+			*status = pw->status;
+		return (1);
+	}
+	if (status != NULL)
+		pw->status = *status;
+	else
+		(void)win32_process_status(pw->process, &pw->status);
+	pw->exited = 1;
+	win32_pane_close_stdin(pw);
+	return (1);
+}
+
+static void
+win32_pane_exit_cb(void *arg)
+{
+	struct window_pane	*wp = arg;
+	int			 status;
+
+	if (!win32_pane_exited(wp, &status))
+		return;
+	wp->status = status;
+	wp->flags |= PANE_STATUSREADY;
+	log_debug("%%%u exited", wp->id);
+	if (window_pane_destroy_ready(wp))
+		server_destroy_pane(wp, 1);
 }
 
 int
@@ -831,6 +895,12 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 		xasprintf(cause, "couldn't create pane output event");
 		goto fail;
 	}
+	pw->process_event = win32_process_event_new(pw->process,
+	    win32_pane_exit_cb, wp);
+	if (pw->process_event == NULL) {
+		xasprintf(cause, "couldn't create pane process event");
+		goto fail;
+	}
 
 	DeleteProcThreadAttributeList(si.lpAttributeList);
 	free(si.lpAttributeList);
@@ -853,6 +923,8 @@ fail:
 			wp->win32 = NULL;
 		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
 		win32_pane_disconnect(pw);
+		if (pw->process_event != NULL)
+			win32_process_event_free(pw->process_event);
 		if (pw->output_event != NULL)
 			win32_handle_event_free(pw->output_event);
 		win32_close_handle(&pw->output_read);
@@ -889,6 +961,8 @@ win32_pane_close(struct window_pane *wp)
 	wp->event = NULL;
 	win32_child_kill("pane", pw->process_id, pw->job, pw->process);
 	win32_pane_disconnect(pw);
+	if (pw->process_event != NULL)
+		win32_process_event_free(pw->process_event);
 	if (pw->output_event != NULL)
 		win32_handle_event_free(pw->output_event);
 	win32_close_handle(&pw->output_read);
@@ -904,26 +978,15 @@ int
 win32_pane_exited(struct window_pane *wp, int *status)
 {
 	int	found;
-	struct win32_pane	*pw;
 
 	if (wp->win32 == NULL || wp->win32->process == NULL)
 		return (0);
-	pw = wp->win32;
-	if (pw->exited) {
-		if (status != NULL)
-			*status = pw->status;
-		return (1);
-	}
-	found = win32_process_status(pw->process, status);
+	if (wp->win32->exited)
+		return (win32_pane_set_exited(wp, status));
+	found = win32_process_status(wp->win32->process, status);
 	if (!found)
 		return (0);
-	pw->exited = 1;
-	if (status != NULL)
-		pw->status = *status;
-	else
-		(void)win32_process_status(pw->process, &pw->status);
-	win32_pane_disconnect(pw);
-	return (1);
+	return (win32_pane_set_exited(wp, status));
 }
 
 size_t
@@ -1017,6 +1080,36 @@ win32_job_write_error_cb(void *arg)
 	 */
 	if (wj->event != NULL && wj->event->writecb != NULL)
 		wj->event->writecb(wj->event, wj->event->cbarg);
+}
+
+static int
+win32_job_set_exited(struct win32_job *wj, int *status)
+{
+	if (wj == NULL || wj->process == NULL)
+		return (0);
+	if (wj->exited) {
+		if (status != NULL)
+			*status = wj->status;
+		return (1);
+	}
+	if (status != NULL)
+		wj->status = *status;
+	else
+		(void)win32_process_status(wj->process, &wj->status);
+	wj->exited = 1;
+	win32_job_close_input(wj);
+	return (1);
+}
+
+static void
+win32_job_exit_cb(void *arg)
+{
+	struct win32_job	*wj = arg;
+
+	if (wj->exitcb != NULL)
+		wj->exitcb(wj->exitarg);
+	else
+		wj->exit_pending = 1;
 }
 
 struct win32_job *
@@ -1200,6 +1293,13 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 			xasprintf(cause, "couldn't create job output event");
 		goto fail;
 	}
+	wj->process_event = win32_process_event_new(wj->process,
+	    win32_job_exit_cb, wj);
+	if (wj->process_event == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't create job process event");
+		goto fail;
+	}
 
 	if (six.lpAttributeList != NULL) {
 		DeleteProcThreadAttributeList(six.lpAttributeList);
@@ -1225,6 +1325,8 @@ fail:
 		}
 		win32_child_kill("job", wj->process_id, wj->job, wj->process);
 		win32_job_disconnect(wj);
+		if (wj->process_event != NULL)
+			win32_process_event_free(wj->process_event);
 		if (wj->output_event != NULL)
 			win32_handle_event_free(wj->output_event);
 		win32_close_handle(&wj->stderr_write);
@@ -1245,6 +1347,8 @@ win32_job_close(struct win32_job *wj)
 	wj->event = NULL;
 	win32_child_kill("job", wj->process_id, wj->job, wj->process);
 	win32_job_disconnect(wj);
+	if (wj->process_event != NULL)
+		win32_process_event_free(wj->process_event);
 	if (wj->output_event != NULL)
 		win32_handle_event_free(wj->output_event);
 	win32_close_handle(&wj->stderr_write);
@@ -1274,21 +1378,12 @@ win32_job_exited(struct win32_job *wj, int *status)
 
 	if (wj == NULL || wj->process == NULL)
 		return (0);
-	if (wj->exited) {
-		if (status != NULL)
-			*status = wj->status;
-		return (1);
-	}
+	if (wj->exited)
+		return (win32_job_set_exited(wj, status));
 	found = win32_process_status(wj->process, status);
 	if (!found)
 		return (0);
-	wj->exited = 1;
-	if (status != NULL)
-		wj->status = *status;
-	else
-		(void)win32_process_status(wj->process, &wj->status);
-	win32_job_disconnect(wj);
-	return (1);
+	return (win32_job_set_exited(wj, status));
 }
 
 int
@@ -1329,6 +1424,22 @@ struct bufferevent *
 win32_job_get_event(struct win32_job *wj)
 {
 	return (wj->event);
+}
+
+void
+win32_job_set_exit_callback(struct win32_job *wj, void (*exitcb)(void *),
+    void *arg)
+{
+	int	pending;
+
+	if (wj == NULL)
+		return;
+	wj->exitcb = exitcb;
+	wj->exitarg = arg;
+	pending = wj->exit_pending;
+	wj->exit_pending = 0;
+	if (pending)
+		win32_process_event_notify(wj->process_event);
 }
 
 int

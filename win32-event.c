@@ -128,6 +128,15 @@ struct win32_handle_writer {
 	int		 closed;
 };
 
+struct win32_process_event {
+	TAILQ_ENTRY(win32_process_event) entry;
+	HANDLE		 wait;
+	void		(*exitcb)(void *);
+	void		 *arg;
+	int		 pending;
+	int		 active;
+};
+
 struct win32_io_service {
 	SOCKET		 notify_read;
 	SOCKET		 notify_write;
@@ -135,6 +144,7 @@ struct win32_io_service {
 	CRITICAL_SECTION lock;
 	TAILQ_HEAD(, win32_handle_event) pending;
 	TAILQ_HEAD(, win32_handle_writer) write_pending;
+	TAILQ_HEAD(, win32_process_event) process_pending;
 	int		 initialized;
 	int		 event_added;
 };
@@ -144,6 +154,7 @@ static struct win32_io_service win32_io;
 static int	win32_io_service_init(void);
 static void	win32_io_service_enqueue_reader(struct win32_handle_event *);
 static void	win32_io_service_enqueue_writer(struct win32_handle_writer *);
+static void	win32_io_service_enqueue_process(struct win32_process_event *);
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
 
 static int
@@ -204,6 +215,7 @@ win32_io_service_init(void)
 	win32_io.notify_write = pair[1];
 	TAILQ_INIT(&win32_io.pending);
 	TAILQ_INIT(&win32_io.write_pending);
+	TAILQ_INIT(&win32_io.process_pending);
 	InitializeCriticalSection(&win32_io.lock);
 
 	event_set(&win32_io.event, (evutil_socket_t)win32_io.notify_read,
@@ -258,6 +270,20 @@ win32_io_service_enqueue_writer(struct win32_handle_writer *whw)
 	if (whw->active && !whw->pending) {
 		TAILQ_INSERT_TAIL(&win32_io.write_pending, whw, entry);
 		whw->pending = 1;
+		send(win32_io.notify_write, &one, 1, 0);
+	}
+	LeaveCriticalSection(&win32_io.lock);
+}
+
+static void
+win32_io_service_enqueue_process(struct win32_process_event *wpe)
+{
+	char	one = 1;
+
+	EnterCriticalSection(&win32_io.lock);
+	if (wpe->active && !wpe->pending) {
+		TAILQ_INSERT_TAIL(&win32_io.process_pending, wpe, entry);
+		wpe->pending = 1;
 		send(win32_io.notify_write, &one, 1, 0);
 	}
 	LeaveCriticalSection(&win32_io.lock);
@@ -324,6 +350,27 @@ win32_io_service_dispatch_writers(void)
 }
 
 static void
+win32_io_service_dispatch_processes(void)
+{
+	struct win32_process_event	*wpe;
+
+	for (;;) {
+		EnterCriticalSection(&win32_io.lock);
+		wpe = TAILQ_FIRST(&win32_io.process_pending);
+		if (wpe != NULL) {
+			TAILQ_REMOVE(&win32_io.process_pending, wpe, entry);
+			wpe->pending = 0;
+		}
+		LeaveCriticalSection(&win32_io.lock);
+		if (wpe == NULL)
+			break;
+
+		if (wpe->exitcb != NULL)
+			wpe->exitcb(wpe->arg);
+	}
+}
+
+static void
 win32_io_service_cb(__unused evutil_socket_t fd, __unused short events,
     __unused void *arg)
 {
@@ -334,6 +381,67 @@ win32_io_service_cb(__unused evutil_socket_t fd, __unused short events,
 
 	win32_io_service_dispatch_readers();
 	win32_io_service_dispatch_writers();
+	win32_io_service_dispatch_processes();
+}
+
+static VOID CALLBACK
+win32_process_event_wait_cb(PVOID arg, __unused BOOLEAN timed_out)
+{
+	struct win32_process_event	*wpe = arg;
+
+	win32_io_service_enqueue_process(wpe);
+}
+
+struct win32_process_event *
+win32_process_event_new(HANDLE process, void (*exitcb)(void *), void *arg)
+{
+	struct win32_process_event	*wpe;
+
+	if (process == NULL || process == INVALID_HANDLE_VALUE)
+		return (NULL);
+	if (win32_io_service_init() != 0)
+		return (NULL);
+
+	wpe = xcalloc(1, sizeof *wpe);
+	wpe->exitcb = exitcb;
+	wpe->arg = arg;
+	wpe->active = 1;
+	if (!RegisterWaitForSingleObject(&wpe->wait, process,
+	    win32_process_event_wait_cb, wpe, INFINITE,
+	    WT_EXECUTEONLYONCE)) {
+		free(wpe);
+		return (NULL);
+	}
+	return (wpe);
+}
+
+void
+win32_process_event_free(struct win32_process_event *wpe)
+{
+	if (wpe == NULL)
+		return;
+	if (win32_io.initialized) {
+		EnterCriticalSection(&win32_io.lock);
+		wpe->active = 0;
+		if (wpe->pending) {
+			TAILQ_REMOVE(&win32_io.process_pending, wpe, entry);
+			wpe->pending = 0;
+		}
+		LeaveCriticalSection(&win32_io.lock);
+	}
+	if (wpe->wait != NULL &&
+	    !UnregisterWaitEx(wpe->wait, INVALID_HANDLE_VALUE)) {
+		log_debug("%s: UnregisterWaitEx failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+	}
+	free(wpe);
+}
+
+void
+win32_process_event_notify(struct win32_process_event *wpe)
+{
+	if (wpe != NULL)
+		win32_io_service_enqueue_process(wpe);
 }
 
 static DWORD WINAPI

@@ -43,6 +43,7 @@ static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
 #ifdef TMUX_WIN32
 static void	job_complete(struct job *);
+static void	job_win32_exit_callback(void *);
 #endif
 
 /* A single job. */
@@ -156,6 +157,7 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	job->event->writecb = job_write_callback;
 	job->event->errorcb = job_error_callback;
 	job->event->cbarg = job;
+	win32_job_set_exit_callback(wj, job_win32_exit_callback, job);
 
 	if (cmd != NULL)
 		job->cmd = xstrdup(cmd);
@@ -475,6 +477,32 @@ job_complete(struct job *job)
 	job_free(job);
 }
 
+static void
+job_win32_exit_callback(void *data)
+{
+	struct job	*job = data;
+	int		 was_dead;
+
+	if (job->win32 == NULL)
+		return;
+	if (!win32_job_exited(job->win32, &job->status))
+		return;
+
+	was_dead = (job->state == JOB_DEAD);
+	if (!was_dead) {
+		log_debug("job died %p: %s, pid %ld", job, job->cmd,
+		    (long) job->pid);
+	}
+
+	if (win32_job_output_done(job->win32)) {
+		job->state = JOB_DEAD;
+		job_complete(job);
+	} else if (!was_dead) {
+		bufferevent_disable(job->event, EV_READ);
+		job->state = JOB_DEAD;
+	}
+}
+
 /* Check for jobs whose Windows process has exited. */
 void
 job_check_died(void)
@@ -484,19 +512,7 @@ job_check_died(void)
 	LIST_FOREACH_SAFE(job, &all_jobs, entry, job1) {
 		if (job->win32 == NULL)
 			continue;
-		if (!win32_job_exited(job->win32, &job->status))
-			continue;
-
-		log_debug("job died %p: %s, pid %ld", job, job->cmd,
-		    (long) job->pid);
-
-		if (win32_job_output_done(job->win32)) {
-			job->state = JOB_DEAD;
-			job_complete(job);
-		} else {
-			bufferevent_disable(job->event, EV_READ);
-			job->state = JOB_DEAD;
-		}
+		job_win32_exit_callback(job);
 	}
 }
 #else
