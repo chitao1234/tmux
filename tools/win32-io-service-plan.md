@@ -448,3 +448,17 @@ The service now exposes explicit writer event reasons to callers:
   while pane, job, tty, and client writers migrate;
 - Win32 client file writes are the first migrated consumer, using explicit
   writer events before sending existing write ACKs or failure callbacks.
+
+## Terminal Writer Event Slice
+
+Win32 terminal output writers now consume explicit writer events:
+
+- the client-side console relay output writer uses write-drained/write-closed
+  events before sending `MSG_WIN32_TTY_OUTPUT_ACK`;
+- the server-side direct terminal output writer uses the same event API before
+  updating redraw accounting or completing graceful tty close;
+- writer event dispatch filters stale drain reasons so callers only receive
+  `WIN32_IO_EVENT_WRITE_DRAINED` when the service writer buffer is actually
+  empty;
+- pane and job stdin writers still use the split compatibility constructor and
+  are the next writer migration targets.

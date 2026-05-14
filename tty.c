@@ -47,6 +47,7 @@ static void	tty_write_callback(tmux_event_fd, short, void *);
 static void	tty_win32_in_event_callback(void *, uint32_t);
 static void	tty_win32_out_callback(void *);
 static void	tty_win32_out_error_callback(void *);
+static void	tty_win32_out_event_callback(void *, uint32_t);
 static int	tty_win32_out_drained(struct tty *);
 #endif
 static void	tty_start_timer_callback(tmux_event_fd, short, void *);
@@ -469,6 +470,18 @@ tty_win32_out_error_callback(void *data)
 	server_client_lost(tty->client);
 }
 
+static void
+tty_win32_out_event_callback(void *data, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_ERROR) {
+		tty_win32_out_error_callback(data);
+		return;
+	}
+	if (events & (WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED))
+		tty_win32_out_callback(data);
+}
+
 static int
 tty_win32_out_drained(struct tty *tty)
 {
@@ -525,9 +538,8 @@ tty_open(struct tty *tty, char **cause)
 		    tty);
 	}
 	if (c->win32_stdout != NULL) {
-		tty->win32_out = win32_handle_writer_new_borrowed(
-		    &c->win32_stdout, tty_win32_out_callback,
-		    tty_win32_out_error_callback, tty);
+		tty->win32_out = win32_handle_writer_new_events_borrowed(
+		    &c->win32_stdout, tty_win32_out_event_callback, tty);
 		if (tty->win32_out == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty output writer");
 			tty_close(tty);

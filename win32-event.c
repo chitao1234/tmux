@@ -449,6 +449,7 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 {
 	enum win32_handle_writer_state	 state;
 	size_t				 buffered;
+	uint32_t			 out;
 
 	EnterCriticalSection(&whw->lock);
 	state = whw->state;
@@ -456,14 +457,17 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 	LeaveCriticalSection(&whw->lock);
 
 	if (whw->eventcb != NULL) {
+		out = events & ~(WIN32_IO_EVENT_WRITE_DRAINED|
+		    WIN32_IO_EVENT_WRITE_CLOSED|WIN32_IO_EVENT_ERROR);
 		if (state == WIN32_HANDLE_WRITER_ERROR)
-			events |= WIN32_IO_EVENT_ERROR;
+			out |= WIN32_IO_EVENT_ERROR;
 		else if (state == WIN32_HANDLE_WRITER_CLOSED)
-			events |= WIN32_IO_EVENT_WRITE_CLOSED;
+			out |= WIN32_IO_EVENT_WRITE_CLOSED;
 		else if ((events & WIN32_IO_EVENT_WRITE_DRAINED) &&
 		    buffered == 0)
-			events |= WIN32_IO_EVENT_WRITE_DRAINED;
-		whw->eventcb(whw->arg, events);
+			out |= WIN32_IO_EVENT_WRITE_DRAINED;
+		if (out != 0)
+			whw->eventcb(whw->arg, out);
 	} else if (state == WIN32_HANDLE_WRITER_ERROR) {
 		if (whw->errorcb != NULL)
 			whw->errorcb(whw->arg);

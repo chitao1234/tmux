@@ -86,6 +86,7 @@ static void		 client_win32_input_start(void);
 static void		 client_win32_input_stop(void);
 static void		 client_win32_output_callback(void *);
 static void		 client_win32_output_error_callback(void *);
+static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
@@ -517,6 +518,18 @@ client_win32_output_error_callback(__unused void *arg)
 		client_exit();
 }
 
+static void
+client_win32_output_event_callback(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_ERROR) {
+		client_win32_output_error_callback(arg);
+		return;
+	}
+	if (events & (WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED))
+		client_win32_output_callback(arg);
+}
+
 static int
 client_win32_output_start(void)
 {
@@ -528,9 +541,8 @@ client_win32_output_start(void)
 		return (-1);
 
 	hout = GetStdHandle(STD_OUTPUT_HANDLE);
-	client_win32_output = win32_handle_writer_new_borrowed(&hout,
-	    client_win32_output_callback, client_win32_output_error_callback,
-	    NULL);
+	client_win32_output = win32_handle_writer_new_events_borrowed(&hout,
+	    client_win32_output_event_callback, NULL);
 	if (client_win32_output == NULL) {
 		log_debug("%s: couldn't create console output writer",
 		    __func__);
