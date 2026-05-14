@@ -33,16 +33,18 @@ enum win32_handle_writer_state {
 	WIN32_HANDLE_WRITER_ERROR
 };
 
-enum win32_io_completion_type {
-	WIN32_IO_COMPLETION_READER,
-	WIN32_IO_COMPLETION_WRITER,
-	WIN32_IO_COMPLETION_PROCESS
+enum win32_io_endpoint_type {
+	WIN32_IO_ENDPOINT_READER,
+	WIN32_IO_ENDPOINT_WRITER,
+	WIN32_IO_ENDPOINT_PROCESS
 };
 
-struct win32_io_completion {
-	TAILQ_ENTRY(win32_io_completion) entry;
-	enum win32_io_completion_type type;
-	void		*ptr;
+struct win32_io_endpoint {
+	TAILQ_ENTRY(win32_io_endpoint) entry;
+	enum win32_io_endpoint_type type;
+	void		*owner;
+	void		(*eventcb)(void *, uint32_t);
+	void		*arg;
 	uint32_t	 events;
 	int		 pending;
 	int		 active;
@@ -136,15 +138,13 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 }
 
 struct win32_handle_event {
-	struct win32_io_completion completion;
+	struct win32_io_endpoint endpoint;
 	HANDLE		 handle;
 	HANDLE		 thread;
 	HANDLE		 stop;
 	HANDLE		 ready;
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
-	void		(*eventcb)(void *, uint32_t);
-	void		 *arg;
 	int		 paused;
 	int		 throttled;
 	enum win32_handle_event_state state;
@@ -152,24 +152,20 @@ struct win32_handle_event {
 };
 
 struct win32_handle_writer {
-	struct win32_io_completion completion;
+	struct win32_io_endpoint endpoint;
 	HANDLE		 handle;
 	HANDLE		 thread;
 	HANDLE		 ready;
 	struct evbuffer	*output;
 	CRITICAL_SECTION lock;
-	void		(*eventcb)(void *, uint32_t);
-	void		 *arg;
 	enum win32_handle_writer_state state;
 	int		 borrowed;
 	int		 stop;
 };
 
 struct win32_process_event {
-	struct win32_io_completion completion;
+	struct win32_io_endpoint endpoint;
 	HANDLE		 wait;
-	void		(*eventcb)(void *, uint32_t);
-	void		 *arg;
 };
 
 struct win32_io_service {
@@ -177,7 +173,7 @@ struct win32_io_service {
 	SOCKET		 notify_write;
 	struct event	 event;
 	CRITICAL_SECTION lock;
-	TAILQ_HEAD(, win32_io_completion) pending;
+	TAILQ_HEAD(, win32_io_endpoint) pending;
 	int		 initialized;
 	int		 event_added;
 };
@@ -190,20 +186,21 @@ static struct win32_io_service win32_io;
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 
 static int	win32_io_service_init(void);
-static void	win32_io_completion_init(struct win32_io_completion *,
-		     enum win32_io_completion_type, void *);
-static void	win32_io_service_enqueue_completion(
-		     struct win32_io_completion *, uint32_t);
-static void	win32_io_service_deactivate_completion(
-		     struct win32_io_completion *);
+static void	win32_io_endpoint_init(struct win32_io_endpoint *,
+		     enum win32_io_endpoint_type, void *,
+		     void (*)(void *, uint32_t), void *);
+static void	win32_io_service_enqueue_endpoint(struct win32_io_endpoint *,
+		     uint32_t);
+static void	win32_io_service_deactivate_endpoint(
+		     struct win32_io_endpoint *);
 static void	win32_io_service_enqueue_reader(struct win32_handle_event *);
 static void	win32_io_service_enqueue_writer(struct win32_handle_writer *,
 		     uint32_t);
 static void	win32_io_service_enqueue_process(struct win32_process_event *,
 		     uint32_t);
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
-static void	win32_io_service_dispatch_completion(
-		     struct win32_io_completion *, uint32_t);
+static void	win32_io_service_dispatch_endpoint(
+		     struct win32_io_endpoint *, uint32_t);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static int	win32_handle_event_error_is_eof(DWORD);
@@ -350,41 +347,43 @@ win32_io_service_fini(void)
 }
 
 static void
-win32_io_completion_init(struct win32_io_completion *completion,
-    enum win32_io_completion_type type, void *ptr)
+win32_io_endpoint_init(struct win32_io_endpoint *endpoint,
+    enum win32_io_endpoint_type type, void *owner,
+    void (*eventcb)(void *, uint32_t), void *arg)
 {
-	completion->type = type;
-	completion->ptr = ptr;
-	completion->active = 1;
+	endpoint->type = type;
+	endpoint->owner = owner;
+	endpoint->eventcb = eventcb;
+	endpoint->arg = arg;
+	endpoint->active = 1;
 }
 
 static void
-win32_io_service_enqueue_completion(struct win32_io_completion *completion,
+win32_io_service_enqueue_endpoint(struct win32_io_endpoint *endpoint,
     uint32_t events)
 {
 	char	one = 1;
 
 	EnterCriticalSection(&win32_io.lock);
-	completion->events |= events;
-	if (completion->active && !completion->pending) {
-		TAILQ_INSERT_TAIL(&win32_io.pending, completion, entry);
-		completion->pending = 1;
+	endpoint->events |= events;
+	if (endpoint->active && !endpoint->pending) {
+		TAILQ_INSERT_TAIL(&win32_io.pending, endpoint, entry);
+		endpoint->pending = 1;
 		send(win32_io.notify_write, &one, 1, 0);
 	}
 	LeaveCriticalSection(&win32_io.lock);
 }
 
 static void
-win32_io_service_deactivate_completion(
-    struct win32_io_completion *completion)
+win32_io_service_deactivate_endpoint(struct win32_io_endpoint *endpoint)
 {
 	if (!win32_io.initialized)
 		return;
 	EnterCriticalSection(&win32_io.lock);
-	completion->active = 0;
-	if (completion->pending) {
-		TAILQ_REMOVE(&win32_io.pending, completion, entry);
-		completion->pending = 0;
+	endpoint->active = 0;
+	if (endpoint->pending) {
+		TAILQ_REMOVE(&win32_io.pending, endpoint, entry);
+		endpoint->pending = 0;
 	}
 	LeaveCriticalSection(&win32_io.lock);
 }
@@ -402,21 +401,21 @@ win32_io_service_enqueue_reader(struct win32_handle_event *whe)
 	else
 		events = WIN32_IO_EVENT_ERROR;
 	LeaveCriticalSection(&whe->lock);
-	win32_io_service_enqueue_completion(&whe->completion, events);
+	win32_io_service_enqueue_endpoint(&whe->endpoint, events);
 }
 
 static void
 win32_io_service_enqueue_writer(struct win32_handle_writer *whw,
     uint32_t events)
 {
-	win32_io_service_enqueue_completion(&whw->completion, events);
+	win32_io_service_enqueue_endpoint(&whw->endpoint, events);
 }
 
 static void
 win32_io_service_enqueue_process(struct win32_process_event *wpe,
     uint32_t events)
 {
-	win32_io_service_enqueue_completion(&wpe->completion, events);
+	win32_io_service_enqueue_endpoint(&wpe->endpoint, events);
 }
 
 static void
@@ -438,7 +437,7 @@ win32_io_service_dispatch_reader(struct win32_handle_event *whe,
 	if (buffered != 0)
 		events |= WIN32_IO_EVENT_READ;
 
-	whe->eventcb(whe->arg, events);
+	whe->endpoint.eventcb(whe->endpoint.arg, events);
 }
 
 static void
@@ -463,7 +462,7 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 	else if ((events & WIN32_IO_EVENT_WRITE_DRAINED) && buffered == 0)
 		out |= WIN32_IO_EVENT_WRITE_DRAINED;
 	if (out != 0)
-		whw->eventcb(whw->arg, out);
+		whw->endpoint.eventcb(whw->endpoint.arg, out);
 }
 
 static void
@@ -471,46 +470,46 @@ win32_io_service_dispatch_process(struct win32_process_event *wpe,
     uint32_t events)
 {
 	if (events & WIN32_IO_EVENT_PROCESS_EXIT)
-		wpe->eventcb(wpe->arg, events);
+		wpe->endpoint.eventcb(wpe->endpoint.arg, events);
 }
 
 static void
-win32_io_service_dispatch_completion(struct win32_io_completion *completion,
+win32_io_service_dispatch_endpoint(struct win32_io_endpoint *endpoint,
     uint32_t events)
 {
-	switch (completion->type) {
-	case WIN32_IO_COMPLETION_READER:
-		win32_io_service_dispatch_reader(completion->ptr, events);
+	switch (endpoint->type) {
+	case WIN32_IO_ENDPOINT_READER:
+		win32_io_service_dispatch_reader(endpoint->owner, events);
 		break;
-	case WIN32_IO_COMPLETION_WRITER:
-		win32_io_service_dispatch_writer(completion->ptr, events);
+	case WIN32_IO_ENDPOINT_WRITER:
+		win32_io_service_dispatch_writer(endpoint->owner, events);
 		break;
-	case WIN32_IO_COMPLETION_PROCESS:
-		win32_io_service_dispatch_process(completion->ptr, events);
+	case WIN32_IO_ENDPOINT_PROCESS:
+		win32_io_service_dispatch_process(endpoint->owner, events);
 		break;
 	}
 }
 
 static void
-win32_io_service_dispatch_completions(void)
+win32_io_service_dispatch_endpoints(void)
 {
-	struct win32_io_completion	*completion;
-	uint32_t			 events;
+	struct win32_io_endpoint	*endpoint;
+	uint32_t		 events;
 
 	for (;;) {
 		EnterCriticalSection(&win32_io.lock);
-		completion = TAILQ_FIRST(&win32_io.pending);
-		if (completion != NULL) {
-			TAILQ_REMOVE(&win32_io.pending, completion, entry);
-			completion->pending = 0;
-			events = completion->events;
-			completion->events = 0;
+		endpoint = TAILQ_FIRST(&win32_io.pending);
+		if (endpoint != NULL) {
+			TAILQ_REMOVE(&win32_io.pending, endpoint, entry);
+			endpoint->pending = 0;
+			events = endpoint->events;
+			endpoint->events = 0;
 		}
 		LeaveCriticalSection(&win32_io.lock);
-		if (completion == NULL)
+		if (endpoint == NULL)
 			break;
 
-		win32_io_service_dispatch_completion(completion, events);
+		win32_io_service_dispatch_endpoint(endpoint, events);
 	}
 }
 
@@ -523,7 +522,7 @@ win32_io_service_cb(__unused evutil_socket_t fd, __unused short events,
 	while (recv(win32_io.notify_read, buf, sizeof buf, 0) > 0)
 		;
 
-	win32_io_service_dispatch_completions();
+	win32_io_service_dispatch_endpoints();
 }
 
 static VOID CALLBACK
@@ -548,10 +547,8 @@ win32_process_event_new_events(HANDLE process,
 		return (NULL);
 
 	wpe = xcalloc(1, sizeof *wpe);
-	wpe->eventcb = eventcb;
-	wpe->arg = arg;
-	win32_io_completion_init(&wpe->completion, WIN32_IO_COMPLETION_PROCESS,
-	    wpe);
+	win32_io_endpoint_init(&wpe->endpoint, WIN32_IO_ENDPOINT_PROCESS, wpe,
+	    eventcb, arg);
 	if (!RegisterWaitForSingleObject(&wpe->wait, process,
 	    win32_process_event_wait_cb, wpe, INFINITE,
 	    WT_EXECUTEONLYONCE)) {
@@ -566,7 +563,7 @@ win32_process_event_free(struct win32_process_event *wpe)
 {
 	if (wpe == NULL)
 		return;
-	win32_io_service_deactivate_completion(&wpe->completion);
+	win32_io_service_deactivate_endpoint(&wpe->endpoint);
 	if (wpe->wait != NULL &&
 	    !UnregisterWaitEx(wpe->wait, INVALID_HANDLE_VALUE)) {
 		log_debug("%s: UnregisterWaitEx failed: %s", __func__,
@@ -691,8 +688,6 @@ win32_handle_event_new_events(HANDLE handle,
 		free(whe);
 		return (NULL);
 	}
-	whe->eventcb = eventcb;
-	whe->arg = arg;
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (whe->stop == NULL) {
 		evbuffer_free(whe->input);
@@ -707,8 +702,8 @@ win32_handle_event_new_events(HANDLE handle,
 		return (NULL);
 	}
 	InitializeCriticalSection(&whe->lock);
-	win32_io_completion_init(&whe->completion, WIN32_IO_COMPLETION_READER,
-	    whe);
+	win32_io_endpoint_init(&whe->endpoint, WIN32_IO_ENDPOINT_READER, whe,
+	    eventcb, arg);
 	whe->thread = CreateThread(NULL, 0, win32_handle_event_thread, whe, 0,
 	    NULL);
 	if (whe->thread == NULL) {
@@ -729,7 +724,7 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		CancelSynchronousIo(whe->thread);
 		WaitForSingleObject(whe->thread, INFINITE);
 	}
-	win32_io_service_deactivate_completion(&whe->completion);
+	win32_io_service_deactivate_endpoint(&whe->endpoint);
 	if (whe->input != NULL)
 		evbuffer_free(whe->input);
 	if (whe->thread != NULL)
@@ -916,8 +911,6 @@ win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
 
 	whw = xcalloc(1, sizeof *whw);
 	whw->handle = *handle;
-	whw->eventcb = eventcb;
-	whw->arg = arg;
 	whw->borrowed = borrowed;
 	whw->output = evbuffer_new();
 	if (whw->output == NULL) {
@@ -931,8 +924,8 @@ win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
 		return (NULL);
 	}
 	InitializeCriticalSection(&whw->lock);
-	win32_io_completion_init(&whw->completion, WIN32_IO_COMPLETION_WRITER,
-	    whw);
+	win32_io_endpoint_init(&whw->endpoint, WIN32_IO_ENDPOINT_WRITER, whw,
+	    eventcb, arg);
 	whw->thread = CreateThread(NULL, 0, win32_handle_writer_thread, whw, 0,
 	    NULL);
 	if (whw->thread == NULL) {
@@ -973,7 +966,7 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 	LeaveCriticalSection(&whw->lock);
 	CancelSynchronousIo(whw->thread);
 	WaitForSingleObject(whw->thread, INFINITE);
-	win32_io_service_deactivate_completion(&whw->completion);
+	win32_io_service_deactivate_endpoint(&whw->endpoint);
 	CloseHandle(whw->thread);
 	CloseHandle(whw->ready);
 	evbuffer_free(whw->output);

@@ -512,3 +512,18 @@ Two unused writer compatibility queries have been removed:
 - removing them keeps the public writer surface focused on enqueue,
   queue-depth, drain, writable, and close operations that current callers still
   need.
+
+## Endpoint Scaffold Slice
+
+The internal service queue now carries endpoint records instead of generic
+completion records:
+
+- `struct win32_io_endpoint` owns the queued event mask, pending/active state,
+  endpoint kind, owner pointer, and tmux-thread event callback;
+- reader, writer, and process compatibility objects embed this common endpoint
+  record instead of each keeping separate callback fields;
+- dispatch still routes through reader, writer, and process compatibility
+  wrappers, so public pane/job/tty/file code remains unchanged;
+- this is a structural step toward final endpoint objects. The read and write
+  backends are still worker-thread based, and process waits still use
+  `RegisterWaitForSingleObject`.
