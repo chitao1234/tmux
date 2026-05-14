@@ -864,3 +864,24 @@ This does not add a new IPC writable callback because `proc_send()` currently
 reports only queueing success or hard failure, not socket-level backpressure.
 The slice fixes the data-loss edge in the existing contract by making unsent
 input ownership explicit and making failure terminal rather than silent.
+
+## Terminal Output Deferral Slice
+
+Win32 terminal output no longer recursively re-enters `tty_write_callback()` to
+continue draining buffered output:
+
+- `tty->event_out` is initialized for the active console relay path and for
+  server-side direct Win32 output handles;
+- Win32 output progress now schedules a zero-timeout libevent callback through
+  `tty_write_schedule()` instead of calling the write callback directly;
+- ACK-driven console relay backpressure is preserved: new output is scheduled
+  after `MSG_WIN32_TTY_OUTPUT_ACK` frees pending capacity;
+- direct Win32 output-handle drains still resume from the service writer event
+  callback, but continuation is deferred through libevent instead of stack
+  recursion;
+- Unix fd output scheduling remains unchanged and still uses the writable fd
+  event.
+
+This keeps all terminal output continuation on the tmux event loop, avoids
+unbounded callback recursion during large redraws, and leaves the existing
+Win32 service writer/console ACK accounting intact.

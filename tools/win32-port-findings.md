@@ -269,22 +269,27 @@ Resolution:
   transient writable edge, so this fix makes failure explicit rather than adding
   a fake retry loop.
 
-### Win32 terminal write path uses synchronous recursion
+### Fixed: Win32 terminal write path uses synchronous recursion
 
 File:
 
-- [`tty.c`](../tty.c): Win32 `tty_write_callback()` paths call themselves
-  recursively until buffers are empty or pending output hits a limit.
+- [`tty.c`](../tty.c): Win32 terminal output continuation now goes through
+  `tty_write_schedule()` and `tty->event_out`.
 
-Impact:
+Original impact:
 
 Large redraws can build stack depth and monopolize the event loop. This is a
 fragile replacement for libevent write scheduling.
 
-Fix direction:
+Resolution:
 
-- Replace recursive re-entry with scheduled callbacks or event-loop deferral.
-- Preserve the pending-output limit but yield between chunks.
+- `tty->event_out` is initialized for the active Win32 console relay path and
+  the direct Win32 output-handle path.
+- Remaining buffered output is resumed with a zero-timeout event instead of a
+  direct recursive `tty_write_callback()` call.
+- Console relay ACKs and direct writer drain events still control when more
+  bytes may be scheduled, preserving existing backpressure accounting.
+- Unix fd output scheduling is unchanged.
 
 ### Fixed: Win32 `pipe-pane` teardown loses helper job ownership
 

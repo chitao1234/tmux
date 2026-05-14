@@ -43,6 +43,7 @@ static int	tty_log_fd = -1;
 
 static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
+static void	tty_write_schedule(struct tty *);
 #ifdef TMUX_WIN32
 static void	tty_win32_in_event_callback(void *, uint32_t);
 static void	tty_win32_out_callback(void *);
@@ -386,39 +387,33 @@ write_done:
 after_redraw:
 #endif
 	if (EVBUFFER_LENGTH(tty->out) != 0) {
-#ifdef TMUX_WIN32
-		if (c->win32_console) {
-			tty_write_callback(-1, EV_WRITE, tty);
-			return;
-		}
-		if (tty->win32_out != NULL) {
-			tty_write_callback(-1, EV_WRITE, tty);
-			return;
-		}
-#endif
-		event_add(&tty->event_out, NULL);
+		tty_write_schedule(tty);
 	}
 }
 
-void
-tty_write_pending(struct tty *tty)
+static void
+tty_write_schedule(struct tty *tty)
 {
-	struct client	*c = tty->client;
-
-	if (~tty->flags & TTY_STARTED)
-		return;
 #ifdef TMUX_WIN32
-	if (c->win32_console) {
-		tty_write_callback(-1, EV_WRITE, tty);
-		return;
-	}
-	if (tty->win32_out != NULL) {
-		tty_write_callback(-1, EV_WRITE, tty);
+	struct client	*c = tty->client;
+	struct timeval	 tv = { 0, 0 };
+
+	if (c->win32_console || tty->win32_out != NULL) {
+		if (!event_pending(&tty->event_out, EV_TIMEOUT, NULL))
+			evtimer_add(&tty->event_out, &tv);
 		return;
 	}
 #endif
 	if (!event_pending(&tty->event_out, EV_WRITE, NULL))
 		event_add(&tty->event_out, NULL);
+}
+
+void
+tty_write_pending(struct tty *tty)
+{
+	if (~tty->flags & TTY_STARTED)
+		return;
+	tty_write_schedule(tty);
 }
 
 #ifdef TMUX_WIN32
@@ -458,7 +453,7 @@ tty_win32_out_callback(void *data)
 		tty_close(tty);
 		return;
 	}
-	tty_write_callback(-1, EV_WRITE, tty);
+	tty_write_schedule(tty);
 }
 
 static void
@@ -533,10 +528,11 @@ tty_open(struct tty *tty, char **cause)
 #ifndef TMUX_WIN32
 	event_set(&tty->event_out, c->fd, EV_WRITE, tty_write_callback, tty);
 #else
-	if (c->win32_stdout == NULL && !c->win32_console && c->fd != -1) {
-		event_set(&tty->event_out, c->fd, EV_WRITE, tty_write_callback,
-		    tty);
-	}
+	if (c->win32_console || c->win32_stdout != NULL)
+		evtimer_set(&tty->event_out, tty_write_callback, tty);
+	else if (c->fd != -1)
+		event_set(&tty->event_out, c->fd, EV_WRITE,
+		    tty_write_callback, tty);
 	if (c->win32_stdout != NULL) {
 		tty->win32_out = win32_io_writer_new_worker_borrowed(
 		    &c->win32_stdout, tty_win32_out_event_callback, tty);
@@ -726,7 +722,7 @@ tty_stop_tty(struct tty *tty)
 #ifdef TMUX_WIN32
 	if (!c->win32_console && tty->win32_in == NULL)
 		event_del(&tty->event_in);
-	if (!c->win32_console && tty->win32_out == NULL)
+	if (event_initialized(&tty->event_out))
 		event_del(&tty->event_out);
 #else
 	event_del(&tty->event_in);
@@ -812,9 +808,7 @@ tty_close(struct tty *tty)
 			tty->win32_out = NULL;
 			tty->win32_out_pending = 0;
 		}
-		if (event_initialized(&tty->event_out) &&
-		    !tty->client->win32_console &&
-		    tty->win32_out == NULL)
+		if (event_initialized(&tty->event_out))
 			event_del(&tty->event_out);
 #else
 		event_del(&tty->event_in);
@@ -973,18 +967,7 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 	if (tty_log_fd != -1)
 		write(tty_log_fd, buf, len);
 	if (tty->flags & TTY_STARTED) {
-#ifdef TMUX_WIN32
-		if (c->win32_console) {
-			tty_write_callback(-1, EV_WRITE, tty);
-			return;
-		}
-		if (tty->win32_out != NULL) {
-			tty_write_callback(-1, EV_WRITE, tty);
-			return;
-		}
-#endif
-		if (!event_pending(&tty->event_out, EV_WRITE, NULL))
-			event_add(&tty->event_out, NULL);
+		tty_write_schedule(tty);
 	}
 }
 
