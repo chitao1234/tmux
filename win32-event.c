@@ -163,6 +163,7 @@ struct win32_handle_event {
 	HANDLE		 thread;
 	HANDLE		 stop;
 	HANDLE		 ready;
+	HANDLE		 changed;
 	HANDLE		 complete;
 	OVERLAPPED	 overlapped;
 	char		 iocp_buf[8192];
@@ -260,9 +261,16 @@ static int	win32_unregister_process_wait(struct win32_process_event *,
 		     const char *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
+static int	win32_handle_event_reading_enabled(
+		     struct win32_handle_event *);
+static int	win32_handle_event_prepare_console_wait(
+		     struct win32_handle_event *);
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
 static void	win32_handle_event_iocp_complete(
 		     struct win32_handle_event *, DWORD, DWORD);
+static int	win32_handle_event_read_once(struct win32_handle_event *);
+static DWORD WINAPI win32_handle_event_thread(void *);
+static DWORD WINAPI win32_handle_event_console_thread(void *);
 static uint32_t	win32_handle_writer_iocp_start(
 		     struct win32_handle_writer *);
 static void	win32_handle_writer_iocp_complete(
@@ -884,6 +892,7 @@ static void
 win32_handle_event_update_ready(struct win32_handle_event *whe)
 {
 	size_t	buffered;
+	int	ready;
 
 	if (whe->backend == WIN32_HANDLE_EVENT_IOCP) {
 		uint32_t events = win32_handle_event_iocp_start(whe);
@@ -902,11 +911,40 @@ win32_handle_event_update_ready(struct win32_handle_event *whe)
 		whe->throttled = 0;
 	if (whe->ready == NULL)
 		return;
-	if (!whe->paused && !whe->throttled &&
-	    whe->state == WIN32_HANDLE_EVENT_RUNNING)
+	ready = (!whe->paused && !whe->throttled &&
+	    whe->state == WIN32_HANDLE_EVENT_RUNNING);
+	if (ready)
 		SetEvent(whe->ready);
 	else
 		ResetEvent(whe->ready);
+	if (whe->changed != NULL)
+		SetEvent(whe->changed);
+}
+
+static int
+win32_handle_event_reading_enabled(struct win32_handle_event *whe)
+{
+	int	ready;
+
+	EnterCriticalSection(&whe->lock);
+	ready = (!whe->paused && !whe->throttled &&
+	    whe->state == WIN32_HANDLE_EVENT_RUNNING);
+	LeaveCriticalSection(&whe->lock);
+	return (ready);
+}
+
+static int
+win32_handle_event_prepare_console_wait(struct win32_handle_event *whe)
+{
+	int	ready;
+
+	EnterCriticalSection(&whe->lock);
+	ready = (!whe->paused && !whe->throttled &&
+	    whe->state == WIN32_HANDLE_EVENT_RUNNING);
+	if (ready && whe->changed != NULL)
+		ResetEvent(whe->changed);
+	LeaveCriticalSection(&whe->lock);
+	return (ready);
 }
 
 static uint32_t
@@ -1017,16 +1055,67 @@ win32_handle_event_error_is_eof(DWORD error)
 	    error == ERROR_NO_DATA);
 }
 
+static int
+win32_handle_event_read_once(struct win32_handle_event *whe)
+{
+	DWORD				 nread;
+	enum win32_handle_event_state	 state;
+	char				 buf[8192];
+	u_int				 i;
+
+	if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
+		DWORD error = GetLastError();
+
+		EnterCriticalSection(&whe->lock);
+		if (win32_handle_event_error_is_eof(error))
+			whe->state = WIN32_HANDLE_EVENT_EOF;
+		else
+			whe->state = WIN32_HANDLE_EVENT_ERROR;
+		whe->error = error;
+		win32_handle_event_update_ready(whe);
+		LeaveCriticalSection(&whe->lock);
+		win32_io_service_enqueue_reader(whe);
+		return (-1);
+	}
+	if (nread == 0) {
+		EnterCriticalSection(&whe->lock);
+		whe->state = WIN32_HANDLE_EVENT_EOF;
+		whe->error = ERROR_SUCCESS;
+		win32_handle_event_update_ready(whe);
+		LeaveCriticalSection(&whe->lock);
+		win32_io_service_enqueue_reader(whe);
+		return (-1);
+	}
+	if (log_get_level() > 1) {
+		for (i = 0; i < nread; i++) {
+			if (buf[i] == '\003') {
+				log_debug("%s: read Ctrl-C byte", __func__);
+				break;
+			}
+		}
+	}
+	EnterCriticalSection(&whe->lock);
+	if (evbuffer_add(whe->input, buf, nread) != 0) {
+		whe->state = WIN32_HANDLE_EVENT_ERROR;
+		whe->error = ERROR_NOT_ENOUGH_MEMORY;
+	}
+	if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
+		whe->throttled = 1;
+	win32_handle_event_update_ready(whe);
+	state = whe->state;
+	LeaveCriticalSection(&whe->lock);
+	win32_io_service_enqueue_reader(whe);
+	if (state != WIN32_HANDLE_EVENT_RUNNING)
+		return (-1);
+	return (0);
+}
+
 static DWORD WINAPI
 win32_handle_event_thread(void *arg)
 {
 	struct win32_handle_event	*whe = arg;
-	char				 buf[8192];
 	HANDLE				 events[2];
 	DWORD				 wait;
-	DWORD				 nread;
-	enum win32_handle_event_state	 state;
-	u_int				 i;
 
 	events[0] = whe->stop;
 	events[1] = whe->ready;
@@ -1034,50 +1123,43 @@ win32_handle_event_thread(void *arg)
 		wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
 		if (wait != WAIT_OBJECT_0 + 1)
 			break;
-		if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
-			DWORD error = GetLastError();
+		if (win32_handle_event_read_once(whe) != 0)
+			break;
+	}
+	return (0);
+}
 
-			EnterCriticalSection(&whe->lock);
-			if (win32_handle_event_error_is_eof(error))
-				whe->state = WIN32_HANDLE_EVENT_EOF;
-			else
-				whe->state = WIN32_HANDLE_EVENT_ERROR;
-			whe->error = error;
-			win32_handle_event_update_ready(whe);
-			LeaveCriticalSection(&whe->lock);
-			win32_io_service_enqueue_reader(whe);
+static DWORD WINAPI
+win32_handle_event_console_thread(void *arg)
+{
+	struct win32_handle_event	*whe = arg;
+	HANDLE				 ready_events[2], read_events[3];
+	DWORD				 wait;
+
+	ready_events[0] = whe->stop;
+	ready_events[1] = whe->ready;
+	read_events[0] = whe->stop;
+	read_events[1] = whe->changed;
+	read_events[2] = whe->handle;
+	for (;;) {
+		wait = WaitForMultipleObjects(2, ready_events, FALSE,
+		    INFINITE);
+		if (wait != WAIT_OBJECT_0 + 1)
 			break;
-		}
-		if (nread == 0) {
-			EnterCriticalSection(&whe->lock);
-			whe->state = WIN32_HANDLE_EVENT_EOF;
-			whe->error = ERROR_SUCCESS;
-			win32_handle_event_update_ready(whe);
-			LeaveCriticalSection(&whe->lock);
-			win32_io_service_enqueue_reader(whe);
+
+		if (!win32_handle_event_prepare_console_wait(whe))
+			continue;
+		wait = WaitForMultipleObjects(3, read_events, FALSE,
+		    INFINITE);
+		if (wait == WAIT_OBJECT_0)
 			break;
-		}
-		if (log_get_level() > 1) {
-			for (i = 0; i < nread; i++) {
-				if (buf[i] == '\003') {
-					log_debug("%s: read Ctrl-C byte",
-					    __func__);
-					break;
-				}
-			}
-		}
-		EnterCriticalSection(&whe->lock);
-		if (evbuffer_add(whe->input, buf, nread) != 0) {
-			whe->state = WIN32_HANDLE_EVENT_ERROR;
-			whe->error = ERROR_NOT_ENOUGH_MEMORY;
-		}
-		if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
-			whe->throttled = 1;
-		win32_handle_event_update_ready(whe);
-		state = whe->state;
-		LeaveCriticalSection(&whe->lock);
-		win32_io_service_enqueue_reader(whe);
-		if (state != WIN32_HANDLE_EVENT_RUNNING)
+		if (wait == WAIT_OBJECT_0 + 1)
+			continue;
+		if (wait != WAIT_OBJECT_0 + 2)
+			break;
+		if (!win32_handle_event_reading_enabled(whe))
+			continue;
+		if (win32_handle_event_read_once(whe) != 0)
 			break;
 	}
 	return (0);
@@ -1117,11 +1199,26 @@ win32_io_reader_new_worker(HANDLE handle, enum win32_handle_event_backend backen
 		free(whe);
 		return (NULL);
 	}
+	if (backend == WIN32_HANDLE_EVENT_CONSOLE) {
+		whe->changed = CreateEventW(NULL, TRUE, FALSE, NULL);
+		if (whe->changed == NULL) {
+			CloseHandle(whe->ready);
+			CloseHandle(whe->stop);
+			evbuffer_free(whe->input);
+			free(whe);
+			return (NULL);
+		}
+	}
 	InitializeCriticalSection(&whe->lock);
 	win32_io_endpoint_init(&whe->endpoint, WIN32_IO_ENDPOINT_READER, whe,
 	    eventcb, arg);
-	whe->thread = CreateThread(NULL, 0, win32_handle_event_thread, whe, 0,
-	    NULL);
+	if (backend == WIN32_HANDLE_EVENT_CONSOLE) {
+		whe->thread = CreateThread(NULL, 0,
+		    win32_handle_event_console_thread, whe, 0, NULL);
+	} else {
+		whe->thread = CreateThread(NULL, 0, win32_handle_event_thread,
+		    whe, 0, NULL);
+	}
 	if (whe->thread == NULL) {
 		win32_handle_event_free(whe);
 		return (NULL);
@@ -1250,6 +1347,8 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		CloseHandle(whe->stop);
 	if (whe->ready != NULL)
 		CloseHandle(whe->ready);
+	if (whe->changed != NULL)
+		CloseHandle(whe->changed);
 	if (whe->complete != NULL)
 		CloseHandle(whe->complete);
 	DeleteCriticalSection(&whe->lock);

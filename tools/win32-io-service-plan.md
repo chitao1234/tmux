@@ -1126,6 +1126,27 @@ This keeps the existing `RegisterWaitForSingleObject()` backend. It only
 applies the same bounded teardown rule already used for worker and IOCP
 endpoints.
 
+## Console Input Wait Slice
+
+Console input no longer uses the same always-blocked `ReadFile()` worker loop
+as generic borrowed handles:
+
+- the console reader backend waits on the console input handle before issuing
+  each `ReadFile()`;
+- pause, resume, stop, and read watermark behavior still use the same ready and
+  stop events as the existing reader endpoint, with a backend-local change
+  event so pause/watermark changes interrupt a console-readiness wait before
+  the backend issues another `ReadFile()`;
+- console input bytes, EOF, and error completion are still delivered through
+  the shared I/O service queue and existing `MSG_WIN32_TTY_INPUT` relay path;
+- non-console stdio and direct terminal readers continue to use the generic
+  blocking worker fallback.
+
+This is a console-proactor bridge, not the final console backend. It removes
+the most fragile part of console input shutdown by avoiding a permanent
+blocking console read while keeping the external endpoint and protocol
+semantics unchanged.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1133,8 +1154,9 @@ configuration, popup editor file, and prompt-history paths now use the Win32
 I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
-- console input and output still use worker threads, but they are now isolated
-  in dedicated console backends until a dedicated console proactor exists;
+- console input uses a console-handle wait loop before reading, while console
+  output still uses a worker thread isolated in a dedicated
+  UTF-8/`WriteConsoleW` backend until a fuller console proactor exists;
 - direct terminal handles still use the purpose-specific terminal
   worker-fallback constructors, choosing the console backend only when the
   borrowed output handle is an actual console;
