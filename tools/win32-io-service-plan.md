@@ -695,3 +695,20 @@ Remaining worker-backed endpoints are now named as explicit fallbacks:
 This is an API clarity cleanup, not a backend migration. The worker fallback is
 still intentional for console and stdio handles until a dedicated console
 proactor preserves the current UTF-8 and `WriteConsoleW` behavior.
+
+## Dead Pipe Helper Removal Slice
+
+The stale synchronous pipe wrapper has been removed from the Win32 pane/job
+implementation:
+
+- pane and job creation already uses `win32_make_input_pipe()` and
+  `win32_make_output_pipe()`, which request overlapped parent-side handles for
+  the I/O service endpoints;
+- the old `win32_make_pipe()` wrapper only created a synchronous pair and had
+  no callers after the overlapped pipe migration;
+- removing it eliminates a pre-IOCP helper and keeps the remaining pipe
+  creation API aligned with endpoint direction and backend requirements.
+
+This is intentionally narrow cleanup. The underlying named-pipe helper remains
+because it still creates the direction-specific overlapped pipe pairs used by
+ConPTY panes and Win32 jobs.

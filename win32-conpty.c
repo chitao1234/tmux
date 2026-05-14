@@ -207,14 +207,6 @@ fail:
 }
 
 static int
-win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
-    int inherit_write)
-{
-	return (win32_make_pipe_flags(readp, writep, inherit_read,
-	    inherit_write, 0, 0));
-}
-
-static int
 win32_make_output_pipe(HANDLE *readp, HANDLE *writep)
 {
 	return (win32_make_pipe_flags(readp, writep, 0, 1,
