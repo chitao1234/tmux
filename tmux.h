@@ -1991,6 +1991,7 @@ struct client_file {
 	size_t				 write_pending;
 #ifdef TMUX_WIN32
 	struct win32_handle_writer	*win32_writer;
+	struct win32_handle_event	*win32_reader;
 #endif
 
 	int				 flags;

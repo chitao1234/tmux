@@ -343,3 +343,18 @@ Typed completions now carry explicit event reasons:
 - this is still internal metadata, not the final public endpoint API, but it is
   the bridge from kind-based completions to the planned `WIN32_IO_*` event
   vocabulary.
+
+## File Read Service Slice
+
+Win32 client file reads now use the shared service reader for filesystem paths:
+
+- `struct client_file` can own a `win32_handle_event` reader as well as a
+  writer;
+- client-side file reads opened from a path use the Win32 handle reader instead
+  of a synchronous `read()` loop in the client event path;
+- read data is still sent with the existing `MSG_READ` protocol and EOF/error
+  completion is still reported with `MSG_READ_DONE`;
+- cancel and setup-failure paths free the reader, close the descriptor, and
+  remove the file record through the normal `file_free()` path;
+- standard input stream reads still use the existing fd/bufferevent path until
+  console/stdin handle ownership is migrated more broadly.

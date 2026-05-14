@@ -47,6 +47,8 @@ static void	file_write_acknowledge(struct client_file *, size_t, int);
 #ifdef TMUX_WIN32
 static void	file_write_win32_callback(void *);
 static void	file_write_win32_error_callback(void *);
+static void	file_read_win32_callback(void *);
+static void	file_read_win32_done_callback(void *);
 static int	file_write_console_text(struct client_file *, const char *,
 		    size_t);
 #endif
@@ -162,6 +164,8 @@ file_free(struct client_file *cf)
 #ifdef TMUX_WIN32
 	if (cf->win32_writer != NULL)
 		win32_handle_writer_free(cf->win32_writer);
+	if (cf->win32_reader != NULL)
+		win32_handle_event_free(cf->win32_reader);
 #endif
 
 	if (cf->tree != NULL)
@@ -799,46 +803,94 @@ file_write_win32_error_callback(void *arg)
 }
 
 static void
-file_read_sync(struct client_file *cf)
+file_read_win32_close(struct client_file *cf)
 {
-	struct msg_read_data	*msg;
-	struct msg_read_done	 done;
-	ssize_t			 n;
-	size_t			 msgsize, msglen, readsize;
+	int	fd;
 
-	readsize = MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg;
-	msgsize = sizeof *msg + readsize;
-	msg = xmalloc(msgsize);
-
-	for (;;) {
-		n = read(cf->fd, msg + 1, readsize);
-		if (n == -1) {
-			if (errno == EINTR)
-				continue;
-			log_debug("read error file %d: %s", cf->stream,
-			    strerror(errno));
-			done.error = errno;
-			break;
-		}
-		if (n == 0) {
-			done.error = 0;
-			break;
-		}
-
-		log_debug("read %zd from file %d", n, cf->stream);
-		msglen = (sizeof *msg) + n;
-		msg->stream = cf->stream;
-		proc_send(cf->peer, MSG_READ, -1, msg, msglen);
+	if (cf->win32_reader != NULL) {
+		win32_handle_event_free(cf->win32_reader);
+		cf->win32_reader = NULL;
 	}
-
-	free(msg);
-	done.stream = cf->stream;
-	proc_send(cf->peer, MSG_READ_DONE, -1, &done, sizeof done);
-
-	close(cf->fd);
+	fd = cf->fd;
 	cf->fd = -1;
-	RB_REMOVE(client_files, cf->tree, cf);
+	if (fd != -1)
+		close(fd);
 	file_free(cf);
+}
+
+static void
+file_read_win32_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+	struct evbuffer		*input;
+	struct msg_read_data	*msg;
+	size_t			 bsize, msglen;
+	void			*bdata;
+
+	if (cf->win32_reader == NULL)
+		return;
+
+	input = evbuffer_new();
+	if (input == NULL)
+		fatalx("out of memory");
+	win32_handle_event_drain(cf->win32_reader, input);
+
+	msg = xmalloc(sizeof *msg);
+	for (;;) {
+		bdata = EVBUFFER_DATA(input);
+		bsize = EVBUFFER_LENGTH(input);
+		if (bsize == 0)
+			break;
+		if (bsize > MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg)
+			bsize = MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg;
+		log_debug("read %zu from file %d", bsize, cf->stream);
+
+		msglen = sizeof *msg + bsize;
+		msg = xrealloc(msg, msglen);
+		msg->stream = cf->stream;
+		memcpy(msg + 1, bdata, bsize);
+		proc_send(cf->peer, MSG_READ, -1, msg, msglen);
+
+		evbuffer_drain(input, bsize);
+	}
+	free(msg);
+	evbuffer_free(input);
+}
+
+static void
+file_read_win32_done_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+	struct msg_read_done	 msg;
+
+	file_read_win32_callback(cf);
+
+	msg.stream = cf->stream;
+	msg.error = win32_handle_event_error(cf->win32_reader) ? EIO : 0;
+	proc_send(cf->peer, MSG_READ_DONE, -1, &msg, sizeof msg);
+
+	file_read_win32_close(cf);
+}
+
+static int
+file_read_win32_start(struct client_file *cf)
+{
+	intptr_t	osfhandle;
+	HANDLE	handle;
+
+	osfhandle = _get_osfhandle(cf->fd);
+	handle = (HANDLE)osfhandle;
+	if (handle == INVALID_HANDLE_VALUE) {
+		errno = EBADF;
+		return (-1);
+	}
+	cf->win32_reader = win32_handle_event_new(handle,
+	    file_read_win32_callback, file_read_win32_done_callback, cf);
+	if (cf->win32_reader == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	return (0);
 }
 
 static int
@@ -1116,7 +1168,7 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	const char		*path;
 	struct msg_read_done	 reply;
-	struct client_file	 find, *cf;
+	struct client_file	 find, *cf = NULL;
 	const int		 flags = O_NONBLOCK|O_RDONLY;
 	int			 error;
 
@@ -1159,7 +1211,10 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 
 #ifdef TMUX_WIN32
 	if (msg->fd == -1) {
-		file_read_sync(cf);
+		if (file_read_win32_start(cf) != 0) {
+			error = errno;
+			goto reply;
+		}
 		return;
 	}
 #endif
@@ -1171,6 +1226,22 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	return;
 
 reply:
+	if (error != 0 && cf != NULL) {
+#ifdef TMUX_WIN32
+		if (cf->win32_reader != NULL) {
+			win32_handle_event_free(cf->win32_reader);
+			cf->win32_reader = NULL;
+		}
+#endif
+		if (cf->event != NULL) {
+			bufferevent_free(cf->event);
+			cf->event = NULL;
+		}
+		if (cf->fd != -1)
+			close(cf->fd);
+		cf->fd = -1;
+		file_free(cf);
+	}
 	reply.stream = msg->stream;
 	reply.error = error;
 	proc_send(peer, MSG_READ_DONE, -1, &reply, sizeof reply);
@@ -1191,6 +1262,12 @@ file_read_cancel(struct client_files *files, struct imsg *imsg)
 		fatalx("unknown stream number");
 	log_debug("cancel file %d", cf->stream);
 
+#ifdef TMUX_WIN32
+	if (cf->win32_reader != NULL) {
+		file_read_win32_done_callback(cf);
+		return;
+	}
+#endif
 	file_read_error_callback(NULL, 0, cf);
 }
 
