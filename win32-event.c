@@ -225,6 +225,8 @@ static struct win32_io_service win32_io;
 #define WIN32_HANDLE_WRITER_HIGH (1024 * 1024)
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 #define WIN32_WORKER_STOP_TIMEOUT 1000
+#define WIN32_IOCP_STOP_TIMEOUT 1000
+#define WIN32_IOCP_STOP_KEY ((ULONG_PTR)-1)
 
 static int	win32_io_service_init(void);
 static int	win32_io_service_init_iocp(void);
@@ -246,6 +248,7 @@ static void	win32_io_service_cb(evutil_socket_t, short, void *);
 static void	win32_io_service_dispatch_endpoint(
 		     struct win32_io_endpoint *, uint32_t);
 static int	win32_wait_worker_thread(HANDLE, const char *);
+static int	win32_wait_iocp_endpoint(HANDLE, const char *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
@@ -416,7 +419,8 @@ win32_io_service_fini(void)
 	if (!win32_io.initialized)
 		return;
 	if (win32_io.iocp != NULL)
-		PostQueuedCompletionStatus(win32_io.iocp, 0, 0, NULL);
+		PostQueuedCompletionStatus(win32_io.iocp, 0,
+		    WIN32_IOCP_STOP_KEY, NULL);
 	if (win32_io.iocp_thread != NULL)
 		WaitForSingleObject(win32_io.iocp_thread, INFINITE);
 	if (win32_io.event_added)
@@ -537,8 +541,10 @@ win32_io_service_iocp_thread(__unused void *arg)
 		if (!GetQueuedCompletionStatus(win32_io.iocp, &transferred,
 		    &key, &overlapped, INFINITE))
 			error = GetLastError();
-		if (overlapped == NULL)
+		if (overlapped == NULL && key == WIN32_IOCP_STOP_KEY)
 			break;
+		if (overlapped == NULL)
+			continue;
 		endpoint = (struct win32_io_endpoint *)key;
 		if (endpoint->type == WIN32_IO_ENDPOINT_READER) {
 			win32_handle_event_iocp_complete(endpoint->owner,
@@ -663,6 +669,21 @@ win32_wait_worker_thread(HANDLE thread, const char *name)
 		return (0);
 	log_debug("%s: worker thread did not stop within %u ms",
 	    name, WIN32_WORKER_STOP_TIMEOUT);
+	return (-1);
+}
+
+static int
+win32_wait_iocp_endpoint(HANDLE complete, const char *name)
+{
+	DWORD	wait;
+
+	if (complete == NULL)
+		return (0);
+	wait = WaitForSingleObject(complete, WIN32_IOCP_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0)
+		return (0);
+	log_debug("%s: IOCP endpoint did not stop within %u ms",
+	    name, WIN32_IOCP_STOP_TIMEOUT);
 	return (-1);
 }
 
@@ -1107,8 +1128,10 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		if (whe->pending)
 			CancelIoEx(whe->handle, &whe->overlapped);
 		LeaveCriticalSection(&whe->lock);
-		if (whe->complete != NULL)
-			WaitForSingleObject(whe->complete, INFINITE);
+		if (win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
+			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			return;
+		}
 	} else if (whe->stop != NULL)
 		SetEvent(whe->stop);
 	if (whe->thread != NULL) {
@@ -1559,8 +1582,11 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 	} else
 		SetEvent(whw->ready);
 	LeaveCriticalSection(&whw->lock);
-	if (whw->backend == WIN32_HANDLE_WRITER_IOCP && whw->complete != NULL)
-		WaitForSingleObject(whw->complete, INFINITE);
+	if (whw->backend == WIN32_HANDLE_WRITER_IOCP &&
+	    win32_wait_iocp_endpoint(whw->complete, __func__) != 0) {
+		win32_io_service_deactivate_endpoint(&whw->endpoint);
+		return;
+	}
 	if (whw->thread != NULL) {
 		CancelSynchronousIo(whw->thread);
 		if (win32_wait_worker_thread(whw->thread, __func__) != 0) {

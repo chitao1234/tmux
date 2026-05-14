@@ -817,10 +817,28 @@ Worker-backed endpoints no longer wait forever during endpoint free:
 - successful worker shutdown still frees handles, events, buffers, and endpoint
   memory normally.
 
-This only applies to the explicit worker fallback backend used for console,
-direct tty, and stdio handles. IOCP-backed endpoints still use their completion
-event as a lifetime barrier, and process waits still use the existing
+This slice only applied to the explicit worker fallback backend used for
+console, direct tty, and stdio handles. IOCP endpoint teardown was hardened in
+the later IOCP teardown slice, and process waits still use the existing
 `RegisterWaitForSingleObject` backend.
+
+## IOCP Endpoint Teardown Bound Slice
+
+IOCP-backed endpoints now have the same no-unbounded-server-wait rule as the
+worker fallback backend:
+
+- reader and writer frees still cancel outstanding overlapped I/O through
+  `CancelIoEx()`;
+- the wait for the endpoint completion event is bounded instead of using an
+  infinite wait on the tmux thread;
+- if a canceled overlapped operation does not report completion in time, the
+  endpoint is deactivated and intentionally leaked so a later IOCP completion
+  cannot use freed memory;
+- the IOCP service thread now exits only on the explicit service-shutdown
+  sentinel packet, so canceled-operation completions with a null overlapped
+  pointer cannot accidentally stop the backend thread;
+- this keeps the existing IOCP backend and completion contract, but removes
+  another teardown path that could hang the server.
 
 ## Service Wakeup Coalescing Slice
 
