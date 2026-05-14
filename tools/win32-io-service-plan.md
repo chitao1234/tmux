@@ -712,3 +712,24 @@ implementation:
 This is intentionally narrow cleanup. The underlying named-pipe helper remains
 because it still creates the direction-specific overlapped pipe pairs used by
 ConPTY panes and Win32 jobs.
+
+## Input Queue Cap Slice
+
+Win32 pane and job stdin now have a hard cap across tmux-side queues plus the
+service writer queue:
+
+- pane input readiness now checks Win32 stdin writer state and the combined
+  pending byte count before accepting normal key and paste input;
+- `win32_pane_write()` refuses writes that would exceed the cap with `EAGAIN`
+  instead of allowing the pane-owned queue to grow without bound;
+- `win32_job_write()` applies the same cap to job stdin, covering popup and
+  pipe-pane style producers that feed job input through tmux-side buffers;
+- the IOCP writer ordering and close-after-drain behavior are unchanged. This
+  slice only bounds the compatibility queues that exist above the service
+  writer because several tmux input producers still have fire-and-forget
+  write semantics.
+
+This is a defensive backpressure step, not full retry semantics for every pane
+input producer. Direct callers that ignore `win32_pane_write()` failures can
+still drop input under sustained overload, but they no longer grow server
+memory indefinitely.

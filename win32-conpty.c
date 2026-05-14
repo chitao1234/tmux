@@ -98,6 +98,7 @@ struct win32_job_process {
 #define WIN32_CHILD_KILL_TIMEOUT 1000
 #define WIN32_INPUT_WRITER_HIGH (1024 * 1024)
 #define WIN32_INPUT_WRITER_CHUNK (256 * 1024)
+#define WIN32_INPUT_QUEUE_HIGH (4 * 1024 * 1024)
 
 typedef NTSTATUS (NTAPI *win32_nt_query_information_process)(HANDLE,
     PROCESSINFOCLASS, PVOID, ULONG, PULONG);
@@ -838,6 +839,37 @@ win32_pane_flush_input(struct window_pane *wp)
 	}
 }
 
+static size_t
+win32_pane_input_buffered(struct win32_pane *pw)
+{
+	size_t	buffered = 0;
+
+	if (pw == NULL)
+		return (0);
+	if (pw->input_queue != NULL)
+		buffered += EVBUFFER_LENGTH(pw->input_queue);
+	if (pw->input_writer != NULL)
+		buffered += win32_io_writer_buffered(pw->input_writer);
+	return (buffered);
+}
+
+int
+win32_pane_input_ready(struct window_pane *wp)
+{
+	struct win32_pane	*pw;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return (0);
+	if (wp->flags & PANE_EXITED)
+		return (0);
+	pw = wp->win32;
+	if (pw->input_queue == NULL || pw->input_writer == NULL)
+		return (0);
+	if (!win32_io_writer_writable(pw->input_writer))
+		return (0);
+	return (win32_pane_input_buffered(pw) < WIN32_INPUT_QUEUE_HIGH);
+}
+
 static void
 win32_pane_input_write_cb(void *arg)
 {
@@ -1280,7 +1312,7 @@ int
 win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 {
 	struct evbuffer	*evb;
-	size_t		 nwrite;
+	size_t		 buffered, nwrite;
 
 	if (wp->win32 == NULL || wp->win32->input_writer == NULL) {
 		errno = EPIPE;
@@ -1302,6 +1334,14 @@ win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 		return (0);
 
 	evb = wp->win32->input_queue;
+	buffered = win32_pane_input_buffered(wp->win32);
+	if (buffered >= WIN32_INPUT_QUEUE_HIGH ||
+	    nwrite > WIN32_INPUT_QUEUE_HIGH - buffered) {
+		log_debug("%%%u input queue full, dropping %zu bytes",
+		    wp->id, nwrite);
+		errno = EAGAIN;
+		return (-1);
+	}
 	if (evbuffer_add(evb, data, nwrite) != 0) {
 		errno = ENOMEM;
 		return (-1);
@@ -1787,7 +1827,7 @@ int
 win32_job_write(struct win32_job *wj, const void *data, size_t size)
 {
 	struct evbuffer	*evb;
-	size_t		 nwrite;
+	size_t		 buffered, nwrite;
 
 	if (wj == NULL || wj->stdin_writer == NULL) {
 		errno = EPIPE;
@@ -1806,6 +1846,14 @@ win32_job_write(struct win32_job *wj, const void *data, size_t size)
 		return (0);
 
 	evb = wj->event->output;
+	buffered = win32_job_stdin_buffered(wj);
+	if (buffered >= WIN32_INPUT_QUEUE_HIGH ||
+	    nwrite > WIN32_INPUT_QUEUE_HIGH - buffered) {
+		log_debug("job input queue full, pid %ld, dropping %zu bytes",
+		    (long)wj->process_id, nwrite);
+		errno = EAGAIN;
+		return (-1);
+	}
 	if (evbuffer_add(evb, data, nwrite) != 0) {
 		errno = ENOMEM;
 		return (-1);

@@ -1292,7 +1292,7 @@ window_pane_input_ready(struct window_pane *wp)
 		return (0);
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL)
-		return (~wp->flags & PANE_EXITED);
+		return (win32_pane_input_ready(wp));
 #endif
 	return (wp->fd != -1);
 }
