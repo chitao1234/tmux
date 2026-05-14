@@ -527,3 +527,21 @@ completion records:
 - this is a structural step toward final endpoint objects. The read and write
   backends are still worker-thread based, and process waits still use
   `RegisterWaitForSingleObject`.
+
+## Public Endpoint API Slice
+
+The public Win32 I/O service surface now exposes endpoint objects instead of
+reader, writer, and process-specific opaque handles:
+
+- `win32_io_reader_new`, `win32_io_writer_new`,
+  `win32_io_writer_new_borrowed`, and `win32_io_process_new` all return
+  `struct win32_io_endpoint *`;
+- callers free every service object through `win32_io_endpoint_free`;
+- reader, writer, and process operations are named under the `win32_io_*`
+  endpoint API while preserving the existing behavior and event masks;
+- `struct win32_handle_event`, `struct win32_handle_writer`, and
+  `struct win32_process_event` are now private backend details in
+  `win32-event.c`;
+- this removes another compatibility seam before the overlapped/IOCP backend
+  work. The underlying read/write backends are still synchronous worker
+  threads, and process waits still use `RegisterWaitForSingleObject`.

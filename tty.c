@@ -216,7 +216,7 @@ tty_read_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 
 #ifdef TMUX_WIN32
 	if (tty->win32_in != NULL) {
-		win32_handle_event_drain(tty->win32_in, tty->in);
+		win32_io_reader_drain(tty->win32_in, tty->in);
 		nread = EVBUFFER_LENGTH(tty->in) - size;
 		if (nread == 0) {
 			log_debug("%s: read closed", name);
@@ -338,7 +338,7 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		size_t	nsend = size;
 
 		if (tty->win32_out_pending != 0 ||
-		    !win32_handle_writer_drained(tty->win32_out))
+		    !win32_io_writer_drained(tty->win32_out))
 			return;
 		if (tty->win32_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
 			return;
@@ -348,7 +348,7 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 			    tty->win32_out_pending;
 		if (nsend == 0)
 			return;
-		nwrite = win32_handle_writer_write(tty->win32_out,
+		nwrite = win32_io_writer_write(tty->win32_out,
 		    EVBUFFER_DATA(tty->out), nsend);
 		if (nwrite == -1)
 			return;
@@ -489,7 +489,7 @@ tty_win32_out_drained(struct tty *tty)
 		return (1);
 	if (tty->win32_out_pending != 0)
 		return (0);
-	return (win32_handle_writer_drained(tty->win32_out));
+	return (win32_io_writer_drained(tty->win32_out));
 }
 #endif
 
@@ -510,7 +510,7 @@ tty_open(struct tty *tty, char **cause)
 
 #ifdef TMUX_WIN32
 	if (c->win32_stdin != NULL) {
-		tty->win32_in = win32_handle_event_new_events(c->win32_stdin,
+		tty->win32_in = win32_io_reader_new(c->win32_stdin,
 		    tty_win32_in_event_callback, tty);
 		if (tty->win32_in == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty input event");
@@ -538,7 +538,7 @@ tty_open(struct tty *tty, char **cause)
 		    tty);
 	}
 	if (c->win32_stdout != NULL) {
-		tty->win32_out = win32_handle_writer_new_events_borrowed(
+		tty->win32_out = win32_io_writer_new_borrowed(
 		    &c->win32_stdout, tty_win32_out_event_callback, tty);
 		if (tty->win32_out == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty output writer");
@@ -803,12 +803,12 @@ tty_close(struct tty *tty)
 		evbuffer_free(tty->out);
 #ifdef TMUX_WIN32
 		if (tty->win32_in != NULL) {
-			win32_handle_event_free(tty->win32_in);
+			win32_io_endpoint_free(tty->win32_in);
 			tty->win32_in = NULL;
 		} else if (!tty->client->win32_console)
 			event_del(&tty->event_in);
 		if (tty->win32_out != NULL) {
-			win32_handle_writer_free(tty->win32_out);
+			win32_io_endpoint_free(tty->win32_out);
 			tty->win32_out = NULL;
 			tty->win32_out_pending = 0;
 		}
@@ -894,7 +894,7 @@ tty_raw(struct tty *tty, const char *s)
 			if (n >= 0)
 				c->win32_tty_out_pending += n;
 		} else if (tty->win32_out != NULL) {
-			n = win32_handle_writer_write(tty->win32_out, s, slen);
+			n = win32_io_writer_write(tty->win32_out, s, slen);
 			if (n >= 0)
 				tty->win32_out_pending += n;
 		} else

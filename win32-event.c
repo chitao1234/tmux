@@ -204,6 +204,9 @@ static void	win32_io_service_dispatch_endpoint(
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static int	win32_handle_event_error_is_eof(DWORD);
+static void	win32_handle_event_free(struct win32_handle_event *);
+static void	win32_handle_writer_free(struct win32_handle_writer *);
+static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_handle_write(HANDLE, const void *, size_t);
 
 static int
@@ -490,6 +493,24 @@ win32_io_service_dispatch_endpoint(struct win32_io_endpoint *endpoint,
 	}
 }
 
+void
+win32_io_endpoint_free(struct win32_io_endpoint *endpoint)
+{
+	if (endpoint == NULL)
+		return;
+	switch (endpoint->type) {
+	case WIN32_IO_ENDPOINT_READER:
+		win32_handle_event_free(endpoint->owner);
+		break;
+	case WIN32_IO_ENDPOINT_WRITER:
+		win32_handle_writer_free(endpoint->owner);
+		break;
+	case WIN32_IO_ENDPOINT_PROCESS:
+		win32_process_event_free(endpoint->owner);
+		break;
+	}
+}
+
 static void
 win32_io_service_dispatch_endpoints(void)
 {
@@ -533,8 +554,8 @@ win32_process_event_wait_cb(PVOID arg, __unused BOOLEAN timed_out)
 	win32_io_service_enqueue_process(wpe, WIN32_IO_EVENT_PROCESS_EXIT);
 }
 
-struct win32_process_event *
-win32_process_event_new_events(HANDLE process,
+struct win32_io_endpoint *
+win32_io_process_new(HANDLE process,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_process_event	*wpe;
@@ -555,10 +576,10 @@ win32_process_event_new_events(HANDLE process,
 		free(wpe);
 		return (NULL);
 	}
-	return (wpe);
+	return (&wpe->endpoint);
 }
 
-void
+static void
 win32_process_event_free(struct win32_process_event *wpe)
 {
 	if (wpe == NULL)
@@ -573,8 +594,13 @@ win32_process_event_free(struct win32_process_event *wpe)
 }
 
 void
-win32_process_event_notify(struct win32_process_event *wpe)
+win32_io_process_notify(struct win32_io_endpoint *endpoint)
 {
+	struct win32_process_event	*wpe;
+
+	if (endpoint == NULL)
+		return;
+	wpe = endpoint->owner;
 	if (wpe != NULL)
 		win32_io_service_enqueue_process(wpe,
 		    WIN32_IO_EVENT_PROCESS_EXIT);
@@ -670,8 +696,8 @@ win32_handle_event_thread(void *arg)
 	return (0);
 }
 
-struct win32_handle_event *
-win32_handle_event_new_events(HANDLE handle,
+struct win32_io_endpoint *
+win32_io_reader_new(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
@@ -710,10 +736,10 @@ win32_handle_event_new_events(HANDLE handle,
 		win32_handle_event_free(whe);
 		return (NULL);
 	}
-	return (whe);
+	return (&whe->endpoint);
 }
 
-void
+static void
 win32_handle_event_free(struct win32_handle_event *whe)
 {
 	if (whe == NULL)
@@ -738,8 +764,11 @@ win32_handle_event_free(struct win32_handle_event *whe)
 }
 
 void
-win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
+win32_io_reader_drain(struct win32_io_endpoint *endpoint,
+    struct evbuffer *dst)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
+
 	EnterCriticalSection(&whe->lock);
 	evbuffer_add_buffer(dst, whe->input);
 	win32_handle_event_update_ready(whe);
@@ -747,9 +776,10 @@ win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
 }
 
 void
-win32_handle_event_drain_bev(struct win32_handle_event *whe,
+win32_io_reader_drain_bev(struct win32_io_endpoint *endpoint,
     struct bufferevent *bev)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
 	struct evbuffer	*dst = bev->input;
 
 	evbuffer_unfreeze(dst, 0);
@@ -761,8 +791,13 @@ win32_handle_event_drain_bev(struct win32_handle_event *whe,
 }
 
 void
-win32_handle_event_set_reading(struct win32_handle_event *whe, int enabled)
+win32_io_reader_set_reading(struct win32_io_endpoint *endpoint, int enabled)
 {
+	struct win32_handle_event	*whe;
+
+	if (endpoint == NULL)
+		return;
+	whe = endpoint->owner;
 	if (whe == NULL)
 		return;
 	EnterCriticalSection(&whe->lock);
@@ -772,8 +807,9 @@ win32_handle_event_set_reading(struct win32_handle_event *whe, int enabled)
 }
 
 size_t
-win32_handle_event_buffered(struct win32_handle_event *whe)
+win32_io_reader_buffered(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
 	size_t	size;
 
 	EnterCriticalSection(&whe->lock);
@@ -783,8 +819,9 @@ win32_handle_event_buffered(struct win32_handle_event *whe)
 }
 
 int
-win32_handle_event_done(struct win32_handle_event *whe)
+win32_io_reader_done(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
 	int	done;
 
 	EnterCriticalSection(&whe->lock);
@@ -794,8 +831,9 @@ win32_handle_event_done(struct win32_handle_event *whe)
 }
 
 int
-win32_handle_event_eof(struct win32_handle_event *whe)
+win32_io_reader_eof(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
 	int	eof;
 
 	EnterCriticalSection(&whe->lock);
@@ -805,8 +843,9 @@ win32_handle_event_eof(struct win32_handle_event *whe)
 }
 
 int
-win32_handle_event_error(struct win32_handle_event *whe)
+win32_io_reader_error(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_event	*whe = endpoint->owner;
 	int	error;
 
 	EnterCriticalSection(&whe->lock);
@@ -941,21 +980,31 @@ win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
 	return (whw);
 }
 
-struct win32_handle_writer *
-win32_handle_writer_new_events(HANDLE *handle,
+struct win32_io_endpoint *
+win32_io_writer_new(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_handle_writer_new1(handle, eventcb, arg, 0));
+	struct win32_handle_writer	*whw;
+
+	whw = win32_handle_writer_new1(handle, eventcb, arg, 0);
+	if (whw == NULL)
+		return (NULL);
+	return (&whw->endpoint);
 }
 
-struct win32_handle_writer *
-win32_handle_writer_new_events_borrowed(HANDLE *handle,
+struct win32_io_endpoint *
+win32_io_writer_new_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_handle_writer_new1(handle, eventcb, arg, 1));
+	struct win32_handle_writer	*whw;
+
+	whw = win32_handle_writer_new1(handle, eventcb, arg, 1);
+	if (whw == NULL)
+		return (NULL);
+	return (&whw->endpoint);
 }
 
-void
+static void
 win32_handle_writer_free(struct win32_handle_writer *whw)
 {
 	if (whw == NULL)
@@ -975,15 +1024,17 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 }
 
 int
-win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
+win32_io_writer_write(struct win32_io_endpoint *endpoint, const void *data,
     size_t size)
 {
+	struct win32_handle_writer	*whw;
 	size_t	buffered, nwrite;
 
-	if (whw == NULL) {
+	if (endpoint == NULL) {
 		errno = EPIPE;
 		return (-1);
 	}
+	whw = endpoint->owner;
 	nwrite = size;
 	if (nwrite > INT_MAX)
 		nwrite = INT_MAX;
@@ -1019,8 +1070,13 @@ win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
 }
 
 void
-win32_handle_writer_close(struct win32_handle_writer *whw)
+win32_io_writer_close(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_writer	*whw;
+
+	if (endpoint == NULL)
+		return;
+	whw = endpoint->owner;
 	if (whw == NULL)
 		return;
 	EnterCriticalSection(&whw->lock);
@@ -1034,12 +1090,14 @@ win32_handle_writer_close(struct win32_handle_writer *whw)
 }
 
 size_t
-win32_handle_writer_buffered(struct win32_handle_writer *whw)
+win32_io_writer_buffered(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_writer	*whw;
 	size_t	size;
 
-	if (whw == NULL)
+	if (endpoint == NULL)
 		return (0);
+	whw = endpoint->owner;
 	EnterCriticalSection(&whw->lock);
 	size = EVBUFFER_LENGTH(whw->output);
 	LeaveCriticalSection(&whw->lock);
@@ -1047,12 +1105,14 @@ win32_handle_writer_buffered(struct win32_handle_writer *whw)
 }
 
 int
-win32_handle_writer_drained(struct win32_handle_writer *whw)
+win32_io_writer_drained(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_writer	*whw;
 	int	drained;
 
-	if (whw == NULL)
+	if (endpoint == NULL)
 		return (1);
+	whw = endpoint->owner;
 	EnterCriticalSection(&whw->lock);
 	drained = (EVBUFFER_LENGTH(whw->output) == 0);
 	LeaveCriticalSection(&whw->lock);
@@ -1060,12 +1120,14 @@ win32_handle_writer_drained(struct win32_handle_writer *whw)
 }
 
 int
-win32_handle_writer_writable(struct win32_handle_writer *whw)
+win32_io_writer_writable(struct win32_io_endpoint *endpoint)
 {
+	struct win32_handle_writer	*whw;
 	int	writable;
 
-	if (whw == NULL)
+	if (endpoint == NULL)
 		return (0);
+	whw = endpoint->owner;
 	EnterCriticalSection(&whw->lock);
 	writable = (whw->state == WIN32_HANDLE_WRITER_RUNNING &&
 	    !whw->stop && whw->handle != NULL);

@@ -26,9 +26,7 @@ struct window_pane;
 
 struct win32_pane;
 struct win32_job;
-struct win32_handle_event;
-struct win32_handle_writer;
-struct win32_process_event;
+struct win32_io_endpoint;
 
 enum win32_io_event {
 	WIN32_IO_EVENT_READ = 0x1,
@@ -55,34 +53,32 @@ void		 win32_fini(void);
 long		 win32_console_ctrl_c_events(void);
 
 void		 win32_io_service_fini(void);
-struct win32_handle_event *win32_handle_event_new_events(HANDLE,
+struct win32_io_endpoint *win32_io_reader_new(HANDLE,
 		     void (*)(void *, uint32_t), void *);
-void		 win32_handle_event_free(struct win32_handle_event *);
-void		 win32_handle_event_drain(struct win32_handle_event *,
+void		 win32_io_endpoint_free(struct win32_io_endpoint *);
+void		 win32_io_reader_drain(struct win32_io_endpoint *,
 		     struct evbuffer *);
-void		 win32_handle_event_drain_bev(struct win32_handle_event *,
+void		 win32_io_reader_drain_bev(struct win32_io_endpoint *,
 		     struct bufferevent *);
-void		 win32_handle_event_set_reading(struct win32_handle_event *,
+void		 win32_io_reader_set_reading(struct win32_io_endpoint *,
 		     int);
-size_t		 win32_handle_event_buffered(struct win32_handle_event *);
-int		 win32_handle_event_done(struct win32_handle_event *);
-int		 win32_handle_event_eof(struct win32_handle_event *);
-int		 win32_handle_event_error(struct win32_handle_event *);
-struct win32_handle_writer *win32_handle_writer_new_events(HANDLE *,
+size_t		 win32_io_reader_buffered(struct win32_io_endpoint *);
+int		 win32_io_reader_done(struct win32_io_endpoint *);
+int		 win32_io_reader_eof(struct win32_io_endpoint *);
+int		 win32_io_reader_error(struct win32_io_endpoint *);
+struct win32_io_endpoint *win32_io_writer_new(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
-struct win32_handle_writer *win32_handle_writer_new_events_borrowed(HANDLE *,
+struct win32_io_endpoint *win32_io_writer_new_borrowed(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
-void		 win32_handle_writer_free(struct win32_handle_writer *);
-int		 win32_handle_writer_write(struct win32_handle_writer *,
+int		 win32_io_writer_write(struct win32_io_endpoint *,
 		     const void *, size_t);
-void		 win32_handle_writer_close(struct win32_handle_writer *);
-size_t		 win32_handle_writer_buffered(struct win32_handle_writer *);
-int		 win32_handle_writer_drained(struct win32_handle_writer *);
-int		 win32_handle_writer_writable(struct win32_handle_writer *);
-struct win32_process_event *win32_process_event_new_events(HANDLE,
+void		 win32_io_writer_close(struct win32_io_endpoint *);
+size_t		 win32_io_writer_buffered(struct win32_io_endpoint *);
+int		 win32_io_writer_drained(struct win32_io_endpoint *);
+int		 win32_io_writer_writable(struct win32_io_endpoint *);
+struct win32_io_endpoint *win32_io_process_new(HANDLE,
 		     void (*)(void *, uint32_t), void *);
-void		 win32_process_event_free(struct win32_process_event *);
-void		 win32_process_event_notify(struct win32_process_event *);
+void		 win32_io_process_notify(struct win32_io_endpoint *);
 void		 win32_log_handle(const char *, HANDLE);
 
 const char	*win32_default_socket_dir(void);

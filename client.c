@@ -40,8 +40,8 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
-static struct win32_handle_event *client_win32_input;
-static struct win32_handle_writer *client_win32_output;
+static struct win32_io_endpoint *client_win32_input;
+static struct win32_io_endpoint *client_win32_output;
 static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
@@ -428,7 +428,7 @@ client_win32_input_callback(__unused void *arg)
 	input = evbuffer_new();
 	if (input == NULL)
 		fatalx("out of memory");
-	win32_handle_event_drain(client_win32_input, input);
+	win32_io_reader_drain(client_win32_input, input);
 	size = EVBUFFER_LENGTH(input);
 	data = EVBUFFER_DATA(input);
 	log_debug("%s: forwarding %zu bytes", __func__, size);
@@ -473,7 +473,7 @@ client_win32_input_start(void)
 		return;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
-	client_win32_input = win32_handle_event_new_events(hin,
+	client_win32_input = win32_io_reader_new(hin,
 	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
@@ -484,7 +484,7 @@ client_win32_input_stop(void)
 {
 	if (client_win32_input == NULL)
 		return;
-	win32_handle_event_free(client_win32_input);
+	win32_io_endpoint_free(client_win32_input);
 	client_win32_input = NULL;
 }
 
@@ -541,7 +541,7 @@ client_win32_output_start(void)
 		return (-1);
 
 	hout = GetStdHandle(STD_OUTPUT_HANDLE);
-	client_win32_output = win32_handle_writer_new_events_borrowed(&hout,
+	client_win32_output = win32_io_writer_new_borrowed(&hout,
 	    client_win32_output_event_callback, NULL);
 	if (client_win32_output == NULL) {
 		log_debug("%s: couldn't create console output writer",
@@ -556,7 +556,7 @@ client_win32_output_stop(void)
 {
 	if (client_win32_output == NULL)
 		return;
-	win32_handle_writer_free(client_win32_output);
+	win32_io_endpoint_free(client_win32_output);
 	client_win32_output = NULL;
 	client_win32_output_pending = 0;
 }
@@ -585,7 +585,7 @@ client_win32_tty_output(char *data, ssize_t datalen)
 		return;
 	}
 	if (client_win32_output_start() != 0 ||
-	    win32_handle_writer_write(client_win32_output, data,
+	    win32_io_writer_write(client_win32_output, data,
 	    datalen) == -1) {
 		client_exitreason = CLIENT_EXIT_LOST_TTY;
 		client_exitval = 1;

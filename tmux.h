@@ -1691,8 +1691,8 @@ struct tty {
 	struct event	 timer;
 	size_t		 discarded;
 #ifdef TMUX_WIN32
-	struct win32_handle_event *win32_in;
-	struct win32_handle_writer *win32_out;
+	struct win32_io_endpoint *win32_in;
+	struct win32_io_endpoint *win32_out;
 	size_t		 win32_out_pending;
 #endif
 
@@ -1990,8 +1990,8 @@ struct client_file {
 	size_t				 write_inflight;
 	size_t				 write_pending;
 #ifdef TMUX_WIN32
-	struct win32_handle_writer	*win32_writer;
-	struct win32_handle_event	*win32_reader;
+	struct win32_io_endpoint		*win32_writer;
+	struct win32_io_endpoint		*win32_reader;
 #endif
 
 	int				 flags;

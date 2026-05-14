@@ -165,9 +165,9 @@ file_free(struct client_file *cf)
 
 #ifdef TMUX_WIN32
 	if (cf->win32_writer != NULL)
-		win32_handle_writer_free(cf->win32_writer);
+		win32_io_endpoint_free(cf->win32_writer);
 	if (cf->win32_reader != NULL)
-		win32_handle_event_free(cf->win32_reader);
+		win32_io_endpoint_free(cf->win32_reader);
 #endif
 
 	if (cf->tree != NULL)
@@ -671,7 +671,7 @@ file_write_win32_close(struct client_file *cf)
 	int	fd;
 
 	if (cf->win32_writer != NULL) {
-		win32_handle_writer_free(cf->win32_writer);
+		win32_io_endpoint_free(cf->win32_writer);
 		cf->win32_writer = NULL;
 	}
 	fd = cf->fd;
@@ -698,7 +698,7 @@ file_write_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_writer = win32_handle_writer_new_events_borrowed(&handle,
+	cf->win32_writer = win32_io_writer_new_borrowed(&handle,
 	    file_write_win32_event_callback, cf);
 	if (cf->win32_writer == NULL) {
 		errno = EIO;
@@ -714,7 +714,7 @@ file_write_win32_raw(struct client_file *cf, const void *data, size_t size)
 
 	if (file_write_win32_start(cf) != 0)
 		return (-1);
-	written = win32_handle_writer_write(cf->win32_writer, data, size);
+	written = win32_io_writer_write(cf->win32_writer, data, size);
 	if (written != (int)size) {
 		errno = EIO;
 		return (-1);
@@ -779,7 +779,7 @@ file_write_win32_callback(void *arg)
 	size = cf->write_pending;
 	if (size == 0) {
 		if (cf->closed &&
-		    win32_handle_writer_buffered(cf->win32_writer) == 0) {
+		    win32_io_writer_buffered(cf->win32_writer) == 0) {
 			file_write_win32_close(cf);
 			file_free(cf);
 		}
@@ -788,7 +788,7 @@ file_write_win32_callback(void *arg)
 	file_write_acknowledge(cf, size, 0);
 	if (cf->cb != NULL)
 		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-	if (cf->closed && win32_handle_writer_drained(cf->win32_writer)) {
+	if (cf->closed && win32_io_writer_drained(cf->win32_writer)) {
 		file_write_win32_close(cf);
 		file_free(cf);
 	}
@@ -822,7 +822,7 @@ file_read_win32_close(struct client_file *cf)
 	int	fd;
 
 	if (cf->win32_reader != NULL) {
-		win32_handle_event_free(cf->win32_reader);
+		win32_io_endpoint_free(cf->win32_reader);
 		cf->win32_reader = NULL;
 	}
 	fd = cf->fd;
@@ -847,7 +847,7 @@ file_read_win32_callback(void *arg)
 	input = evbuffer_new();
 	if (input == NULL)
 		fatalx("out of memory");
-	win32_handle_event_drain(cf->win32_reader, input);
+	win32_io_reader_drain(cf->win32_reader, input);
 
 	msg = xmalloc(sizeof *msg);
 	for (;;) {
@@ -890,7 +890,7 @@ file_read_win32_done_callback(void *arg)
 	file_read_win32_callback(cf);
 
 	msg.stream = cf->stream;
-	msg.error = win32_handle_event_error(cf->win32_reader) ? EIO : 0;
+	msg.error = win32_io_reader_error(cf->win32_reader) ? EIO : 0;
 	proc_send(cf->peer, MSG_READ_DONE, -1, &msg, sizeof msg);
 
 	file_read_win32_close(cf);
@@ -908,7 +908,7 @@ file_read_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_reader = win32_handle_event_new_events(handle,
+	cf->win32_reader = win32_io_reader_new(handle,
 	    file_read_win32_event_callback, cf);
 	if (cf->win32_reader == NULL) {
 		errno = EIO;
@@ -960,7 +960,7 @@ file_write_console_text(struct client_file *cf, const char *data, size_t size)
 
 	error = 0;
 	if (EVBUFFER_LENGTH(buffer) != 0) {
-		if (win32_handle_writer_write(cf->win32_writer,
+		if (win32_io_writer_write(cf->win32_writer,
 		    EVBUFFER_DATA(buffer), EVBUFFER_LENGTH(buffer)) == -1)
 			error = errno;
 	}
@@ -1051,7 +1051,7 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 reply:
 	if (error != 0 && cf != NULL) {
 		if (cf->win32_writer != NULL) {
-			win32_handle_writer_free(cf->win32_writer);
+			win32_io_endpoint_free(cf->win32_writer);
 			cf->win32_writer = NULL;
 		}
 		if (cf->fd != -1)
@@ -1253,7 +1253,7 @@ reply:
 	if (error != 0 && cf != NULL) {
 #ifdef TMUX_WIN32
 		if (cf->win32_reader != NULL) {
-			win32_handle_event_free(cf->win32_reader);
+			win32_io_endpoint_free(cf->win32_reader);
 			cf->win32_reader = NULL;
 		}
 #endif
