@@ -68,11 +68,6 @@ size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_done(struct win32_handle_event *);
 int		 win32_handle_event_eof(struct win32_handle_event *);
 int		 win32_handle_event_error(struct win32_handle_event *);
-struct win32_handle_writer *win32_handle_writer_new(HANDLE *);
-struct win32_handle_writer *win32_handle_writer_new_cb(HANDLE *,
-		     void (*)(void *), void (*)(void *), void *);
-struct win32_handle_writer *win32_handle_writer_new_borrowed(HANDLE *,
-		     void (*)(void *), void (*)(void *), void *);
 struct win32_handle_writer *win32_handle_writer_new_events(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 struct win32_handle_writer *win32_handle_writer_new_events_borrowed(HANDLE *,

@@ -476,3 +476,15 @@ Win32 pane and job stdin writers now consume explicit writer events:
   callback;
 - job stdin error/cancel events still affect only stdin, keeping stdout EOF and
   process exit as separate lifecycle edges.
+
+## Legacy Writer Constructor Removal Slice
+
+The old split write/error writer constructors have been removed:
+
+- `win32_handle_writer_new()`, `win32_handle_writer_new_cb()`, and
+  `win32_handle_writer_new_borrowed()` are no longer part of the public Win32
+  platform surface;
+- `struct win32_handle_writer` stores only one explicit event callback instead
+  of separate write, error, and event callbacks;
+- writer dispatch now always delivers an explicit reason mask, matching all
+  remaining writer consumers.

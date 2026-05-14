@@ -158,8 +158,6 @@ struct win32_handle_writer {
 	HANDLE		 ready;
 	struct evbuffer	*output;
 	CRITICAL_SECTION lock;
-	void		(*writecb)(void *);
-	void		(*errorcb)(void *);
 	void		(*eventcb)(void *, uint32_t);
 	void		 *arg;
 	enum win32_handle_writer_state state;
@@ -456,25 +454,16 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 	buffered = EVBUFFER_LENGTH(whw->output);
 	LeaveCriticalSection(&whw->lock);
 
-	if (whw->eventcb != NULL) {
-		out = events & ~(WIN32_IO_EVENT_WRITE_DRAINED|
-		    WIN32_IO_EVENT_WRITE_CLOSED|WIN32_IO_EVENT_ERROR);
-		if (state == WIN32_HANDLE_WRITER_ERROR)
-			out |= WIN32_IO_EVENT_ERROR;
-		else if (state == WIN32_HANDLE_WRITER_CLOSED)
-			out |= WIN32_IO_EVENT_WRITE_CLOSED;
-		else if ((events & WIN32_IO_EVENT_WRITE_DRAINED) &&
-		    buffered == 0)
-			out |= WIN32_IO_EVENT_WRITE_DRAINED;
-		if (out != 0)
-			whw->eventcb(whw->arg, out);
-	} else if (state == WIN32_HANDLE_WRITER_ERROR) {
-		if (whw->errorcb != NULL)
-			whw->errorcb(whw->arg);
-	} else if ((events & (WIN32_IO_EVENT_WRITE_DRAINED |
-	    WIN32_IO_EVENT_WRITE_CLOSED)) && buffered == 0 &&
-	    whw->writecb != NULL)
-		whw->writecb(whw->arg);
+	out = events & ~(WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED|WIN32_IO_EVENT_ERROR);
+	if (state == WIN32_HANDLE_WRITER_ERROR)
+		out |= WIN32_IO_EVENT_ERROR;
+	else if (state == WIN32_HANDLE_WRITER_CLOSED)
+		out |= WIN32_IO_EVENT_WRITE_CLOSED;
+	else if ((events & WIN32_IO_EVENT_WRITE_DRAINED) && buffered == 0)
+		out |= WIN32_IO_EVENT_WRITE_DRAINED;
+	if (out != 0)
+		whw->eventcb(whw->arg, out);
 }
 
 static void
@@ -910,9 +899,8 @@ stop:
 }
 
 static struct win32_handle_writer *
-win32_handle_writer_new1(HANDLE *handle, void (*writecb)(void *),
-    void (*errorcb)(void *), void (*eventcb)(void *, uint32_t), void *arg,
-    int borrowed)
+win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
+    void *arg, int borrowed)
 {
 	struct win32_handle_writer	*whw;
 
@@ -920,11 +908,11 @@ win32_handle_writer_new1(HANDLE *handle, void (*writecb)(void *),
 		return (NULL);
 	if (handle == NULL || *handle == NULL || *handle == INVALID_HANDLE_VALUE)
 		return (NULL);
+	if (eventcb == NULL)
+		return (NULL);
 
 	whw = xcalloc(1, sizeof *whw);
 	whw->handle = *handle;
-	whw->writecb = writecb;
-	whw->errorcb = errorcb;
 	whw->eventcb = eventcb;
 	whw->arg = arg;
 	whw->borrowed = borrowed;
@@ -953,50 +941,22 @@ win32_handle_writer_new1(HANDLE *handle, void (*writecb)(void *),
 	}
 	if (!borrowed)
 		*handle = NULL;
-	if (whw->writecb != NULL || whw->eventcb != NULL)
-		win32_io_service_enqueue_writer(whw,
-		    WIN32_IO_EVENT_WRITE_DRAINED);
+	win32_io_service_enqueue_writer(whw, WIN32_IO_EVENT_WRITE_DRAINED);
 	return (whw);
-}
-
-struct win32_handle_writer *
-win32_handle_writer_new_cb(HANDLE *handle, void (*writecb)(void *),
-    void (*errorcb)(void *), void *arg)
-{
-	return (win32_handle_writer_new1(handle, writecb, errorcb, NULL, arg,
-	    0));
-}
-
-struct win32_handle_writer *
-win32_handle_writer_new_borrowed(HANDLE *handle, void (*writecb)(void *),
-    void (*errorcb)(void *), void *arg)
-{
-	return (win32_handle_writer_new1(handle, writecb, errorcb, NULL, arg,
-	    1));
 }
 
 struct win32_handle_writer *
 win32_handle_writer_new_events(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	if (eventcb == NULL)
-		return (NULL);
-	return (win32_handle_writer_new1(handle, NULL, NULL, eventcb, arg, 0));
+	return (win32_handle_writer_new1(handle, eventcb, arg, 0));
 }
 
 struct win32_handle_writer *
 win32_handle_writer_new_events_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	if (eventcb == NULL)
-		return (NULL);
-	return (win32_handle_writer_new1(handle, NULL, NULL, eventcb, arg, 1));
-}
-
-struct win32_handle_writer *
-win32_handle_writer_new(HANDLE *handle)
-{
-	return (win32_handle_writer_new_cb(handle, NULL, NULL, NULL));
+	return (win32_handle_writer_new1(handle, eventcb, arg, 1));
 }
 
 void
