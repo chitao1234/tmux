@@ -1031,7 +1031,7 @@ win32_handle_event_thread(void *arg)
 	return (0);
 }
 
-struct win32_io_endpoint *
+static struct win32_io_endpoint *
 win32_io_reader_new_worker(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
@@ -1072,6 +1072,27 @@ win32_io_reader_new_worker(HANDLE handle,
 		return (NULL);
 	}
 	return (&whe->endpoint);
+}
+
+struct win32_io_endpoint *
+win32_io_reader_new_console(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_reader_new_worker(handle, eventcb, arg));
+}
+
+struct win32_io_endpoint *
+win32_io_reader_new_stdio(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_reader_new_worker(handle, eventcb, arg));
+}
+
+struct win32_io_endpoint *
+win32_io_reader_new_terminal(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_reader_new_worker(handle, eventcb, arg));
 }
 
 static struct win32_io_endpoint *
@@ -1574,7 +1595,7 @@ win32_io_writer_new_file_borrowed(HANDLE *handle, uint64_t offset, int append,
 	return (&whw->endpoint);
 }
 
-struct win32_io_endpoint *
+static struct win32_io_endpoint *
 win32_io_writer_new_worker_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
@@ -1584,6 +1605,27 @@ win32_io_writer_new_worker_borrowed(HANDLE *handle,
 	if (whw == NULL)
 		return (NULL);
 	return (&whw->endpoint);
+}
+
+struct win32_io_endpoint *
+win32_io_writer_new_console_borrowed(HANDLE *handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
+}
+
+struct win32_io_endpoint *
+win32_io_writer_new_stdio_borrowed(HANDLE *handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
+}
+
+struct win32_io_endpoint *
+win32_io_writer_new_terminal_borrowed(HANDLE *handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
 }
 
 static void

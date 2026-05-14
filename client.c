@@ -531,7 +531,7 @@ client_win32_input_start(void)
 		if (client_win32_input_pending == NULL)
 			fatalx("out of memory");
 	}
-	client_win32_input = win32_io_reader_new_worker(hin,
+	client_win32_input = win32_io_reader_new_console(hin,
 	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
@@ -605,7 +605,7 @@ client_win32_output_start(void)
 		return (-1);
 
 	hout = GetStdHandle(STD_OUTPUT_HANDLE);
-	client_win32_output = win32_io_writer_new_worker_borrowed(&hout,
+	client_win32_output = win32_io_writer_new_console_borrowed(&hout,
 	    client_win32_output_event_callback, NULL);
 	if (client_win32_output == NULL) {
 		log_debug("%s: couldn't create console output writer",

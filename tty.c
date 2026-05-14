@@ -505,7 +505,7 @@ tty_open(struct tty *tty, char **cause)
 
 #ifdef TMUX_WIN32
 	if (c->win32_stdin != NULL) {
-		tty->win32_in = win32_io_reader_new_worker(c->win32_stdin,
+		tty->win32_in = win32_io_reader_new_terminal(c->win32_stdin,
 		    tty_win32_in_event_callback, tty);
 		if (tty->win32_in == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty input event");
@@ -534,7 +534,7 @@ tty_open(struct tty *tty, char **cause)
 		event_set(&tty->event_out, c->fd, EV_WRITE,
 		    tty_write_callback, tty);
 	if (c->win32_stdout != NULL) {
-		tty->win32_out = win32_io_writer_new_worker_borrowed(
+		tty->win32_out = win32_io_writer_new_terminal_borrowed(
 		    &c->win32_stdout, tty_win32_out_event_callback, tty);
 		if (tty->win32_out == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty output writer");

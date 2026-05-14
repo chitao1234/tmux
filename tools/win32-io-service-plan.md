@@ -678,14 +678,14 @@ endpoints while preserving the existing process-exit delivery mechanism.
 
 ## Explicit Worker Fallback API Slice
 
-Remaining worker-backed endpoints are now named as explicit fallbacks:
+Remaining worker-backed endpoints were made visible as explicit fallbacks:
 
-- `win32_io_reader_new_worker()` is used only for handles that still require
-  the blocking worker backend, currently client console input, direct tty
-  input, and stdio file reads;
-- `win32_io_writer_new_worker_borrowed()` is used only for borrowed handles
-  that still require the blocking worker backend, currently client console
-  output, direct tty output, and stdout/stderr file writes;
+- worker-backed readers were kept only for handles that still required the
+  blocking worker backend, currently client console input, direct tty input,
+  and stdio file reads;
+- worker-backed borrowed writers were kept only for borrowed handles that still
+  required the blocking worker backend, currently client console output, direct
+  tty output, and stdout/stderr file writes;
 - the generic owned worker writer constructor has been removed from the public
   Win32 platform surface because no caller needs it after pane, job, and
   path-backed file writes moved to overlapped endpoints;
@@ -695,6 +695,26 @@ Remaining worker-backed endpoints are now named as explicit fallbacks:
 This is an API clarity cleanup, not a backend migration. The worker fallback is
 still intentional for console and stdio handles until a dedicated console
 proactor preserves the current UTF-8 and `WriteConsoleW` behavior.
+
+## Worker Fallback Purpose API Slice
+
+The remaining worker backend is now hidden behind purpose-specific public
+constructors:
+
+- client console input/output uses `win32_io_reader_new_console()` and
+  `win32_io_writer_new_console_borrowed()`;
+- server-side direct terminal handle input/output uses
+  `win32_io_reader_new_terminal()` and
+  `win32_io_writer_new_terminal_borrowed()`;
+- inherited stdio file-transfer handles use `win32_io_reader_new_stdio()` and
+  `win32_io_writer_new_stdio_borrowed()`;
+- the generic worker reader/writer constructors are private to
+  `win32-event.c`, so new callers must choose and document a specific fallback
+  reason rather than silently depending on the blocking worker backend.
+
+This does not change runtime behavior. It sharpens the remaining migration
+boundary before either a console proactor or a stdio-specific backend is
+designed.
 
 ## Dead Pipe Helper Removal Slice
 
@@ -956,7 +976,7 @@ reader instead of the Unix fd bufferevent path:
   reads and `STDIN_FILENO` reads on Win32;
 - path-backed regular files continue to use the IOCP regular-file reader;
 - stdin handles use the explicit worker reader fallback through
-  `win32_io_reader_new_worker()`, matching the fallback policy for inherited
+  `win32_io_reader_new_stdio()`, matching the fallback policy for inherited
   stdio handles;
 - read data and read completion still use the existing `MSG_READ` and
   `MSG_READ_DONE` protocol.
@@ -1061,11 +1081,10 @@ configuration, popup editor file, and prompt-history paths now use the Win32
 I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
-- console input/output and direct terminal handles still use
-  `win32_io_reader_new_worker()` or
-  `win32_io_writer_new_worker_borrowed()`, because console handles need the
-  UTF-8/`WriteConsoleW` worker backend until a dedicated console proactor
-  exists;
+- console input/output and direct terminal handles still use the
+  purpose-specific console or terminal worker-fallback constructors, because
+  console handles need the UTF-8/`WriteConsoleW` worker backend until a
+  dedicated console proactor exists;
 - inherited stdio streams for client file transfer still use the worker
   fallback, because they are borrowed process handles and are not always
   overlapped-capable regular files;
