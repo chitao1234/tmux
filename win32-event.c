@@ -159,6 +159,7 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 
 struct win32_handle_event {
 	struct win32_io_endpoint endpoint;
+	TAILQ_ENTRY(win32_handle_event) console_entry;
 	HANDLE		 handle;
 	HANDLE		 thread;
 	HANDLE		 stop;
@@ -176,6 +177,8 @@ struct win32_handle_event {
 	int		 paused;
 	int		 stopping;
 	int		 throttled;
+	int		 console_queued;
+	int		 console_active;
 	enum win32_handle_event_state state;
 	DWORD		 error;
 };
@@ -235,8 +238,19 @@ struct win32_console_writer_service {
 	int		 stopping;
 };
 
+struct win32_console_reader_service {
+	HANDLE		 wake;
+	HANDLE		 stop;
+	HANDLE		 thread;
+	CRITICAL_SECTION lock;
+	TAILQ_HEAD(, win32_handle_event) pending;
+	int		 initialized;
+	int		 stopping;
+};
+
 static struct win32_io_service win32_io;
 static struct win32_console_writer_service win32_console_writer;
+static struct win32_console_reader_service win32_console_reader;
 
 #define WIN32_HANDLE_EVENT_HIGH (1024 * 1024)
 #define WIN32_HANDLE_EVENT_LOW (512 * 1024)
@@ -246,6 +260,7 @@ static struct win32_console_writer_service win32_console_writer;
 #define WIN32_IOCP_STOP_TIMEOUT 1000
 #define WIN32_IOCP_SERVICE_STOP_TIMEOUT 1000
 #define WIN32_CONSOLE_WRITER_STOP_TIMEOUT 1000
+#define WIN32_CONSOLE_READER_STOP_TIMEOUT 1000
 #define WIN32_PROCESS_WAIT_STOP_TIMEOUT 1000
 #define WIN32_IOCP_STOP_KEY ((ULONG_PTR)-1)
 
@@ -273,6 +288,8 @@ static int	win32_wait_iocp_endpoint(HANDLE, const char *);
 static int	win32_wait_iocp_thread(HANDLE, const char *);
 static int	win32_wait_console_endpoint(HANDLE, const char *);
 static int	win32_wait_console_thread(HANDLE, const char *);
+static int	win32_wait_console_reader_endpoint(HANDLE, const char *);
+static int	win32_wait_console_reader_thread(HANDLE, const char *);
 static int	win32_unregister_process_wait(struct win32_process_event *,
 		     const char *);
 static void	win32_handle_event_update_ready(
@@ -286,7 +303,13 @@ static void	win32_handle_event_iocp_complete(
 		     struct win32_handle_event *, DWORD, DWORD);
 static int	win32_handle_event_read_once(struct win32_handle_event *);
 static DWORD WINAPI win32_handle_event_thread(void *);
-static DWORD WINAPI win32_handle_event_console_thread(void *);
+static int	win32_console_reader_service_init(void);
+static int	win32_console_reader_service_fini(const char *);
+static DWORD WINAPI win32_console_reader_thread(void *);
+static void	win32_console_reader_enqueue_locked(
+		     struct win32_handle_event *);
+static void	win32_console_reader_enqueue(struct win32_handle_event *);
+static void	win32_console_reader_run(struct win32_handle_event *);
 static int	win32_console_writer_service_init(void);
 static int	win32_console_writer_service_fini(const char *);
 static DWORD WINAPI win32_console_writer_thread(void *);
@@ -467,6 +490,8 @@ win32_io_service_fini(void)
 		PostQueuedCompletionStatus(win32_io.iocp, 0,
 		    WIN32_IOCP_STOP_KEY, NULL);
 	if (win32_wait_iocp_thread(win32_io.iocp_thread, __func__) != 0)
+		return;
+	if (win32_console_reader_service_fini(__func__) != 0)
 		return;
 	if (win32_console_writer_service_fini(__func__) != 0)
 		return;
@@ -780,6 +805,36 @@ win32_wait_console_thread(HANDLE thread, const char *name)
 }
 
 static int
+win32_wait_console_reader_endpoint(HANDLE complete, const char *name)
+{
+	DWORD	wait;
+
+	if (complete == NULL)
+		return (0);
+	wait = WaitForSingleObject(complete, WIN32_CONSOLE_READER_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0)
+		return (0);
+	log_debug("%s: console reader endpoint did not stop within %u ms",
+	    name, WIN32_CONSOLE_READER_STOP_TIMEOUT);
+	return (-1);
+}
+
+static int
+win32_wait_console_reader_thread(HANDLE thread, const char *name)
+{
+	DWORD	wait;
+
+	if (thread == NULL)
+		return (0);
+	wait = WaitForSingleObject(thread, WIN32_CONSOLE_READER_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0)
+		return (0);
+	log_debug("%s: console reader thread did not stop within %u ms",
+	    name, WIN32_CONSOLE_READER_STOP_TIMEOUT);
+	return (-1);
+}
+
+static int
 win32_unregister_process_wait(struct win32_process_event *wpe, const char *name)
 {
 	HANDLE	complete;
@@ -960,6 +1015,20 @@ win32_handle_event_update_ready(struct win32_handle_event *whe)
 			    events);
 			EnterCriticalSection(&whe->lock);
 		}
+		return;
+	}
+	if (whe->backend == WIN32_HANDLE_EVENT_CONSOLE) {
+		buffered = EVBUFFER_LENGTH(whe->input);
+		if (whe->throttled && buffered <= WIN32_HANDLE_EVENT_LOW)
+			whe->throttled = 0;
+		if (whe->changed != NULL)
+			SetEvent(whe->changed);
+		if (whe->stopping || whe->paused || whe->throttled ||
+		    whe->state != WIN32_HANDLE_EVENT_RUNNING)
+			return;
+		LeaveCriticalSection(&whe->lock);
+		win32_console_reader_enqueue(whe);
+		EnterCriticalSection(&whe->lock);
 		return;
 	}
 
@@ -1186,40 +1255,150 @@ win32_handle_event_thread(void *arg)
 	return (0);
 }
 
-static DWORD WINAPI
-win32_handle_event_console_thread(void *arg)
+static int
+win32_console_reader_service_init(void)
 {
-	struct win32_handle_event	*whe = arg;
-	HANDLE				 ready_events[2], read_events[3];
-	DWORD				 wait;
+	if (win32_console_reader.initialized)
+		return (0);
 
-	ready_events[0] = whe->stop;
-	ready_events[1] = whe->ready;
-	read_events[0] = whe->stop;
-	read_events[1] = whe->changed;
-	read_events[2] = whe->handle;
+	win32_console_reader.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+	if (win32_console_reader.wake == NULL)
+		return (-1);
+	win32_console_reader.stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (win32_console_reader.stop == NULL) {
+		CloseHandle(win32_console_reader.wake);
+		memset(&win32_console_reader, 0, sizeof win32_console_reader);
+		return (-1);
+	}
+	InitializeCriticalSection(&win32_console_reader.lock);
+	TAILQ_INIT(&win32_console_reader.pending);
+	win32_console_reader.thread = CreateThread(NULL, 0,
+	    win32_console_reader_thread, NULL, 0, NULL);
+	if (win32_console_reader.thread == NULL) {
+		DeleteCriticalSection(&win32_console_reader.lock);
+		CloseHandle(win32_console_reader.stop);
+		CloseHandle(win32_console_reader.wake);
+		memset(&win32_console_reader, 0, sizeof win32_console_reader);
+		return (-1);
+	}
+	win32_console_reader.initialized = 1;
+	return (0);
+}
+
+static int
+win32_console_reader_service_fini(const char *name)
+{
+	struct win32_handle_event	*whe;
+
+	if (!win32_console_reader.initialized)
+		return (0);
+
+	EnterCriticalSection(&win32_console_reader.lock);
+	win32_console_reader.stopping = 1;
+	TAILQ_FOREACH(whe, &win32_console_reader.pending, console_entry) {
+		if (whe->changed != NULL)
+			SetEvent(whe->changed);
+	}
+	SetEvent(win32_console_reader.stop);
+	SetEvent(win32_console_reader.wake);
+	LeaveCriticalSection(&win32_console_reader.lock);
+	CancelSynchronousIo(win32_console_reader.thread);
+
+	if (win32_wait_console_reader_thread(win32_console_reader.thread,
+	    name) != 0)
+		return (-1);
+
+	CloseHandle(win32_console_reader.thread);
+	CloseHandle(win32_console_reader.stop);
+	CloseHandle(win32_console_reader.wake);
+	DeleteCriticalSection(&win32_console_reader.lock);
+	memset(&win32_console_reader, 0, sizeof win32_console_reader);
+	return (0);
+}
+
+static void
+win32_console_reader_enqueue_locked(struct win32_handle_event *whe)
+{
+	if (whe->console_queued || whe->console_active)
+		return;
+	TAILQ_INSERT_TAIL(&win32_console_reader.pending, whe, console_entry);
+	whe->console_queued = 1;
+	SetEvent(win32_console_reader.wake);
+}
+
+static void
+win32_console_reader_enqueue(struct win32_handle_event *whe)
+{
+	EnterCriticalSection(&win32_console_reader.lock);
+	win32_console_reader_enqueue_locked(whe);
+	LeaveCriticalSection(&win32_console_reader.lock);
+}
+
+static DWORD WINAPI
+win32_console_reader_thread(__unused void *arg)
+{
+	struct win32_handle_event	*whe;
+	int				 stopping;
+
 	for (;;) {
-		wait = WaitForMultipleObjects(2, ready_events, FALSE,
-		    INFINITE);
-		if (wait != WAIT_OBJECT_0 + 1)
-			break;
+		WaitForSingleObject(win32_console_reader.wake, INFINITE);
+		for (;;) {
+			EnterCriticalSection(&win32_console_reader.lock);
+			whe = TAILQ_FIRST(&win32_console_reader.pending);
+			if (whe != NULL) {
+				TAILQ_REMOVE(&win32_console_reader.pending, whe,
+				    console_entry);
+				whe->console_queued = 0;
+				whe->console_active = 1;
+			}
+			stopping = win32_console_reader.stopping;
+			LeaveCriticalSection(&win32_console_reader.lock);
+			if (whe == NULL)
+				break;
 
-		if (!win32_handle_event_prepare_console_wait(whe))
-			continue;
-		wait = WaitForMultipleObjects(3, read_events, FALSE,
-		    INFINITE);
-		if (wait == WAIT_OBJECT_0)
-			break;
-		if (wait == WAIT_OBJECT_0 + 1)
-			continue;
-		if (wait != WAIT_OBJECT_0 + 2)
-			break;
-		if (!win32_handle_event_reading_enabled(whe))
-			continue;
-		if (win32_handle_event_read_once(whe) != 0)
+			if (!stopping)
+				win32_console_reader_run(whe);
+
+			EnterCriticalSection(&win32_console_reader.lock);
+			EnterCriticalSection(&whe->lock);
+			whe->console_active = 0;
+			if (stopping || whe->stopping ||
+			    whe->state != WIN32_HANDLE_EVENT_RUNNING) {
+				SetEvent(whe->complete);
+			} else if (!whe->paused && !whe->throttled) {
+				win32_console_reader_enqueue_locked(whe);
+			}
+			LeaveCriticalSection(&whe->lock);
+			LeaveCriticalSection(&win32_console_reader.lock);
+		}
+		if (stopping)
 			break;
 	}
 	return (0);
+}
+
+static void
+win32_console_reader_run(struct win32_handle_event *whe)
+{
+	HANDLE	events[4];
+	DWORD	wait;
+
+	events[0] = win32_console_reader.stop;
+	events[1] = whe->stop;
+	events[2] = whe->changed;
+	events[3] = whe->handle;
+
+	if (!win32_handle_event_prepare_console_wait(whe))
+		return;
+	wait = WaitForMultipleObjects(4, events, FALSE, INFINITE);
+	if (wait == WAIT_OBJECT_0 || wait == WAIT_OBJECT_0 + 1 ||
+	    wait == WAIT_OBJECT_0 + 2)
+		return;
+	if (wait != WAIT_OBJECT_0 + 3)
+		return;
+	if (!win32_handle_event_reading_enabled(whe))
+		return;
+	(void)win32_handle_event_read_once(whe);
 }
 
 static int
@@ -1311,7 +1490,12 @@ win32_console_writer_thread(__unused void *arg)
 			EnterCriticalSection(&win32_console_writer.lock);
 			EnterCriticalSection(&whw->lock);
 			whw->console_active = 0;
-			if (whw->state == WIN32_HANDLE_WRITER_RUNNING &&
+			if (stopping) {
+				if (whw->stop ||
+				    whw->state == WIN32_HANDLE_WRITER_CLOSED ||
+				    whw->state == WIN32_HANDLE_WRITER_ERROR)
+					SetEvent(whw->complete);
+			} else if (whw->state == WIN32_HANDLE_WRITER_RUNNING &&
 			    !whw->stop && whw->handle != NULL &&
 			    EVBUFFER_LENGTH(whw->output) != 0) {
 				win32_console_writer_enqueue_locked(whw);
@@ -1434,6 +1618,9 @@ win32_io_reader_new_worker(HANDLE handle, enum win32_handle_event_backend backen
 		return (NULL);
 	if (win32_io_service_init() != 0)
 		return (NULL);
+	if (backend == WIN32_HANDLE_EVENT_CONSOLE &&
+	    win32_console_reader_service_init() != 0)
+		return (NULL);
 
 	whe = xcalloc(1, sizeof *whe);
 	whe->handle = handle;
@@ -1465,18 +1652,28 @@ win32_io_reader_new_worker(HANDLE handle, enum win32_handle_event_backend backen
 			free(whe);
 			return (NULL);
 		}
+		whe->complete = CreateEventW(NULL, TRUE, TRUE, NULL);
+		if (whe->complete == NULL) {
+			CloseHandle(whe->changed);
+			CloseHandle(whe->ready);
+			CloseHandle(whe->stop);
+			evbuffer_free(whe->input);
+			free(whe);
+			return (NULL);
+		}
 	}
 	InitializeCriticalSection(&whe->lock);
 	win32_io_endpoint_init(&whe->endpoint, WIN32_IO_ENDPOINT_READER, whe,
 	    eventcb, arg);
 	if (backend == WIN32_HANDLE_EVENT_CONSOLE) {
-		whe->thread = CreateThread(NULL, 0,
-		    win32_handle_event_console_thread, whe, 0, NULL);
+		EnterCriticalSection(&whe->lock);
+		win32_handle_event_update_ready(whe);
+		LeaveCriticalSection(&whe->lock);
 	} else {
 		whe->thread = CreateThread(NULL, 0, win32_handle_event_thread,
 		    whe, 0, NULL);
 	}
-	if (whe->thread == NULL) {
+	if (backend != WIN32_HANDLE_EVENT_CONSOLE && whe->thread == NULL) {
 		win32_handle_event_free(whe);
 		return (NULL);
 	}
@@ -1583,6 +1780,23 @@ win32_handle_event_free(struct win32_handle_event *whe)
 			CancelIoEx(whe->handle, &whe->overlapped);
 		LeaveCriticalSection(&whe->lock);
 		if (win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
+			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			return;
+		}
+	} else if (whe->backend == WIN32_HANDLE_EVENT_CONSOLE) {
+		EnterCriticalSection(&win32_console_reader.lock);
+		EnterCriticalSection(&whe->lock);
+		whe->stopping = 1;
+		ResetEvent(whe->complete);
+		if (whe->stop != NULL)
+			SetEvent(whe->stop);
+		if (whe->changed != NULL)
+			SetEvent(whe->changed);
+		win32_console_reader_enqueue_locked(whe);
+		LeaveCriticalSection(&whe->lock);
+		LeaveCriticalSection(&win32_console_reader.lock);
+		if (win32_wait_console_reader_endpoint(whe->complete,
+		    __func__) != 0) {
 			win32_io_service_deactivate_endpoint(&whe->endpoint);
 			return;
 		}

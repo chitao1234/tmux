@@ -1193,6 +1193,35 @@ true IOCP endpoints because `WriteConsoleW()` is synchronous, but it removes the
 per-endpoint console output worker and keeps console-specific blocking behavior
 behind one tmux-owned service thread.
 
+## Shared Console Reader Slice
+
+Console input no longer creates one blocking worker thread per console reader
+endpoint:
+
+- `WIN32_HANDLE_EVENT_CONSOLE` endpoints now enqueue readiness on a shared
+  process-wide console reader service instead of starting their own
+  per-endpoint console reader thread;
+- the shared reader waits for the console input handle to become signaled before
+  issuing a single `ReadFile()`, preserving the console-read bridge behavior
+  that avoided permanent blocking reads;
+- endpoint pause, throttle, drain, EOF, and error state remain owned by the
+  existing reader endpoint and continue to report completions through the shared
+  Win32 I/O service queue;
+- the reader service uses separate queue-wakeup and stop events, so requeueing a
+  readable endpoint does not immediately wake an active console wait and spin
+  without waiting for real input;
+- console reader free waits on a per-endpoint completion event with the same
+  bounded teardown policy as IOCP, process wait, worker fallback, and shared
+  console writer teardown;
+- non-console stdio and direct terminal reads still use the explicit worker
+  fallback because those borrowed handles are not uniformly waitable as console
+  input handles or overlapped-capable files.
+
+This is the console proactor bridge for input. It still uses synchronous
+`ReadFile()` after the console reports input readiness, but it removes the
+per-endpoint console input worker and keeps console-specific blocking behavior
+behind one tmux-owned service thread.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1200,9 +1229,10 @@ configuration, popup editor file, and prompt-history paths now use the Win32
 I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
-- console input uses a console-handle wait loop before reading, while console
-  output now uses the shared console writer service because Windows console
-  handles still require synchronous `WriteConsoleW()` calls;
+- console input now uses the shared console reader service, while console output
+  now uses the shared console writer service, because Windows console handles
+  still require synchronous `ReadFile()` and `WriteConsoleW()` calls at the
+  native API boundary;
 - direct terminal handles still use the purpose-specific terminal
   worker-fallback constructors, choosing the shared console writer backend only
   when the borrowed output handle is an actual console;
@@ -1224,8 +1254,6 @@ or worker-backed paths are intentionally classified rather than hidden:
 
 The next implementation work should therefore be one of:
 
-- continue console input service work by replacing the current console reader
-  bridge with a fuller console-input proactor;
 - redesign debug and tty-output logging as a bounded nonblocking diagnostic
   subsystem that can safely operate before service initialization and during
   fatal paths;
