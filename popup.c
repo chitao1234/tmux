@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,9 +82,65 @@ struct popup_data {
 
 struct popup_editor {
 	char			*path;
+	char			*cmdpath;
+	char			*cwd;
+	char			*editor;
+	struct client		*c;
 	popup_finish_edit_cb	 cb;
 	void			*arg;
 };
+
+static void	popup_editor_close_cb(int, void *);
+
+#ifdef TMUX_WIN32
+static int
+popup_editor_temp_path(char **path, char **cmdpath, char **cwd)
+{
+	const char *slash, *name, *backslash;
+	char	*dir, *template;
+	int	 fd;
+
+	dir = win32_getenv_utf8("TMP");
+	if (dir == NULL || *dir == '\0') {
+		free(dir);
+		dir = win32_getenv_utf8("TEMP");
+	}
+	if (dir == NULL || *dir == '\0') {
+		free(dir);
+		dir = win32_getenv_utf8("USERPROFILE");
+	}
+	if (dir == NULL || *dir == '\0') {
+		free(dir);
+		errno = ENOENT;
+		return (-1);
+	}
+
+	slash = (dir[strlen(dir) - 1] == '/' || dir[strlen(dir) - 1] == '\\') ?
+	    "" : "/";
+	xasprintf(&template, "%s%stmux.XXXXXXXX", dir, slash);
+	free(dir);
+
+	fd = mkstemp(template);
+	if (fd == -1) {
+		free(template);
+		return (-1);
+	}
+	*path = template;
+	slash = strrchr(template, '/');
+	backslash = strrchr(template, '\\');
+	if (slash == NULL || backslash > slash)
+		slash = backslash;
+	if (slash == NULL) {
+		*cmdpath = xstrdup(template);
+		*cwd = xstrdup(".");
+	} else {
+		name = slash + 1;
+		*cmdpath = xstrdup(name);
+		*cwd = xstrndup(template, slash - template);
+	}
+	return (fd);
+}
+#endif
 
 static const struct menu_item popup_menu_items[] = {
 	{ "Close", 'q', NULL },
@@ -916,16 +973,76 @@ popup_editor_free(struct popup_editor *pe)
 {
 	unlink(pe->path);
 	free(pe->path);
+	free(pe->cmdpath);
+	free(pe->cwd);
+	free(pe->editor);
+	if (pe->c != NULL)
+		server_client_unref(pe->c);
 	free(pe);
 }
+
+static int
+popup_editor_open(struct popup_editor *pe)
+{
+	struct client	*c = pe->c;
+	char		*cmd;
+	u_int		 px, py, sx, sy;
+
+	if (c->flags & CLIENT_DEAD || c->session == NULL)
+		return (-1);
+
+	sx = c->tty.sx * 9 / 10;
+	sy = c->tty.sy * 9 / 10;
+	px = (c->tty.sx / 2) - (sx / 2);
+	py = (c->tty.sy / 2) - (sy / 2);
+
+	xasprintf(&cmd, "%s %s", pe->editor, pe->cmdpath);
+	if (popup_display(POPUP_INTERNAL|POPUP_CLOSEEXIT, BOX_LINES_DEFAULT,
+	    NULL, px, py, sx, sy, NULL, cmd, 0, NULL, pe->cwd, NULL, c, NULL,
+	    NULL, NULL, popup_editor_close_cb, pe) != 0) {
+		free(cmd);
+		return (-1);
+	}
+	free(cmd);
+	return (0);
+}
+
+#ifdef TMUX_WIN32
+static void
+popup_editor_read_cb(__unused struct client *c, __unused const char *path,
+    int error, int closed, struct evbuffer *buffer, void *arg)
+{
+	struct popup_editor	*pe = arg;
+	char			*buf = NULL;
+	size_t			 len;
+
+	if (!closed)
+		return;
+
+	len = EVBUFFER_LENGTH(buffer);
+	if (error == 0 && len != 0) {
+		buf = malloc(len);
+		if (buf != NULL)
+			memcpy(buf, EVBUFFER_DATA(buffer), len);
+		else
+			len = 0;
+	} else
+		len = 0;
+
+	pe->cb(buf, len, pe->arg); /* callback now owns buffer */
+	popup_editor_free(pe);
+}
+#endif
 
 static void
 popup_editor_close_cb(int status, void *arg)
 {
 	struct popup_editor	*pe = arg;
+#ifndef TMUX_WIN32
 	FILE			*f;
 	char			*buf = NULL;
 	off_t			 len = 0;
+#endif
 
 	if (status != 0) {
 		pe->cb(NULL, 0, pe->arg);
@@ -933,6 +1050,9 @@ popup_editor_close_cb(int status, void *arg)
 		return;
 	}
 
+#ifdef TMUX_WIN32
+	file_read(NULL, pe->path, popup_editor_read_cb, pe);
+#else
 	f = fopen(pe->path, "r");
 	if (f != NULL) {
 		fseeko(f, 0, SEEK_END);
@@ -951,7 +1071,25 @@ popup_editor_close_cb(int status, void *arg)
 	}
 	pe->cb(buf, len, pe->arg); /* callback now owns buffer */
 	popup_editor_free(pe);
+#endif
 }
+
+#ifdef TMUX_WIN32
+static void
+popup_editor_write_cb(__unused struct client *c, __unused const char *path,
+    int error, int closed, __unused struct evbuffer *buffer, void *arg)
+{
+	struct popup_editor	*pe = arg;
+
+	if (!closed)
+		return;
+
+	if (error != 0 || popup_editor_open(pe) != 0) {
+		pe->cb(NULL, 0, pe->arg);
+		popup_editor_free(pe);
+	}
+}
+#endif
 
 int
 popup_editor(struct client *c, const char *buf, size_t len,
@@ -959,19 +1097,43 @@ popup_editor(struct client *c, const char *buf, size_t len,
 {
 	struct popup_editor	*pe;
 	int			 fd;
+#ifndef TMUX_WIN32
 	FILE			*f;
-	char			*cmd;
 	char			 path[] = _PATH_TMP "tmux.XXXXXXXX";
+#else
+	char			*path, *cmdpath, *cwd;
+#endif
 	const char		*editor;
-	u_int			 px, py, sx, sy;
 
 	editor = options_get_string(global_options, "editor");
 	if (*editor == '\0')
 		return (-1);
 
+#ifdef TMUX_WIN32
+	fd = popup_editor_temp_path(&path, &cmdpath, &cwd);
+#else
 	fd = mkstemp(path);
+#endif
 	if (fd == -1)
 		return (-1);
+
+#ifdef TMUX_WIN32
+	close(fd);
+
+	pe = xcalloc(1, sizeof *pe);
+	pe->path = path;
+	pe->cmdpath = cmdpath;
+	pe->cwd = cwd;
+	pe->editor = xstrdup(editor);
+	pe->c = c;
+	pe->c->references++;
+	pe->cb = cb;
+	pe->arg = arg;
+
+	file_write(NULL, path, O_WRONLY|O_TRUNC, buf, len,
+	    popup_editor_write_cb, pe);
+	return (0);
+#else
 	f = fdopen(fd, "w");
 	if (f == NULL)
 		return (-1);
@@ -983,22 +1145,18 @@ popup_editor(struct client *c, const char *buf, size_t len,
 
 	pe = xcalloc(1, sizeof *pe);
 	pe->path = xstrdup(path);
+	pe->cmdpath = xstrdup(path);
+	pe->cwd = xstrdup(_PATH_TMP);
+	pe->editor = xstrdup(editor);
+	pe->c = c;
+	pe->c->references++;
 	pe->cb = cb;
 	pe->arg = arg;
 
-	sx = c->tty.sx * 9 / 10;
-	sy = c->tty.sy * 9 / 10;
-	px = (c->tty.sx / 2) - (sx / 2);
-	py = (c->tty.sy / 2) - (sy / 2);
-
-	xasprintf(&cmd, "%s %s", editor, path);
-	if (popup_display(POPUP_INTERNAL|POPUP_CLOSEEXIT, BOX_LINES_DEFAULT,
-	    NULL, px, py, sx, sy, NULL, cmd, 0, NULL, _PATH_TMP, NULL, c, NULL,
-	    NULL, NULL, popup_editor_close_cb, pe) != 0) {
+	if (popup_editor_open(pe) != 0) {
 		popup_editor_free(pe);
-		free(cmd);
 		return (-1);
 	}
-	free(cmd);
 	return (0);
+#endif
 }

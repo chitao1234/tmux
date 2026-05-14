@@ -985,3 +985,21 @@ path instead of synchronous `fopen()` on the server thread:
 
 This removes another direct server-thread filesystem read from the Win32 port
 without changing the startup command ordering model.
+
+## Popup Editor File Slice
+
+Win32 popup editor temp-file I/O now uses the I/O service path:
+
+- initial popup editor contents are written with `file_write(NULL, ...)` instead
+  of synchronous `fdopen()` plus `fwrite()` on the tmux server thread;
+- edited popup contents are read back with `file_read(NULL, ...)` instead of
+  synchronous `fopen()` plus `fread()` from the popup close callback;
+- the popup editor state keeps a client reference while the initial async write
+  is pending, so the delayed popup open cannot dereference a freed client;
+- Win32 editor temp files are created under `TMP`, `TEMP`, or `USERPROFILE`
+  instead of relying on the stale `_PATH_TMP` / `C:/Temp` fallback;
+- the editor process runs in that temp directory and receives only the temp
+  file basename, avoiding a new shell-command quoting dependency on full
+  Windows temp paths with spaces.
+
+The Unix popup editor path remains synchronous and unchanged in backend policy.
