@@ -30,6 +30,16 @@ struct win32_handle_event;
 struct win32_handle_writer;
 struct win32_process_event;
 
+enum win32_io_event {
+	WIN32_IO_EVENT_READ = 0x1,
+	WIN32_IO_EVENT_READ_EOF = 0x2,
+	WIN32_IO_EVENT_WRITE_DRAINED = 0x4,
+	WIN32_IO_EVENT_WRITE_CLOSED = 0x8,
+	WIN32_IO_EVENT_PROCESS_EXIT = 0x10,
+	WIN32_IO_EVENT_ERROR = 0x20,
+	WIN32_IO_EVENT_CANCELED = 0x40
+};
+
 const char	*win32_strerror(DWORD);
 char		*win32_getenv_utf8(const char *);
 wchar_t		*win32_utf8_to_wide(const char *);
@@ -47,6 +57,8 @@ long		 win32_console_ctrl_c_events(void);
 void		 win32_io_service_fini(void);
 struct win32_handle_event *win32_handle_event_new(HANDLE, void (*)(void *),
 		     void (*)(void *), void *);
+struct win32_handle_event *win32_handle_event_new_events(HANDLE,
+		     void (*)(void *, uint32_t), void *);
 void		 win32_handle_event_free(struct win32_handle_event *);
 void		 win32_handle_event_drain(struct win32_handle_event *,
 		     struct evbuffer *);

@@ -386,3 +386,18 @@ Worker-backed write handles now have a service-level queue cap:
   and feed the service writer in bounded chunks;
 - tty, console relay, and file-write callers already send chunks below the cap,
   so this is a defensive service invariant rather than a protocol redesign.
+
+## Explicit Reader Event API Slice
+
+The service now exposes explicit read event reasons to callers:
+
+- `enum win32_io_event` is public in the Win32 platform header and matches the
+  planned read, EOF, write, process, error, and cancel event vocabulary;
+- `win32_handle_event_new_events()` lets callers receive a reason mask instead
+  of separate read and generic error callbacks;
+- the legacy `win32_handle_event_new()` constructor remains as a compatibility
+  shim for pane, job, tty, and client paths not migrated in this slice;
+- Win32 client file reads are the first migrated consumer, using explicit
+  `WIN32_IO_EVENT_READ`, `WIN32_IO_EVENT_READ_EOF`, and
+  `WIN32_IO_EVENT_ERROR` delivery before sending the existing tmux protocol
+  messages.

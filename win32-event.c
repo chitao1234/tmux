@@ -39,16 +39,6 @@ enum win32_io_completion_type {
 	WIN32_IO_COMPLETION_PROCESS
 };
 
-enum win32_io_event {
-	WIN32_IO_EVENT_READ = 0x1,
-	WIN32_IO_EVENT_READ_EOF = 0x2,
-	WIN32_IO_EVENT_WRITE_DRAINED = 0x4,
-	WIN32_IO_EVENT_WRITE_CLOSED = 0x8,
-	WIN32_IO_EVENT_PROCESS_EXIT = 0x10,
-	WIN32_IO_EVENT_ERROR = 0x20,
-	WIN32_IO_EVENT_CANCELED = 0x40
-};
-
 struct win32_io_completion {
 	TAILQ_ENTRY(win32_io_completion) entry;
 	enum win32_io_completion_type type;
@@ -155,6 +145,7 @@ struct win32_handle_event {
 	CRITICAL_SECTION lock;
 	void		(*readcb)(void *);
 	void		(*errorcb)(void *);
+	void		(*eventcb)(void *, uint32_t);
 	void		 *arg;
 	int		 paused;
 	int		 throttled;
@@ -218,6 +209,9 @@ static void	win32_io_service_dispatch_completion(
 		     struct win32_io_completion *, uint32_t);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
+static struct win32_handle_event *win32_handle_event_new1(HANDLE,
+		     void (*)(void *), void (*)(void *),
+		     void (*)(void *, uint32_t), void *);
 static int	win32_handle_event_error_is_eof(DWORD);
 static int	win32_handle_write(HANDLE, const void *, size_t);
 
@@ -442,6 +436,18 @@ win32_io_service_dispatch_reader(struct win32_handle_event *whe,
 	state = whe->state;
 	buffered = EVBUFFER_LENGTH(whe->input);
 	LeaveCriticalSection(&whe->lock);
+
+	if (state == WIN32_HANDLE_EVENT_EOF)
+		events |= WIN32_IO_EVENT_READ_EOF;
+	else if (state == WIN32_HANDLE_EVENT_ERROR)
+		events |= WIN32_IO_EVENT_ERROR;
+	if (buffered != 0)
+		events |= WIN32_IO_EVENT_READ;
+
+	if (whe->eventcb != NULL) {
+		whe->eventcb(whe->arg, events);
+		return;
+	}
 
 	if ((events & (WIN32_IO_EVENT_READ_EOF | WIN32_IO_EVENT_ERROR)) ||
 	    state != WIN32_HANDLE_EVENT_RUNNING) {
@@ -677,9 +683,9 @@ win32_handle_event_thread(void *arg)
 	return (0);
 }
 
-struct win32_handle_event *
-win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
-    void (*errorcb)(void *), void *arg)
+static struct win32_handle_event *
+win32_handle_event_new1(HANDLE handle, void (*readcb)(void *),
+    void (*errorcb)(void *), void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
 
@@ -695,6 +701,7 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 	}
 	whe->readcb = readcb;
 	whe->errorcb = errorcb;
+	whe->eventcb = eventcb;
 	whe->arg = arg;
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (whe->stop == NULL) {
@@ -719,6 +726,20 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 		return (NULL);
 	}
 	return (whe);
+}
+
+struct win32_handle_event *
+win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
+    void (*errorcb)(void *), void *arg)
+{
+	return (win32_handle_event_new1(handle, readcb, errorcb, NULL, arg));
+}
+
+struct win32_handle_event *
+win32_handle_event_new_events(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_handle_event_new1(handle, NULL, NULL, eventcb, arg));
 }
 
 void

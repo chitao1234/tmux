@@ -49,6 +49,7 @@ static void	file_write_win32_callback(void *);
 static void	file_write_win32_error_callback(void *);
 static void	file_read_win32_callback(void *);
 static void	file_read_win32_done_callback(void *);
+static void	file_read_win32_event_callback(void *, uint32_t);
 static int	file_write_console_text(struct client_file *, const char *,
 		    size_t);
 #endif
@@ -858,6 +859,16 @@ file_read_win32_callback(void *arg)
 }
 
 static void
+file_read_win32_event_callback(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_READ)
+		file_read_win32_callback(arg);
+	if (events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED))
+		file_read_win32_done_callback(arg);
+}
+
+static void
 file_read_win32_done_callback(void *arg)
 {
 	struct client_file	*cf = arg;
@@ -884,8 +895,8 @@ file_read_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_reader = win32_handle_event_new(handle,
-	    file_read_win32_callback, file_read_win32_done_callback, cf);
+	cf->win32_reader = win32_handle_event_new_events(handle,
+	    file_read_win32_event_callback, cf);
 	if (cf->win32_reader == NULL) {
 		errno = EIO;
 		return (-1);
