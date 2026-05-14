@@ -143,8 +143,6 @@ struct win32_handle_event {
 	HANDLE		 ready;
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
-	void		(*readcb)(void *);
-	void		(*errorcb)(void *);
 	void		(*eventcb)(void *, uint32_t);
 	void		 *arg;
 	int		 paused;
@@ -209,9 +207,6 @@ static void	win32_io_service_dispatch_completion(
 		     struct win32_io_completion *, uint32_t);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
-static struct win32_handle_event *win32_handle_event_new1(HANDLE,
-		     void (*)(void *), void (*)(void *),
-		     void (*)(void *, uint32_t), void *);
 static int	win32_handle_event_error_is_eof(DWORD);
 static int	win32_handle_write(HANDLE, const void *, size_t);
 
@@ -444,18 +439,7 @@ win32_io_service_dispatch_reader(struct win32_handle_event *whe,
 	if (buffered != 0)
 		events |= WIN32_IO_EVENT_READ;
 
-	if (whe->eventcb != NULL) {
-		whe->eventcb(whe->arg, events);
-		return;
-	}
-
-	if ((events & (WIN32_IO_EVENT_READ_EOF | WIN32_IO_EVENT_ERROR)) ||
-	    state != WIN32_HANDLE_EVENT_RUNNING) {
-		if (whe->errorcb != NULL)
-			whe->errorcb(whe->arg);
-	} else if ((events & WIN32_IO_EVENT_READ) && buffered != 0 &&
-	    whe->readcb != NULL)
-		whe->readcb(whe->arg);
+	whe->eventcb(whe->arg, events);
 }
 
 static void
@@ -683,12 +667,14 @@ win32_handle_event_thread(void *arg)
 	return (0);
 }
 
-static struct win32_handle_event *
-win32_handle_event_new1(HANDLE handle, void (*readcb)(void *),
-    void (*errorcb)(void *), void (*eventcb)(void *, uint32_t), void *arg)
+struct win32_handle_event *
+win32_handle_event_new_events(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
 
+	if (eventcb == NULL)
+		return (NULL);
 	if (win32_io_service_init() != 0)
 		return (NULL);
 
@@ -699,8 +685,6 @@ win32_handle_event_new1(HANDLE handle, void (*readcb)(void *),
 		free(whe);
 		return (NULL);
 	}
-	whe->readcb = readcb;
-	whe->errorcb = errorcb;
 	whe->eventcb = eventcb;
 	whe->arg = arg;
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -726,20 +710,6 @@ win32_handle_event_new1(HANDLE handle, void (*readcb)(void *),
 		return (NULL);
 	}
 	return (whe);
-}
-
-struct win32_handle_event *
-win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
-    void (*errorcb)(void *), void *arg)
-{
-	return (win32_handle_event_new1(handle, readcb, errorcb, NULL, arg));
-}
-
-struct win32_handle_event *
-win32_handle_event_new_events(HANDLE handle,
-    void (*eventcb)(void *, uint32_t), void *arg)
-{
-	return (win32_handle_event_new1(handle, NULL, NULL, eventcb, arg));
 }
 
 void

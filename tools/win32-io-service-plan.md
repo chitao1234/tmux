@@ -395,8 +395,8 @@ The service now exposes explicit read event reasons to callers:
   planned read, EOF, write, process, error, and cancel event vocabulary;
 - `win32_handle_event_new_events()` lets callers receive a reason mask instead
   of separate read and generic error callbacks;
-- the legacy `win32_handle_event_new()` constructor remains as a compatibility
-  shim for pane, job, tty, and client paths not migrated in this slice;
+- the legacy `win32_handle_event_new()` constructor was kept temporarily while
+  pane, job, tty, and client paths migrated to explicit events;
 - Win32 client file reads are the first migrated consumer, using explicit
   `WIN32_IO_EVENT_READ`, `WIN32_IO_EVENT_READ_EOF`, and
   `WIN32_IO_EVENT_ERROR` delivery before sending the existing tmux protocol
@@ -425,3 +425,14 @@ Client console input and direct tty input now consume explicit reader events:
   preserving the existing `server_client_lost()` behavior for terminal close;
 - all current `win32_handle_event` consumers now use the explicit reader event
   constructor, leaving the legacy split read/error constructor unused.
+
+## Legacy Reader Constructor Removal Slice
+
+The old split read/error reader constructor has been removed:
+
+- `win32_handle_event_new()` is no longer part of the public Win32 platform
+  surface;
+- `struct win32_handle_event` stores only one explicit event callback instead
+  of separate read, error, and event callbacks;
+- reader dispatch now always delivers the explicit reason mask, matching all
+  remaining reader consumers.
