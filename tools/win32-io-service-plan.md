@@ -224,8 +224,13 @@ writer for queued tty output:
   server thread;
 - `tty->win32_out_pending` preserves redraw deferral semantics by treating
   bytes as complete only after the service reports writer drain;
-- synchronous `tty_raw()` teardown writes remain a temporary compatibility
-  path until terminal shutdown is given explicit flush/cancel semantics.
+- `tty_raw()` teardown writes for this direct-handle path are queued through
+  the same writer instead of calling `win32_handle_write()` from the tmux
+  server thread;
+- client exit handshaking waits for the queued reset bytes to drain before
+  replying with `MSG_EXITED`;
+- `win32_handle_write()` is now backend-private to the worker writer instead
+  of being a public Win32 platform helper.
 
 The active console relay path is intentionally not migrated in this slice. Its
 ACK is server backpressure and redraw accounting, so an asynchronous

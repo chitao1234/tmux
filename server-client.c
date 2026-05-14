@@ -2352,7 +2352,8 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 			goto bad;
 		server_client_set_session(c, NULL);
 		recalculate_sizes();
-		tty_close(&c->tty);
+		if (tty_close_graceful(&c->tty) != 0)
+			break;
 		proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
 		break;
 	case MSG_WAKEUP:

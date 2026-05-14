@@ -166,6 +166,7 @@ static void	win32_io_service_enqueue_process(struct win32_process_event *);
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
+static int	win32_handle_write(HANDLE, const void *, size_t);
 
 static int
 win32_socketpair(SOCKET pair[2])

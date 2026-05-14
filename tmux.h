@@ -1717,6 +1717,7 @@ struct tty {
 #define TTY_WINSIZEQUERY 0x1000
 #define TTY_WAITFG 0x2000
 #define TTY_WAITBG 0x4000
+#define TTY_CLOSEPENDING 0x8000
 #define TTY_ALL_REQUEST_FLAGS \
 	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA)
 	int		 flags;
@@ -2732,6 +2733,7 @@ void	tty_sync_start(struct tty *);
 void	tty_sync_end(struct tty *);
 int	tty_open(struct tty *, char **);
 void	tty_close(struct tty *);
+int	tty_close_graceful(struct tty *);
 void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);

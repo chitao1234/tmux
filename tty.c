@@ -46,6 +46,7 @@ static void	tty_write_callback(tmux_event_fd, short, void *);
 #ifdef TMUX_WIN32
 static void	tty_win32_out_callback(void *);
 static void	tty_win32_out_error_callback(void *);
+static int	tty_win32_out_drained(struct tty *);
 #endif
 static void	tty_start_timer_callback(tmux_event_fd, short, void *);
 static void	tty_clipboard_query_callback(tmux_event_fd, short, void *);
@@ -450,6 +451,13 @@ tty_win32_out_callback(void *data)
 		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
 		    c->redraw);
 	}
+	if (tty_win32_out_drained(tty) &&
+	    (tty->flags & TTY_CLOSEPENDING) &&
+	    !(c->flags & CLIENT_DEAD)) {
+		proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
+		tty_close(tty);
+		return;
+	}
 	tty_write_callback(-1, EV_WRITE, tty);
 }
 
@@ -460,6 +468,16 @@ tty_win32_out_error_callback(void *data)
 
 	tty->win32_out_pending = 0;
 	server_client_lost(tty->client);
+}
+
+static int
+tty_win32_out_drained(struct tty *tty)
+{
+	if (tty->win32_out == NULL)
+		return (1);
+	if (tty->win32_out_pending != 0)
+		return (0);
+	return (win32_handle_writer_buffered(tty->win32_out) == 0);
 }
 #endif
 
@@ -799,6 +817,22 @@ tty_close(struct tty *tty)
 	}
 }
 
+int
+tty_close_graceful(struct tty *tty)
+{
+#ifdef TMUX_WIN32
+	if ((tty->flags & TTY_OPENED) && tty->win32_out != NULL) {
+		tty_stop_tty(tty);
+		if (!tty_win32_out_drained(tty)) {
+			tty->flags |= TTY_CLOSEPENDING;
+			return (1);
+		}
+	}
+#endif
+	tty_close(tty);
+	return (0);
+}
+
 void
 tty_free(struct tty *tty)
 {
@@ -848,9 +882,11 @@ tty_raw(struct tty *tty, const char *s)
 			    slen) == 0 ? slen : -1;
 			if (n >= 0)
 				c->win32_tty_out_pending += n;
-		} else if (c->win32_stdout != NULL)
-			n = win32_handle_write(c->win32_stdout, s, slen);
-		else
+		} else if (tty->win32_out != NULL) {
+			n = win32_handle_writer_write(tty->win32_out, s, slen);
+			if (n >= 0)
+				tty->win32_out_pending += n;
+		} else
 #endif
 		n = write(c->fd, s, slen);
 		if (n >= 0) {

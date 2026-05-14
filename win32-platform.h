@@ -72,7 +72,6 @@ struct win32_process_event *win32_process_event_new(HANDLE,
 		     void (*)(void *), void *);
 void		 win32_process_event_free(struct win32_process_event *);
 void		 win32_process_event_notify(struct win32_process_event *);
-int		 win32_handle_write(HANDLE, const void *, size_t);
 void		 win32_log_handle(const char *, HANDLE);
 
 const char	*win32_default_socket_dir(void);
