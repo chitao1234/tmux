@@ -379,6 +379,8 @@ Progress:
   server.
 - The client file-transfer path was already using wide path opens for
   path-backed regular files.
+- Win32 client-side reads from inherited stdin now use the I/O service worker
+  reader fallback instead of the Unix fd bufferevent path.
 
 Remaining fix direction:
 

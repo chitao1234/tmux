@@ -925,3 +925,20 @@ blocking CRT reads and writes on the tmux server thread:
 This removes another class of direct server-thread filesystem I/O from the
 Win32 port and reuses the same IOCP regular-file backend already used for
 client file-transfer messages.
+
+## Stdio Read Endpoint Slice
+
+Win32 client-side file reads from inherited stdin now use the I/O service
+reader instead of the Unix fd bufferevent path:
+
+- `file_read_open()` now calls `file_read_win32_start()` for both path-backed
+  reads and `STDIN_FILENO` reads on Win32;
+- path-backed regular files continue to use the IOCP regular-file reader;
+- stdin handles use the explicit worker reader fallback through
+  `win32_io_reader_new_worker()`, matching the fallback policy for inherited
+  stdio handles;
+- read data and read completion still use the existing `MSG_READ` and
+  `MSG_READ_DONE` protocol.
+
+This removes the last Win32 client file-read path that tried to treat an
+inherited Windows stdio handle as a normal libevent fd.

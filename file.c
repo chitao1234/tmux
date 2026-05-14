@@ -1648,13 +1648,11 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	}
 
 #ifdef TMUX_WIN32
-	if (msg->fd == -1) {
-		if (file_read_win32_start(cf) != 0) {
-			error = errno;
-			goto reply;
-		}
-		return;
+	if (file_read_win32_start(cf) != 0) {
+		error = errno;
+		goto reply;
 	}
+	return;
 #endif
 	cf->event = bufferevent_new(cf->fd, file_read_callback, NULL,
 	    file_read_error_callback, cf);
