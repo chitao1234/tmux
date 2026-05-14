@@ -44,6 +44,7 @@ static int	tty_log_fd = -1;
 static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
 #ifdef TMUX_WIN32
+static void	tty_win32_in_event_callback(void *, uint32_t);
 static void	tty_win32_out_callback(void *);
 static void	tty_win32_out_error_callback(void *);
 static int	tty_win32_out_drained(struct tty *);
@@ -421,17 +422,15 @@ tty_write_pending(struct tty *tty)
 
 #ifdef TMUX_WIN32
 static void
-tty_win32_read_callback(void *data)
-{
-	tty_read_callback(-1, EV_READ, data);
-}
-
-static void
-tty_win32_error_callback(void *data)
+tty_win32_in_event_callback(void *data, uint32_t events)
 {
 	struct tty	*tty = data;
 
-	server_client_lost(tty->client);
+	if (events & WIN32_IO_EVENT_READ)
+		tty_read_callback(-1, EV_READ, tty);
+	if ((events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED)) && !(tty->client->flags & CLIENT_DEAD))
+		server_client_lost(tty->client);
 }
 
 static void
@@ -498,8 +497,8 @@ tty_open(struct tty *tty, char **cause)
 
 #ifdef TMUX_WIN32
 	if (c->win32_stdin != NULL) {
-		tty->win32_in = win32_handle_event_new(c->win32_stdin,
-		    tty_win32_read_callback, tty_win32_error_callback, tty);
+		tty->win32_in = win32_handle_event_new_events(c->win32_stdin,
+		    tty_win32_in_event_callback, tty);
 		if (tty->win32_in == NULL) {
 			*cause = xstrdup("couldn't create Win32 tty input event");
 			tty_close(tty);

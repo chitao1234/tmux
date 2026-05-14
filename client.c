@@ -446,8 +446,13 @@ client_win32_input_callback(__unused void *arg)
 }
 
 static void
-client_win32_input_error_callback(__unused void *arg)
+client_win32_input_event_callback(void *arg, uint32_t events)
 {
+	if (events & WIN32_IO_EVENT_READ)
+		client_win32_input_callback(arg);
+	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED))
+		return;
 	log_debug("%s: console input closed", __func__);
 	if (client_attached && client_peer != NULL) {
 		client_exitreason = CLIENT_EXIT_LOST_TTY;
@@ -467,9 +472,8 @@ client_win32_input_start(void)
 		return;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
-	client_win32_input = win32_handle_event_new(hin,
-	    client_win32_input_callback, client_win32_input_error_callback,
-	    NULL);
+	client_win32_input = win32_handle_event_new_events(hin,
+	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
 }

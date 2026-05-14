@@ -414,3 +414,14 @@ ConPTY pane output and Win32 job output now consume explicit reader events:
   so process exit remains separate from output EOF and buffered output drain;
 - this removes two more callers from the legacy reader callback API without
   changing the worker-backed read backend.
+
+## Client And Tty Reader Event Slice
+
+Client console input and direct tty input now consume explicit reader events:
+
+- client-side console relay input uses `WIN32_IO_EVENT_READ` for forwarded
+  input bytes and EOF/error/cancel as the lost-terminal edge;
+- server-side direct tty input uses the same explicit event callback shape,
+  preserving the existing `server_client_lost()` behavior for terminal close;
+- all current `win32_handle_event` consumers now use the explicit reader event
+  constructor, leaving the legacy split read/error constructor unused.
