@@ -9,10 +9,12 @@
  */
 
 #include <sys/types.h>
+#include <sys/un.h>
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "tmux.h"
 
@@ -60,6 +62,14 @@ static int
 win32_socket_errno(int error)
 {
 	switch (error) {
+	case WSAEACCES:
+		return (EACCES);
+	case WSAEADDRINUSE:
+		return (EADDRINUSE);
+	case WSAEADDRNOTAVAIL:
+		return (EADDRNOTAVAIL);
+	case WSAEAFNOSUPPORT:
+		return (EAFNOSUPPORT);
 	case WSAEWOULDBLOCK:
 		return (EAGAIN);
 	case WSAEINTR:
@@ -77,6 +87,8 @@ win32_socket_errno(int error)
 		return (ETIMEDOUT);
 	case WSAEMFILE:
 		return (EMFILE);
+	case WSAEINVAL:
+		return (EINVAL);
 	default:
 		return (error);
 	}
@@ -211,40 +223,92 @@ static int	win32_handle_write(HANDLE, const void *, size_t);
 static int
 win32_socketpair(SOCKET pair[2])
 {
+	static LONG		 serial;
+	struct sockaddr_un	 sun;
 	SOCKET			 listener = INVALID_SOCKET;
-	struct sockaddr_in	 addr;
-	int			 len = sizeof addr;
+	SOCKET			 client = INVALID_SOCKET;
+	SOCKET			 server = INVALID_SOCKET;
+	const char		*dir;
+	char			*path = NULL, *cause = NULL;
+	size_t			 i, size;
+	ULONGLONG		 tick;
+	int			 error, saved_errno;
 
 	pair[0] = INVALID_SOCKET;
 	pair[1] = INVALID_SOCKET;
 
-	listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (listener == INVALID_SOCKET)
+	dir = win32_default_socket_dir();
+	if (dir == NULL) {
+		errno = ENOENT;
 		return (-1);
-	memset(&addr, 0, sizeof addr);
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	addr.sin_port = 0;
-	if (bind(listener, (struct sockaddr *)&addr, sizeof addr) != 0 ||
-	    listen(listener, 1) != 0 ||
-	    getsockname(listener, (struct sockaddr *)&addr, &len) != 0)
+	}
+	if (win32_ipc_ensure_socket_dir(dir, &cause) != 0) {
+		log_debug("%s: couldn't prepare AF_UNIX wakeup dir: %s",
+		    __func__, cause);
+		free(cause);
+		return (-1);
+	}
+
+	tick = GetTickCount64();
+	xasprintf(&path, "%s/io-%lx-%lx-%llx.sock", dir,
+	    (u_long)GetCurrentProcessId(),
+	    (u_long)InterlockedIncrement(&serial),
+	    (unsigned long long)tick);
+	size = strlen(path);
+	if (size >= sizeof sun.sun_path) {
+		free(path);
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
+
+	memset(&sun, 0, sizeof sun);
+	sun.sun_family = AF_UNIX;
+	strlcpy(sun.sun_path, path, sizeof sun.sun_path);
+	for (i = 0; sun.sun_path[i] != '\0'; i++) {
+		if (sun.sun_path[i] == '/')
+			sun.sun_path[i] = '\\';
+	}
+
+	(void)unlink(path);
+
+	listener = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (listener == INVALID_SOCKET)
 		goto fail;
-	pair[0] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (pair[0] == INVALID_SOCKET)
+	if (bind(listener, (struct sockaddr *)&sun, sizeof sun) != 0 ||
+	    listen(listener, 1) != 0)
 		goto fail;
-	if (connect(pair[0], (struct sockaddr *)&addr, sizeof addr) != 0)
-		goto fail0;
-	pair[1] = accept(listener, NULL, NULL);
-	if (pair[1] == INVALID_SOCKET)
-		goto fail0;
+
+	client = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (client == INVALID_SOCKET)
+		goto fail;
+	if (connect(client, (struct sockaddr *)&sun, sizeof sun) != 0)
+		goto fail;
+
+	server = accept(listener, NULL, NULL);
+	if (server == INVALID_SOCKET)
+		goto fail;
+
 	closesocket(listener);
+	(void)unlink(path);
+	free(path);
+	pair[0] = client;
+	pair[1] = server;
 	return (0);
 
-fail0:
-	closesocket(pair[0]);
-	pair[0] = INVALID_SOCKET;
 fail:
-	closesocket(listener);
+	error = WSAGetLastError();
+	saved_errno = win32_socket_errno(error);
+	if (client != INVALID_SOCKET)
+		closesocket(client);
+	if (server != INVALID_SOCKET)
+		closesocket(server);
+	if (listener != INVALID_SOCKET)
+		closesocket(listener);
+	if (path != NULL) {
+		(void)unlink(path);
+		free(path);
+	}
+	errno = saved_errno;
 	return (-1);
 }
 

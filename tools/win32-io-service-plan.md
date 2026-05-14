@@ -358,3 +358,17 @@ Win32 client file reads now use the shared service reader for filesystem paths:
   remove the file record through the normal `file_free()` path;
 - standard input stream reads still use the existing fd/bufferevent path until
   console/stdin handle ownership is migrated more broadly.
+
+## AF_UNIX Service Wakeup Slice
+
+The Win32 I/O service wakeup socketpair now uses AF_UNIX instead of a private
+loopback TCP listener:
+
+- the wakeup path is still a raw Winsock pair owned entirely by the I/O
+  service, not a tmux IPC fd entry;
+- the temporary AF_UNIX pathname is created under the managed Win32 socket
+  directory and is unlinked immediately after the pair is connected;
+- service wakeup semantics remain unchanged: worker/process threads enqueue
+  completions and write one byte to wake the tmux libevent thread;
+- this removes a leftover TCP transport from the service bridge while keeping
+  the final endpoint/IOCP migration separate.
