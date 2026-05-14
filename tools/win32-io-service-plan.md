@@ -462,3 +462,17 @@ Win32 terminal output writers now consume explicit writer events:
   empty;
 - pane and job stdin writers still use the split compatibility constructor and
   are the next writer migration targets.
+
+## Pane And Job Stdin Writer Event Slice
+
+Win32 pane and job stdin writers now consume explicit writer events:
+
+- pane stdin uses write-drained/write-closed events to flush the pane-owned
+  input queue into the service writer;
+- pane stdin error/cancel events preserve the existing behavior of dropping the
+  queued input and freeing the writer;
+- job stdin uses write-drained/write-closed events to flush queued job input,
+  close stdin once requested and drained, and notify the bufferevent write
+  callback;
+- job stdin error/cancel events still affect only stdin, keeping stdout EOF and
+  process exit as separate lifecycle edges.

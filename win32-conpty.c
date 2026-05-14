@@ -778,6 +778,18 @@ win32_pane_input_error_cb(void *arg)
 }
 
 static void
+win32_pane_input_event_cb(void *arg, uint32_t events)
+{
+	if (events & (WIN32_IO_EVENT_ERROR|WIN32_IO_EVENT_CANCELED)) {
+		win32_pane_input_error_cb(arg);
+		return;
+	}
+	if (events & (WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED))
+		win32_pane_input_write_cb(arg);
+}
+
+static void
 win32_job_disconnect(struct win32_job *wj)
 {
 	if (wj->stdin_writer != NULL) {
@@ -1020,8 +1032,8 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	pw->input_queue = evbuffer_new();
 	if (pw->input_queue == NULL)
 		fatalx("out of memory");
-	pw->input_writer = win32_handle_writer_new_cb(&pw->input_write,
-	    win32_pane_input_write_cb, win32_pane_input_error_cb, wp);
+	pw->input_writer = win32_handle_writer_new_events(&pw->input_write,
+	    win32_pane_input_event_cb, wp);
 	if (pw->input_writer == NULL) {
 		xasprintf(cause, "couldn't create pane input writer");
 		goto fail;
@@ -1290,6 +1302,18 @@ win32_job_write_error_cb(void *arg)
 		wj->event->writecb(wj->event, wj->event->cbarg);
 }
 
+static void
+win32_job_write_event_cb(void *arg, uint32_t events)
+{
+	if (events & (WIN32_IO_EVENT_ERROR|WIN32_IO_EVENT_CANCELED)) {
+		win32_job_write_error_cb(arg);
+		return;
+	}
+	if (events & (WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED))
+		win32_job_write_cb(arg);
+}
+
 static int
 win32_job_set_exited(struct win32_job *wj, int *status)
 {
@@ -1483,8 +1507,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
 	win32_close_handle(&wj->stderr_write);
-	wj->stdin_writer = win32_handle_writer_new_cb(&wj->stdin_write,
-	    win32_job_write_cb, win32_job_write_error_cb, wj);
+	wj->stdin_writer = win32_handle_writer_new_events(&wj->stdin_write,
+	    win32_job_write_event_cb, wj);
 	if (wj->stdin_writer == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't create job input writer");
