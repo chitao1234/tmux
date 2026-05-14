@@ -808,7 +808,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		client_win32_handle_tty = 0;
 	if (client_win32_handle_tty)
 		log_debug("using direct Win32 terminal handles");
-	if (client_is_console &&
+	if ((client_is_console || client_win32_handle_tty) &&
 	    (*termname == '\0' || strcmp(termname, "dumb") == 0))
 		termname = "xterm-256color";
 #endif
