@@ -675,3 +675,23 @@ existing `RegisterWaitForSingleObject` backend:
 This does not replace the threadpool wait backend with IOCP. It tightens the
 state/lifetime contract so process waits behave more like the read and write
 endpoints while preserving the existing process-exit delivery mechanism.
+
+## Explicit Worker Fallback API Slice
+
+Remaining worker-backed endpoints are now named as explicit fallbacks:
+
+- `win32_io_reader_new_worker()` is used only for handles that still require
+  the blocking worker backend, currently client console input, direct tty
+  input, and stdio file reads;
+- `win32_io_writer_new_worker_borrowed()` is used only for borrowed handles
+  that still require the blocking worker backend, currently client console
+  output, direct tty output, and stdout/stderr file writes;
+- the generic owned worker writer constructor has been removed from the public
+  Win32 platform surface because no caller needs it after pane, job, and
+  path-backed file writes moved to overlapped endpoints;
+- this makes the remaining non-IOCP paths visible at each call site instead of
+  hiding them behind generic reader/writer constructor names.
+
+This is an API clarity cleanup, not a backend migration. The worker fallback is
+still intentional for console and stdio handles until a dedicated console
+proactor preserves the current UTF-8 and `WriteConsoleW` behavior.

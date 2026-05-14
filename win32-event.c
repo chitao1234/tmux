@@ -950,7 +950,7 @@ win32_handle_event_thread(void *arg)
 }
 
 struct win32_io_endpoint *
-win32_io_reader_new(HANDLE handle,
+win32_io_reader_new_worker(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
@@ -1462,18 +1462,6 @@ win32_handle_writer_new_iocp(HANDLE *handle, uint64_t offset, int use_offset,
 }
 
 struct win32_io_endpoint *
-win32_io_writer_new(HANDLE *handle,
-    void (*eventcb)(void *, uint32_t), void *arg)
-{
-	struct win32_handle_writer	*whw;
-
-	whw = win32_handle_writer_new1(handle, eventcb, arg, 0);
-	if (whw == NULL)
-		return (NULL);
-	return (&whw->endpoint);
-}
-
-struct win32_io_endpoint *
 win32_io_writer_new_overlapped(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
@@ -1500,7 +1488,7 @@ win32_io_writer_new_file_borrowed(HANDLE *handle, uint64_t offset, int append,
 }
 
 struct win32_io_endpoint *
-win32_io_writer_new_borrowed(HANDLE *handle,
+win32_io_writer_new_worker_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_writer	*whw;

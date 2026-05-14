@@ -856,7 +856,7 @@ file_write_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_writer = win32_io_writer_new_borrowed(&handle,
+	cf->win32_writer = win32_io_writer_new_worker_borrowed(&handle,
 	    file_write_win32_event_callback, cf);
 	if (cf->win32_writer == NULL) {
 		errno = EIO;
@@ -1079,7 +1079,7 @@ file_read_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_reader = win32_io_reader_new(handle,
+	cf->win32_reader = win32_io_reader_new_worker(handle,
 	    file_read_win32_event_callback, cf);
 	if (cf->win32_reader == NULL) {
 		errno = EIO;

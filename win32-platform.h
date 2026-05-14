@@ -53,7 +53,7 @@ void		 win32_fini(void);
 long		 win32_console_ctrl_c_events(void);
 
 void		 win32_io_service_fini(void);
-struct win32_io_endpoint *win32_io_reader_new(HANDLE,
+struct win32_io_endpoint *win32_io_reader_new_worker(HANDLE,
 		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_reader_new_overlapped(HANDLE,
 		     void (*)(void *, uint32_t), void *);
@@ -70,13 +70,11 @@ size_t		 win32_io_reader_buffered(struct win32_io_endpoint *);
 int		 win32_io_reader_done(struct win32_io_endpoint *);
 int		 win32_io_reader_eof(struct win32_io_endpoint *);
 int		 win32_io_reader_error(struct win32_io_endpoint *);
-struct win32_io_endpoint *win32_io_writer_new(HANDLE *,
-		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_writer_new_overlapped(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_writer_new_file_borrowed(HANDLE *,
 		     uint64_t, int, void (*)(void *, uint32_t), void *);
-struct win32_io_endpoint *win32_io_writer_new_borrowed(HANDLE *,
+struct win32_io_endpoint *win32_io_writer_new_worker_borrowed(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 int		 win32_io_writer_write(struct win32_io_endpoint *,
 		     const void *, size_t);
