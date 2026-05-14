@@ -1080,33 +1080,6 @@ win32_handle_writer_writable(struct win32_handle_writer *whw)
 	return (writable);
 }
 
-int
-win32_handle_writer_closed(struct win32_handle_writer *whw)
-{
-	int	closed;
-
-	if (whw == NULL)
-		return (1);
-	EnterCriticalSection(&whw->lock);
-	closed = (whw->state == WIN32_HANDLE_WRITER_CLOSED ||
-	    whw->handle == NULL);
-	LeaveCriticalSection(&whw->lock);
-	return (closed);
-}
-
-int
-win32_handle_writer_error(struct win32_handle_writer *whw)
-{
-	int	error;
-
-	if (whw == NULL)
-		return (0);
-	EnterCriticalSection(&whw->lock);
-	error = (whw->state == WIN32_HANDLE_WRITER_ERROR);
-	LeaveCriticalSection(&whw->lock);
-	return (error);
-}
-
 static int
 win32_handle_write_file(HANDLE handle, const void *data, size_t size)
 {

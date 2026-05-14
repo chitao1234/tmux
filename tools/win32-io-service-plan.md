@@ -502,3 +502,13 @@ Process wait completions now use the explicit event callback vocabulary:
   behavior;
 - the backend is still `RegisterWaitForSingleObject`, so this is an API and
   dispatch cleanup, not an IOCP/process backend replacement.
+
+## Writer Query Cleanup Slice
+
+Two unused writer compatibility queries have been removed:
+
+- `win32_handle_writer_closed()` and `win32_handle_writer_error()` had no
+  callers after writer consumers moved to explicit event callbacks;
+- removing them keeps the public writer surface focused on enqueue,
+  queue-depth, drain, writable, and close operations that current callers still
+  need.
