@@ -308,3 +308,20 @@ Worker-backed write handles now expose explicit write-side state queries:
   helpers for the final write-closed/write-error event model;
 - this keeps the existing worker backend and callbacks, but removes another
   collapsed lifecycle predicate from pane, job, tty, and file paths.
+
+## Typed Completion Queue Slice
+
+The Win32 I/O service now uses one typed completion queue internally:
+
+- read handles, write handles, and process waits embed a common
+  `win32_io_completion` record;
+- the service has one FIFO pending queue instead of separate reader, writer,
+  and process pending queues;
+- enqueue, pending suppression, and deactivation are handled by common service
+  helpers;
+- the shared libevent wakeup drains typed completions and dispatches them to
+  the existing compatibility callbacks on the tmux thread;
+- this is still a compatibility-layer step. The public pane/job/tty/file code
+  still uses the legacy `win32_handle_event_*`, `win32_handle_writer_*`, and
+  `win32_process_event_*` objects, but the backend shape now matches the final
+  ordered completion queue more closely.
