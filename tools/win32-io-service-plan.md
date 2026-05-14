@@ -1053,3 +1053,41 @@ Win32 shutdown prompt-history saving now uses the I/O service path:
   the file handle closed or failed;
 - empty history still truncates the configured file through the same path;
 - the Unix save path remains synchronous and unchanged in backend policy.
+
+## Current Closure Audit
+
+The production pane, job, client file-transfer, server-local file, startup
+configuration, popup editor file, and prompt-history paths now use the Win32
+I/O service or an explicitly documented service fallback. The remaining direct
+or worker-backed paths are intentionally classified rather than hidden:
+
+- console input/output and direct terminal handles still use
+  `win32_io_reader_new_worker()` or
+  `win32_io_writer_new_worker_borrowed()`, because console handles need the
+  UTF-8/`WriteConsoleW` worker backend until a dedicated console proactor
+  exists;
+- inherited stdio streams for client file transfer still use the worker
+  fallback, because they are borrowed process handles and are not always
+  overlapped-capable regular files;
+- process waits still use `RegisterWaitForSingleObject()`, but process
+  completion is delivered through the service queue and the tmux thread event
+  contract;
+- debug logging in `log.c` and verbose tty-output logging in `tty.c` remain
+  synchronous diagnostic paths. They are used before or around service setup,
+  from fatal/error paths, and in verbose-only diagnostics, so moving them into
+  the service requires a separate logging design rather than a mechanical I/O
+  endpoint migration;
+- IPC socket setup, startup locking, socket-directory security, and low-level
+  handle creation remain outside this I/O-service migration. They should be
+  audited under the IPC/auth plan, not counted as pane/job/file I/O service
+  work.
+
+The next implementation work should therefore be one of:
+
+- design and implement a dedicated console proactor to replace the remaining
+  console worker fallback without losing UTF-8 and `WriteConsoleW` semantics;
+- redesign debug and tty-output logging as a bounded nonblocking diagnostic
+  subsystem that can safely operate before service initialization and during
+  fatal paths;
+- continue IPC/auth hardening separately, including startup-lock timeout and
+  socket setup behavior.
