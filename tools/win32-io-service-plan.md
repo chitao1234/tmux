@@ -903,3 +903,25 @@ ACKs before completing terminal close:
 This prevents the server from telling the client to exit before the active
 console relay has acknowledged teardown/reset output that was already handed to
 the client-side I/O service writer.
+
+## Local File Endpoint Slice
+
+Win32 local path-backed file commands now use I/O service endpoints instead of
+blocking CRT reads and writes on the tmux server thread:
+
+- server-local `file_write()` opens path-backed destinations with `CreateFileW`
+  and `FILE_FLAG_OVERLAPPED`, then feeds data through a
+  `win32_io_writer_new_file_borrowed()` endpoint;
+- server-local `file_read()` opens path-backed sources the same way and drains a
+  `win32_io_reader_new_file()` endpoint into the existing file buffer;
+- command callbacks still complete through the existing `file_fire_done()` and
+  `file_fire_read()` contract, so callers such as `load-buffer`, `save-buffer`,
+  and `source-file` keep their asynchronous `CMD_RETURN_WAIT` behavior;
+- large local writes are fed to the service writer in bounded chunks rather
+  than attempting to queue the entire file into the writer at once;
+- stdio `-` paths remain on the existing client/stdio path because they are not
+  path-backed regular files.
+
+This removes another class of direct server-thread filesystem I/O from the
+Win32 port and reuses the same IOCP regular-file backend already used for
+client file-transfer messages.

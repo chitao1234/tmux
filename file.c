@@ -45,6 +45,17 @@ static void	file_write_record(struct client_file *, size_t);
 static void	file_write_flush_ack(struct client_file *, size_t, int);
 static void	file_write_acknowledge(struct client_file *, size_t, int);
 #ifdef TMUX_WIN32
+static void	file_write_win32_local_callback(void *);
+static void	file_write_win32_local_close(struct client_file *);
+static void	file_write_win32_local_event_callback(void *, uint32_t);
+static int	file_write_win32_local_flush(struct client_file *);
+static int	file_write_win32_local_start(struct client_file *,
+		    const void *, size_t);
+static void	file_read_win32_local_callback(void *);
+static void	file_read_win32_local_close(struct client_file *);
+static void	file_read_win32_local_done_callback(void *);
+static void	file_read_win32_local_event_callback(void *, uint32_t);
+static int	file_read_win32_local_start(struct client_file *);
 static void	file_write_win32_callback(void *);
 static void	file_write_win32_error_callback(void *);
 static void	file_write_win32_event_callback(void *, uint32_t);
@@ -330,8 +341,10 @@ file_write(struct client *c, const char *path, int flags, const void *bdata,
 	size_t			 msglen;
 	int			 fd = -1;
 	u_int			 stream = file_next_stream++;
+#ifndef TMUX_WIN32
 	FILE			*f;
 	const char		*mode;
+#endif
 
 	if (strcmp(path, "-") == 0) {
 		cf = file_create_with_client(c, stream, cb, cbdata);
@@ -351,6 +364,18 @@ file_write(struct client *c, const char *path, int flags, const void *bdata,
 	cf->path = file_get_path(c, path);
 
 	if (c == NULL || c->flags & CLIENT_ATTACHED) {
+#ifdef TMUX_WIN32
+		if (file_write_win32_open_path(cf, cf->path, flags|O_WRONLY|
+		    O_CREAT) != 0) {
+			cf->error = errno;
+			goto done;
+		}
+		if (file_write_win32_local_start(cf, bdata, bsize) == 0)
+			return;
+		cf->error = errno;
+		file_write_win32_local_close(cf);
+		goto done;
+#else
 		if (flags & O_APPEND)
 			mode = "ab";
 		else
@@ -367,6 +392,7 @@ file_write(struct client *c, const char *path, int flags, const void *bdata,
 		}
 		fclose(f);
 		goto done;
+#endif
 	}
 
 skip:
@@ -403,9 +429,11 @@ file_read(struct client *c, const char *path, client_file_cb cb, void *cbdata)
 	size_t			 msglen;
 	int			 fd = -1;
 	u_int			 stream = file_next_stream++;
+#ifndef TMUX_WIN32
 	FILE			*f = NULL;
 	size_t			 size;
 	char			 buffer[BUFSIZ];
+#endif
 
 	if (strcmp(path, "-") == 0) {
 		cf = file_create_with_client(c, stream, cb, cbdata);
@@ -425,6 +453,17 @@ file_read(struct client *c, const char *path, client_file_cb cb, void *cbdata)
 	cf->path = file_get_path(c, path);
 
 	if (c == NULL || c->flags & CLIENT_ATTACHED) {
+#ifdef TMUX_WIN32
+		if (file_read_win32_open_path(cf, cf->path, O_RDONLY) != 0) {
+			cf->error = errno;
+			goto done;
+		}
+		if (file_read_win32_local_start(cf) == 0)
+			return cf;
+		cf->error = errno;
+		file_read_win32_local_close(cf);
+		goto done;
+#else
 		f = fopen(cf->path, "rb");
 		if (f == NULL) {
 			cf->error = errno;
@@ -444,6 +483,7 @@ file_read(struct client *c, const char *path, client_file_cb cb, void *cbdata)
 			goto done;
 		}
 		goto done;
+#endif
 	}
 
 skip:
@@ -465,8 +505,10 @@ skip:
 	return cf;
 
 done:
+#ifndef TMUX_WIN32
 	if (f != NULL)
 		fclose(f);
+#endif
 	file_fire_done(cf);
 	return NULL;
 }
@@ -1081,6 +1123,175 @@ file_read_win32_start(struct client_file *cf)
 	}
 	cf->win32_reader = win32_io_reader_new_worker(handle,
 	    file_read_win32_event_callback, cf);
+	if (cf->win32_reader == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+file_write_win32_local_flush(struct client_file *cf)
+{
+	size_t	size, nwrite;
+	int	written;
+
+	for (;;) {
+		size = EVBUFFER_LENGTH(cf->buffer);
+		if (size == 0) {
+			if (!cf->closed &&
+			    win32_io_writer_drained(cf->win32_writer)) {
+				cf->closed = 1;
+				win32_io_writer_close(cf->win32_writer);
+			}
+			return (0);
+		}
+		nwrite = size;
+		if (nwrite > 1024 * 1024)
+			nwrite = 1024 * 1024;
+		written = win32_io_writer_write(cf->win32_writer,
+		    EVBUFFER_DATA(cf->buffer), nwrite);
+		if (written == -1) {
+			if (errno == EAGAIN)
+				return (0);
+			return (-1);
+		}
+		evbuffer_drain(cf->buffer, written);
+	}
+}
+
+static void
+file_write_win32_local_close(struct client_file *cf)
+{
+	int	fd;
+
+	if (cf->win32_writer != NULL) {
+		win32_io_endpoint_free(cf->win32_writer);
+		cf->win32_writer = NULL;
+	}
+	fd = cf->fd;
+	cf->fd = -1;
+	if (fd != -1)
+		close(fd);
+	file_win32_close_handle(&cf->win32_handle);
+}
+
+static void
+file_write_win32_local_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+
+	if (cf->win32_writer == NULL)
+		return;
+	if (file_write_win32_local_flush(cf) != 0) {
+		cf->error = errno;
+		file_write_win32_local_close(cf);
+		file_fire_done(cf);
+	}
+}
+
+static void
+file_write_win32_local_event_callback(void *arg, uint32_t events)
+{
+	struct client_file	*cf = arg;
+
+	if (events & WIN32_IO_EVENT_ERROR) {
+		cf->error = EIO;
+		file_write_win32_local_close(cf);
+		file_fire_done(cf);
+		return;
+	}
+	if (events & WIN32_IO_EVENT_WRITE_CLOSED) {
+		cf->closed = 1;
+		file_write_win32_local_close(cf);
+		file_fire_done(cf);
+		return;
+	}
+	if (events & WIN32_IO_EVENT_WRITE_DRAINED)
+		file_write_win32_local_callback(arg);
+}
+
+static int
+file_write_win32_local_start(struct client_file *cf, const void *data,
+    size_t size)
+{
+	if (cf->win32_handle == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	cf->win32_writer = win32_io_writer_new_file_borrowed(
+	    &cf->win32_handle, cf->win32_offset, cf->win32_append,
+	    file_write_win32_local_event_callback, cf);
+	if (cf->win32_writer == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	if (evbuffer_add(cf->buffer, data, size) != 0) {
+		errno = ENOMEM;
+		return (-1);
+	}
+	return (file_write_win32_local_flush(cf));
+}
+
+static void
+file_read_win32_local_close(struct client_file *cf)
+{
+	int	fd;
+
+	if (cf->win32_reader != NULL) {
+		win32_io_endpoint_free(cf->win32_reader);
+		cf->win32_reader = NULL;
+	}
+	fd = cf->fd;
+	cf->fd = -1;
+	if (fd != -1)
+		close(fd);
+	file_win32_close_handle(&cf->win32_handle);
+}
+
+static void
+file_read_win32_local_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+
+	if (cf->win32_reader == NULL)
+		return;
+	win32_io_reader_drain(cf->win32_reader, cf->buffer);
+	file_fire_read(cf);
+}
+
+static void
+file_read_win32_local_done_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+
+	file_read_win32_local_callback(cf);
+	if (win32_io_reader_error(cf->win32_reader))
+		cf->error = EIO;
+	cf->closed = 1;
+	file_read_win32_local_close(cf);
+	file_fire_done(cf);
+}
+
+static void
+file_read_win32_local_event_callback(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_READ)
+		file_read_win32_local_callback(arg);
+	if (events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED))
+		file_read_win32_local_done_callback(arg);
+}
+
+static int
+file_read_win32_local_start(struct client_file *cf)
+{
+	if (cf->win32_handle == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	cf->win32_reader = win32_io_reader_new_file(cf->win32_handle,
+	    cf->win32_offset, file_read_win32_local_event_callback, cf);
 	if (cf->win32_reader == NULL) {
 		errno = EIO;
 		return (-1);

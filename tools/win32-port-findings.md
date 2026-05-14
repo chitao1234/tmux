@@ -356,20 +356,31 @@ Fix direction:
 
 ## Filesystem, Environment, and Path Compatibility
 
-### Narrow CRT path APIs remain in file operations
+### Partially fixed: Narrow CRT path APIs remain in file operations
 
 Files:
 
 - [`file.c`](../file.c): `fopen()` and `open()` are still used with `char *`
   paths for several read/write flows.
 
-Impact:
+Original impact:
 
 Native Windows narrow CRT paths are codepage-based, not UTF-8. Config files,
 buffer files, and source paths under non-ASCII directories can fail even though
 other parts of the port use wide APIs.
 
-Fix direction:
+Progress:
+
+- Win32 server-local path-backed `file_read()` and `file_write()` now open
+  regular files with `CreateFileW` and drive reads/writes through the I/O
+  service regular-file endpoints.
+- This covers local `load-buffer`, `save-buffer`, and `source-file` style
+  operations that previously used synchronous CRT `fread()`/`fwrite()` in the
+  server.
+- The client file-transfer path was already using wide path opens for
+  path-backed regular files.
+
+Remaining fix direction:
 
 - Add UTF-8 to wide wrappers for `open`, `fopen`, and related path operations.
 - Use `_wopen`, `_wfopen`, or Win32 `CreateFileW` as appropriate.
