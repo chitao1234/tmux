@@ -263,9 +263,7 @@ The client file-write protocol now has explicit completion ACKs:
 - Win32 client console text writes use the shared service writer when the
   destination stream is an actual console handle, preserving CRLF text
   translation while sending ACKs only after the writer drains;
-- the old synchronous Win32 console file-write path remains only as a fallback
-  when the destination is not an actual console handle or the async writer
-  cannot be created.
+- non-console file and pipe targets continue to use the ordinary fd write path.
 
 This slice gives file-transfer output the protocol backpressure needed before
-removing the remaining synchronous fallback paths.
+moving more generic fd write paths onto service endpoints.

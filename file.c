@@ -787,8 +787,7 @@ file_write_sync(struct client_file *cf, const void *data, size_t size)
 }
 
 static int
-file_write_sync_console_text(struct client_file *cf, const char *data,
-    size_t size)
+file_write_console_text(struct client_file *cf, const char *data, size_t size)
 {
 	HANDLE		 handle;
 	intptr_t	 osfhandle;
@@ -802,6 +801,10 @@ file_write_sync_console_text(struct client_file *cf, const char *data,
 	handle = (HANDLE)osfhandle;
 	if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode))
 		return (0);
+	if (cf->win32_writer == NULL) {
+		errno = EIO;
+		return (-1);
+	}
 
 	buffer = evbuffer_new();
 	if (buffer == NULL)
@@ -826,12 +829,8 @@ file_write_sync_console_text(struct client_file *cf, const char *data,
 
 	error = 0;
 	if (EVBUFFER_LENGTH(buffer) != 0) {
-		if (cf->win32_writer != NULL) {
-			if (win32_handle_writer_write(cf->win32_writer,
-			    EVBUFFER_DATA(buffer), EVBUFFER_LENGTH(buffer)) == -1)
-				error = errno;
-		} else if (win32_handle_write(handle, EVBUFFER_DATA(buffer),
-		    EVBUFFER_LENGTH(buffer)) == -1)
+		if (win32_handle_writer_write(cf->win32_writer,
+		    EVBUFFER_DATA(buffer), EVBUFFER_LENGTH(buffer)) == -1)
 			error = errno;
 	}
 	evbuffer_free(buffer);
@@ -960,19 +959,10 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 			if (cf->win32_writer != NULL) {
 				file_write_record(cf, size);
 				if ((cf->flags & CLIENT_FILE_TEXT) &&
-				    file_write_sync_console_text(cf,
+				    file_write_console_text(cf,
 				    (const char *)(msg + 1), size))
 					return;
 				file_write_win32_error_callback(cf);
-				return;
-			}
-			if ((cf->flags & CLIENT_FILE_TEXT) &&
-			    file_write_sync_console_text(cf, (const char *)(msg + 1),
-			    size)) {
-				if (errno == 0)
-					file_write_flush_ack(cf, size, 0);
-				else
-					file_write_flush_ack(cf, size, errno);
 				return;
 			}
 			file_write_sync(cf, msg + 1, size);
