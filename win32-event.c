@@ -1946,7 +1946,7 @@ win32_io_writer_buffered(struct win32_io_endpoint *endpoint)
 		return (0);
 	whw = endpoint->owner;
 	EnterCriticalSection(&whw->lock);
-	size = EVBUFFER_LENGTH(whw->output) + whw->utf8_partial_len;
+	size = EVBUFFER_LENGTH(whw->output);
 	LeaveCriticalSection(&whw->lock);
 	return (size);
 }
@@ -1961,8 +1961,7 @@ win32_io_writer_drained(struct win32_io_endpoint *endpoint)
 		return (1);
 	whw = endpoint->owner;
 	EnterCriticalSection(&whw->lock);
-	drained = (EVBUFFER_LENGTH(whw->output) == 0 &&
-	    whw->utf8_partial_len == 0 && !whw->pending);
+	drained = (EVBUFFER_LENGTH(whw->output) == 0 && !whw->pending);
 	LeaveCriticalSection(&whw->lock);
 	return (drained);
 }
