@@ -42,6 +42,7 @@ static int		 client_is_console;
 static int		 client_console_ready;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
+static struct evbuffer	*client_win32_input_pending;
 static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
@@ -82,6 +83,9 @@ static void		 client_win32_resize_timer_callback(tmux_event_fd,
 			     short, void *);
 static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
+static void		 client_win32_input_update_reading(void);
+static int		 client_win32_input_flush_pending(void);
+static void		 client_win32_input_send_failed(void);
 static void		 client_win32_input_start(void);
 static void		 client_win32_input_stop(void);
 static void		 client_win32_output_callback(void *);
@@ -416,11 +420,60 @@ client_win32_resize_timer_stop(void)
 }
 
 static void
+client_win32_input_update_reading(void)
+{
+	size_t	size;
+
+	if (client_win32_input == NULL || client_win32_input_pending == NULL)
+		return;
+
+	size = EVBUFFER_LENGTH(client_win32_input_pending);
+	win32_io_reader_set_reading(client_win32_input, size == 0);
+}
+
+static int
+client_win32_input_flush_pending(void)
+{
+	size_t	 size, nsend;
+	u_char	*data;
+
+	if (client_peer == NULL || client_win32_input_pending == NULL ||
+	    client_exitflag)
+		return (-1);
+
+	while ((size = EVBUFFER_LENGTH(client_win32_input_pending)) != 0) {
+		nsend = size;
+		if (nsend > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
+			nsend = MAX_IMSGSIZE - IMSG_HEADER_SIZE;
+		data = EVBUFFER_DATA(client_win32_input_pending);
+		if (proc_send(client_peer, MSG_WIN32_TTY_INPUT, -1, data,
+		    nsend) != 0) {
+			log_debug("%s: failed with %zu pending bytes", __func__,
+			    size);
+			client_win32_input_send_failed();
+			return (-1);
+		}
+		evbuffer_drain(client_win32_input_pending, nsend);
+	}
+	return (0);
+}
+
+static void
+client_win32_input_send_failed(void)
+{
+	if (!client_exitflag) {
+		client_exitreason = CLIENT_EXIT_LOST_SERVER;
+		client_exitval = 1;
+		client_exitflag = 1;
+	}
+	client_exit();
+}
+
+static void
 client_win32_input_callback(__unused void *arg)
 {
 	struct evbuffer	*input = NULL;
-	size_t		 size, left, nsend;
-	u_char		*data;
+	size_t		 size;
 
 	if (client_peer == NULL || client_win32_input == NULL)
 		return;
@@ -430,20 +483,20 @@ client_win32_input_callback(__unused void *arg)
 		fatalx("out of memory");
 	win32_io_reader_drain(client_win32_input, input);
 	size = EVBUFFER_LENGTH(input);
-	data = EVBUFFER_DATA(input);
 	log_debug("%s: forwarding %zu bytes", __func__, size);
-	left = size;
-	while (left != 0) {
-		nsend = left;
-		if (nsend > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
-			nsend = MAX_IMSGSIZE - IMSG_HEADER_SIZE;
-		if (proc_send(client_peer, MSG_WIN32_TTY_INPUT, -1, data,
-		    nsend) != 0)
-			break;
-		data += nsend;
-		left -= nsend;
+	if (size != 0) {
+		if (client_win32_input_pending == NULL)
+			client_win32_input_pending = evbuffer_new();
+		if (client_win32_input_pending == NULL)
+			fatalx("out of memory");
+		if (evbuffer_add_buffer(client_win32_input_pending, input) != 0)
+			fatalx("out of memory");
 	}
 	evbuffer_free(input);
+
+	if (!client_exitflag)
+		client_win32_input_flush_pending();
+	client_win32_input_update_reading();
 }
 
 static void
@@ -473,19 +526,30 @@ client_win32_input_start(void)
 		return;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
+	if (client_win32_input_pending == NULL) {
+		client_win32_input_pending = evbuffer_new();
+		if (client_win32_input_pending == NULL)
+			fatalx("out of memory");
+	}
 	client_win32_input = win32_io_reader_new_worker(hin,
 	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
+	client_win32_input_update_reading();
 }
 
 static void
 client_win32_input_stop(void)
 {
 	if (client_win32_input == NULL)
-		return;
+		goto clear_pending;
 	win32_io_endpoint_free(client_win32_input);
 	client_win32_input = NULL;
+clear_pending:
+	if (client_win32_input_pending != NULL) {
+		evbuffer_free(client_win32_input_pending);
+		client_win32_input_pending = NULL;
+	}
 }
 
 static void

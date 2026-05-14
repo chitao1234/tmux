@@ -840,3 +840,27 @@ one-byte-per-completion:
 
 This prevents buffered reader/writer/process completions from being stranded if
 the AF_UNIX wakeup socket reaches its nonblocking send limit.
+
+## Console Input Queue Slice
+
+The Win32 console relay input path now keeps client-side bytes in an owned
+pending buffer before sending them to the server:
+
+- console input drained from the service reader is appended to
+  `client_win32_input_pending` instead of being sent directly from a temporary
+  buffer;
+- delivery still uses the existing `MSG_WIN32_TTY_INPUT` protocol and splits
+  messages at the imsg payload limit;
+- bytes are drained from the pending buffer only after `proc_send()` accepts the
+  corresponding message;
+- if the peer cannot accept a queued input message, the client records a lost
+  server condition and exits instead of silently dropping the remaining
+  already-read console input;
+- the Win32 input reader is paused whenever pending input remains owned by the
+  client, keeping the service reader from continuing to pull console input after
+  IPC delivery has failed.
+
+This does not add a new IPC writable callback because `proc_send()` currently
+reports only queueing success or hard failure, not socket-level backpressure.
+The slice fixes the data-loss edge in the existing contract by making unsent
+input ownership explicit and making failure terminal rather than silent.

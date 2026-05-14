@@ -243,24 +243,31 @@ Resolution:
 
 ## Other High-Value Findings
 
-### Win32 input forwarding can drop data
+### Fixed: Win32 input forwarding can drop data
 
 File:
 
-- [`client.c`](../client.c): `client_win32_input_callback()` drains the
-  Win32 input buffer, sends slices, and frees the temporary buffer even if
-  `proc_send()` fails mid-loop.
+- [`client.c`](../client.c): `client_win32_input_callback()` now appends
+  drained console input to `client_win32_input_pending` before sending
+  `MSG_WIN32_TTY_INPUT` messages.
 
-Impact:
+Original impact:
 
 Pasted input, escape sequences, and key bursts can be silently lost when the
 IPC peer is backpressured or shutting down.
 
-Fix direction:
+Resolution:
 
-- Keep unsent input in a persistent client-side queue.
-- Retry on writable/progress events.
-- Treat peer death separately from transient send failure.
+- Bytes are removed from the pending buffer only after `proc_send()` accepts
+  each input message.
+- If the peer cannot accept a message, the client records a lost-server exit
+  instead of freeing a temporary buffer and silently dropping the remainder.
+- The Win32 input reader is paused while pending input remains owned by the
+  client, so the service reader does not continue pulling console input after
+  IPC delivery fails.
+- The current `proc_send()` API exposes queueing success or hard failure, not a
+  transient writable edge, so this fix makes failure explicit rather than adding
+  a fake retry loop.
 
 ### Win32 terminal write path uses synchronous recursion
 
