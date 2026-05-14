@@ -231,6 +231,7 @@ static struct win32_io_service win32_io;
 #define WIN32_WORKER_STOP_TIMEOUT 1000
 #define WIN32_IOCP_STOP_TIMEOUT 1000
 #define WIN32_IOCP_SERVICE_STOP_TIMEOUT 1000
+#define WIN32_PROCESS_WAIT_STOP_TIMEOUT 1000
 #define WIN32_IOCP_STOP_KEY ((ULONG_PTR)-1)
 
 static int	win32_io_service_init(void);
@@ -255,6 +256,8 @@ static void	win32_io_service_dispatch_endpoint(
 static int	win32_wait_worker_thread(HANDLE, const char *);
 static int	win32_wait_iocp_endpoint(HANDLE, const char *);
 static int	win32_wait_iocp_thread(HANDLE, const char *);
+static int	win32_unregister_process_wait(struct win32_process_event *,
+		     const char *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
@@ -711,6 +714,51 @@ win32_wait_iocp_thread(HANDLE thread, const char *name)
 	return (-1);
 }
 
+static int
+win32_unregister_process_wait(struct win32_process_event *wpe, const char *name)
+{
+	HANDLE	complete;
+	DWORD	error = ERROR_SUCCESS, wait;
+	int	pending = 0;
+
+	if (wpe->wait == NULL)
+		return (0);
+	complete = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (complete == NULL) {
+		log_debug("%s: CreateEventW failed: %s", name,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	if (!UnregisterWaitEx(wpe->wait, complete)) {
+		error = GetLastError();
+		if (error == ERROR_IO_PENDING)
+			pending = 1;
+		else {
+			CloseHandle(complete);
+			log_debug("%s: UnregisterWaitEx failed: %s", name,
+			    win32_strerror(error));
+			return (-1);
+		}
+	}
+	wait = WaitForSingleObject(complete, WIN32_PROCESS_WAIT_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0) {
+		CloseHandle(complete);
+		return (0);
+	}
+	if (pending) {
+		log_debug("%s: process wait callback did not finish within %u ms",
+		    name, WIN32_PROCESS_WAIT_STOP_TIMEOUT);
+	} else {
+		log_debug("%s: process wait did not unregister within %u ms",
+		    name, WIN32_PROCESS_WAIT_STOP_TIMEOUT);
+	}
+	/*
+	 * The completion event must remain valid until it is signaled. Leak it
+	 * with the process endpoint rather than risking a callback use-after-free.
+	 */
+	return (-1);
+}
+
 static void
 win32_io_service_dispatch_endpoints(void)
 {
@@ -804,11 +852,8 @@ win32_process_event_free(struct win32_process_event *wpe)
 	wpe->state = WIN32_PROCESS_EVENT_CANCELED;
 	LeaveCriticalSection(&wpe->lock);
 	win32_io_service_deactivate_endpoint(&wpe->endpoint);
-	if (wpe->wait != NULL &&
-	    !UnregisterWaitEx(wpe->wait, INVALID_HANDLE_VALUE)) {
-		log_debug("%s: UnregisterWaitEx failed: %s", __func__,
-		    win32_strerror(GetLastError()));
-	}
+	if (win32_unregister_process_wait(wpe, __func__) != 0)
+		return;
 	DeleteCriticalSection(&wpe->lock);
 	free(wpe);
 }

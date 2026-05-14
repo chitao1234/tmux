@@ -1109,6 +1109,23 @@ Worker-backed readers now carry the same explicit purpose boundary as writers:
 This keeps the remaining non-IOCP reader paths visible in endpoint state and
 creates a narrow replacement point for the later console-input proactor.
 
+## Process Wait Teardown Bound Slice
+
+Process-wait endpoints no longer unregister threadpool waits with an unbounded
+server-thread wait:
+
+- `win32_process_event_free()` uses `UnregisterWaitEx()` with a completion
+  event instead of `INVALID_HANDLE_VALUE`;
+- the tmux thread waits only up to `WIN32_PROCESS_WAIT_STOP_TIMEOUT`;
+- if the unregister completion does not arrive in time, the process endpoint
+  and completion event are intentionally left allocated, avoiding a server hang
+  and avoiding use-after-free from a still-running wait callback;
+- successful unregister still frees the endpoint and critical section normally.
+
+This keeps the existing `RegisterWaitForSingleObject()` backend. It only
+applies the same bounded teardown rule already used for worker and IOCP
+endpoints.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
