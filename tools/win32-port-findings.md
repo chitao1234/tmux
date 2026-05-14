@@ -643,8 +643,9 @@ path in `tools/win32-direct-handle-smoke.ps1`. It verifies direct stdin/stdout
 handle identify, direct size identify, relay absence under
 `TMUX_WIN32_CONSOLE_RELAY=0`, redirected attach/detach behavior, and sustained
 direct-output stress. It also verifies that direct stdin EOF is a half-close
-and does not kill output delivery. The tests below remain the broader coverage
-needed before treating the Win32 port as complete.
+and does not kill output delivery, and that direct output handle loss does not
+make the server unusable. The tests below remain the broader coverage needed
+before treating the Win32 port as complete.
 
 High-priority native PowerShell tests:
 

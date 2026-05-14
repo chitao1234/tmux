@@ -97,7 +97,8 @@ function Invoke-Tmux {
 function Start-TmuxClientProcess {
     param(
         [string]$CaseDir,
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [switch]$NoDrainOutput
     )
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -110,9 +111,13 @@ function Start-TmuxClientProcess {
     $psi.Arguments = Join-Win32Arguments $Arguments
 
     $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $null
+    if (-not $NoDrainOutput) {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+    }
     [pscustomobject]@{
         Process = $process
-        Stdout = $process.StandardOutput.ReadToEndAsync()
+        Stdout = $stdout
         Stderr = $process.StandardError.ReadToEndAsync()
     }
 }
@@ -129,9 +134,14 @@ function Wait-TmuxClientProcess {
         throw "$Description did not exit within ${TimeoutMs}ms"
     }
 
+    $stdout = ""
+    if ($null -ne $Run.Stdout) {
+        $stdout = $Run.Stdout.Result
+    }
+
     [pscustomobject]@{
         ExitCode = $Run.Process.ExitCode
-        Stdout = $Run.Stdout.Result
+        Stdout = $stdout
         Stderr = $Run.Stderr.Result
     }
 }
@@ -433,6 +443,82 @@ function Invoke-DirectInputEofSmoke {
     }
 }
 
+function Invoke-DirectOutputLossSmoke {
+    param([string]$Root)
+
+    $caseDir = New-CaseDirectory $Root "direct-output-loss"
+    $config = Join-Path $caseDir "empty.conf"
+    $done = Join-Path $caseDir "output-loss.done"
+    $label = "$LabelPrefix-output-loss-" + [Guid]::NewGuid().ToString("N")
+    $run = $null
+    New-Item -ItemType File -Path $config | Out-Null
+
+    Push-Location $caseDir
+    try {
+        $env:TMUX = $null
+        $env:TMUX_WIN32_HANDLE_TTY = $null
+        $env:TMUX_WIN32_CONSOLE_RELAY = "0"
+        $env:COLUMNS = "120"
+        $env:LINES = "35"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "loss", "cmd.exe") | Out-Null
+
+        $run = Start-TmuxClientProcess -CaseDir $caseDir -NoDrainOutput -Arguments @(
+            "-f",
+            $config,
+            "-vv",
+            "-L",
+            $label,
+            "attach-session",
+            "-t",
+            "loss"
+        )
+
+        Start-Sleep -Milliseconds 750
+        $run.Process.StandardOutput.Close()
+
+        $command = "for /l %i in (1,1,400) do @echo OUTPUT_HANDLE_CLOSED_%i & echo done > `"$done`""
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "loss", "-l", $command) | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "loss", "Enter") | Out-Null
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $done)) {
+            if ([DateTime]::UtcNow -gt $deadline) {
+                throw "direct output loss command did not finish"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        $list = Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "list-sessions")
+        $listText = $list.Output -join "`n"
+        Assert-True -Condition ($listText.Contains("loss:")) `
+            -Message "server did not remain usable after direct output loss"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") | Out-Null
+        if (-not $run.Process.WaitForExit(5000)) {
+            $run.Process.Kill()
+            throw "direct output loss client did not exit after server shutdown"
+        }
+
+        $logs = @(Get-CaseLogs $caseDir)
+        Assert-AnyLogMatch $logs "using direct Win32 terminal output and input" "direct output loss did not use direct Win32 terminal I/O"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDOUT duplicated" "direct output loss did not duplicate stdout"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct output loss did not duplicate stdin"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 120x35" "direct output loss did not send the expected size"
+        Assert-AnyLogMatch $logs "WriteFile failed|output error" "direct output loss did not exercise output failure handling"
+        Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct output loss unexpectedly used the relay identify path"
+        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct output loss unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "rejected|ReadFile failed" "direct output loss logged an unexpected I/O failure"
+    } finally {
+        if ($null -ne $run -and -not $run.Process.HasExited) {
+            $run.Process.Kill()
+        }
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Pop-Location
+    }
+}
+
 if (-not (Test-Path -LiteralPath $TmuxPath -PathType Leaf)) {
     throw "tmux executable not found: $TmuxPath"
 }
@@ -454,6 +540,7 @@ try {
     Invoke-DirectAttachDetachSmoke $root
     Invoke-DirectOutputStressSmoke $root
     Invoke-DirectInputEofSmoke $root
+    Invoke-DirectOutputLossSmoke $root
     Write-Host "Win32 direct-handle smoke passed. Logs: $root"
     if (-not $KeepLogs) {
         Remove-Item -LiteralPath $root -Recurse -Force

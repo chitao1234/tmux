@@ -399,7 +399,8 @@ clients, disables the console relay with `TMUX_WIN32_CONSOLE_RELAY=0`, and
 asserts that the server receives direct stdin/stdout handles and direct size
 messages without using `MSG_IDENTIFY_WIN32_TERMINAL`. It also includes a
 redirected attach/detach check, a sustained direct-output stress case, and a
-direct stdin EOF half-close check.
+direct stdin EOF half-close check. The harness also covers direct output
+handle loss and verifies the server remains usable afterward.
 
 ### Baseline Regression
 
