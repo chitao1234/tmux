@@ -66,15 +66,18 @@ The removal decision is data-driven:
 
 ## Current State
 
-- `client.c` still drives the active Win32 path through console relay messages
-  such as `MSG_WIN32_TTY_OUTPUT`, `MSG_WIN32_TTY_OUTPUT_ACK`, and the
-  `client_win32_input_*` staging path.
-- `server-client.c` still rejects `MSG_IDENTIFY_WIN32_STDIN` and
-  `MSG_IDENTIFY_WIN32_STDOUT`, which keeps the direct-handle path unreachable.
-- `server-client.c` only treats `MSG_IDENTIFY_WIN32_TERMINAL` as the legacy
+- `client.c` uses the console relay path for native console clients. With
+  `TMUX_WIN32_HANDLE_TTY=1`, it sends direct stdin/stdout handle claims only
+  when the stdio handles are non-console handles that the detached server can
+  use.
+- `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
+  `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
+  `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
+  and rejects mixed relay/direct identify state.
+- `server-client.c` still treats `MSG_IDENTIFY_WIN32_TERMINAL` as the legacy
   console relay size signal.
-- `tty.c` already knows how to open a server-owned Win32 input handle and a
-  server-owned Win32 output handle once they are present on the client object.
+- `tty.c` opens server-owned Win32 input and output handles through the Win32
+  I/O service when they are present on the client object.
 
 ## Attachment Model
 
@@ -204,6 +207,15 @@ the target design:
 - the client-side console relay output path should remain the staged fallback
   until the full direct input/output path is ready.
 
+Native console testing found that console handles are transferable but not
+usable from the detached server process: duplicated console stdin fails on
+`ReadFile` with `ERROR_INVALID_HANDLE`, and duplicated console stdout also
+fails when the server writer attempts to write. Therefore handle transfer alone
+does not make native console terminal I/O server-owned. Until a separate
+console-attachment or helper design exists, native console clients must stay
+on the relay path. The direct-handle path is limited to non-console handles
+such as pipes or redirected stdio that the detached server can actually use.
+
 ### 3. Move the normal Win32 input path to server-owned handles
 
 Prefer `tty->win32_in` over the client relay input staging path for the default
@@ -219,6 +231,9 @@ This means:
   deliberately, because actual console input needs the console reader backend
   while pipe or redirected terminal input can use the worker-backed terminal
   reader.
+- direct console stdin must not be promoted until there is a proven design that
+  works from the detached server process; handle transfer alone is insufficient
+  for native console input.
 
 After this slice, direct input and direct output can become the default
 interactive terminal path together.
@@ -277,7 +292,10 @@ There are two possible outcomes:
 - Use `TMUX_WIN32_HANDLE_TTY=1` as the initial native testing opt-in.
 - Use this only for targeted output smoke coverage, not as a normal
   interactive attach mode.
-- Do not combine direct stdout with relay stdin as a product path.
+- Do not enable direct stdout for native console clients until the server has a
+  proven way to use the duplicated console output handle from its detached
+  process.
+- Do not combine direct stdout with relay stdin as a final product path.
 - Verify `tty->win32_out` is used and `MSG_WIN32_TTY_OUTPUT` is not used for
   direct-handle output.
 

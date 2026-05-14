@@ -2287,6 +2287,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		return;
 
 	if (imsg == NULL) {
+		log_debug("%s: peer closed for client %p", __func__, c);
 		server_client_lost(c);
 		return;
 	}

@@ -327,6 +327,28 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		return;
 
 #ifdef TMUX_WIN32
+	if (tty->win32_out != NULL) {
+		size_t	nsend = size;
+
+		if (tty->win32_out_pending != 0 ||
+		    !win32_io_writer_drained(tty->win32_out))
+			return;
+		if (tty->win32_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
+			return;
+		if (nsend > TTY_WIN32_OUT_PENDING_LIMIT -
+		    tty->win32_out_pending)
+			nsend = TTY_WIN32_OUT_PENDING_LIMIT -
+			    tty->win32_out_pending;
+		if (nsend == 0)
+			return;
+		nwrite = win32_io_writer_write(tty->win32_out,
+		    EVBUFFER_DATA(tty->out), nsend);
+		if (nwrite == -1)
+			return;
+		tty->win32_out_pending += nwrite;
+		evbuffer_drain(tty->out, nwrite);
+		goto write_done;
+	}
 	if (c->win32_console) {
 		size_t	left = size, nsend;
 		u_char	*buf = EVBUFFER_DATA(tty->out);
@@ -351,28 +373,6 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 			left -= nsend;
 		}
 		nwrite = size - left;
-		evbuffer_drain(tty->out, nwrite);
-		goto write_done;
-	}
-	if (tty->win32_out != NULL) {
-		size_t	nsend = size;
-
-		if (tty->win32_out_pending != 0 ||
-		    !win32_io_writer_drained(tty->win32_out))
-			return;
-		if (tty->win32_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
-			return;
-		if (nsend > TTY_WIN32_OUT_PENDING_LIMIT -
-		    tty->win32_out_pending)
-			nsend = TTY_WIN32_OUT_PENDING_LIMIT -
-			    tty->win32_out_pending;
-		if (nsend == 0)
-			return;
-		nwrite = win32_io_writer_write(tty->win32_out,
-		    EVBUFFER_DATA(tty->out), nsend);
-		if (nwrite == -1)
-			return;
-		tty->win32_out_pending += nwrite;
 		evbuffer_drain(tty->out, nwrite);
 		goto write_done;
 	}
@@ -444,8 +444,11 @@ tty_win32_in_event_callback(void *data, uint32_t events)
 	if (events & WIN32_IO_EVENT_READ)
 		tty_read_callback(-1, EV_READ, tty);
 	if ((events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED)) && !(tty->client->flags & CLIENT_DEAD))
+	    WIN32_IO_EVENT_CANCELED)) && !(tty->client->flags & CLIENT_DEAD)) {
+		log_debug("%s: %s terminal input closed, events %#x",
+		    __func__, tty->client->name, events);
 		server_client_lost(tty->client);
+	}
 }
 
 static void
@@ -480,6 +483,7 @@ tty_win32_out_error_callback(void *data)
 {
 	struct tty	*tty = data;
 
+	log_debug("%s: %s output error", __func__, tty->client->name);
 	tty->win32_out_pending = 0;
 	server_client_lost(tty->client);
 }
@@ -910,15 +914,15 @@ tty_raw(struct tty *tty, const char *s)
 	slen = strlen(s);
 	for (i = 0; i < 5; i++) {
 #ifdef TMUX_WIN32
-		if (c->win32_console) {
+		if (tty->win32_out != NULL) {
+			n = win32_io_writer_write(tty->win32_out, s, slen);
+			if (n >= 0)
+				tty->win32_out_pending += n;
+		} else if (c->win32_console) {
 			n = proc_send(c->peer, MSG_WIN32_TTY_OUTPUT, -1, s,
 			    slen) == 0 ? slen : -1;
 			if (n >= 0)
 				c->win32_tty_out_pending += n;
-		} else if (tty->win32_out != NULL) {
-			n = win32_io_writer_write(tty->win32_out, s, slen);
-			if (n >= 0)
-				tty->win32_out_pending += n;
 		} else
 #endif
 		n = write(c->fd, s, slen);

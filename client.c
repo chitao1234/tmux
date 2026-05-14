@@ -41,6 +41,7 @@ static uint64_t		 client_flags;
 static int		 client_is_console;
 static int		 client_console_ready;
 static int		 client_win32_handle_tty;
+static int		 client_win32_handle_tty_input;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
@@ -96,7 +97,8 @@ static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_handle_tty_enabled(void);
-static int		 client_win32_handle_tty_available(void);
+static int		 client_win32_handle_tty_output_available(void);
+static int		 client_win32_handle_tty_input_available(void);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -375,14 +377,41 @@ client_win32_handle_tty_enabled(void)
 }
 
 static int
-client_win32_handle_tty_available(void)
+client_win32_handle_tty_output_available(void)
 {
-	HANDLE	hin, hout;
+	HANDLE	hout;
+	DWORD	mode;
+
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (!client_win32_valid_handle(hout))
+		return (0);
+
+	/*
+	 * Console handles can be duplicated across processes, but the detached
+	 * server cannot write to them directly.
+	 */
+	if (GetConsoleMode(hout, &mode))
+		return (0);
+	return (1);
+}
+
+static int
+client_win32_handle_tty_input_available(void)
+{
+	HANDLE	hin;
+	DWORD	mode;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
-	hout = GetStdHandle(STD_OUTPUT_HANDLE);
-	return (client_win32_valid_handle(hin) &&
-	    client_win32_valid_handle(hout));
+	if (!client_win32_valid_handle(hin))
+		return (0);
+
+	/*
+	 * A duplicated console input handle is not readable from the detached
+	 * server process. Keep console input on the relay path for now.
+	 */
+	if (GetConsoleMode(hin, &mode))
+		return (0);
+	return (1);
 }
 
 static void
@@ -428,7 +457,7 @@ client_win32_resize_timer_start(void)
 
 	if (client_win32_resize_timer_set)
 		return;
-	if (client_win32_handle_tty || !client_is_console ||
+	if (client_win32_handle_tty_input || !client_is_console ||
 	    (client_flags & CLIENT_CONTROL))
 		return;
 
@@ -554,7 +583,7 @@ client_win32_input_start(void)
 
 	if (client_win32_input != NULL)
 		return;
-	if (client_win32_handle_tty || !client_is_console ||
+	if (client_win32_handle_tty_input || !client_is_console ||
 	    (client_flags & CLIENT_CONTROL))
 		return;
 
@@ -803,11 +832,20 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
 	client_win32_handle_tty = client_win32_handle_tty_enabled();
-	if ((client_flags & CLIENT_CONTROL) ||
-	    !client_win32_handle_tty_available())
+	if (client_flags & CLIENT_CONTROL)
 		client_win32_handle_tty = 0;
+	else if (!client_win32_handle_tty_output_available())
+		client_win32_handle_tty = 0;
+	else if (!client_is_console &&
+	    !client_win32_handle_tty_input_available())
+		client_win32_handle_tty = 0;
+	client_win32_handle_tty_input = 0;
 	if (client_win32_handle_tty)
-		log_debug("using direct Win32 terminal handles");
+		client_win32_handle_tty_input =
+		    client_win32_handle_tty_input_available();
+	if (client_win32_handle_tty)
+		log_debug("using direct Win32 terminal output%s",
+		    client_win32_handle_tty_input ? " and input" : "");
 	if ((client_is_console || client_win32_handle_tty) &&
 	    (*termname == '\0' || strcmp(termname, "dumb") == 0))
 		termname = "xterm-256color";
@@ -1040,11 +1078,15 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		proc_send(client_peer, MSG_IDENTIFY_WIN32_STDOUT, -1,
 		    &handle, sizeof handle);
 
-		hin = GetStdHandle(STD_INPUT_HANDLE);
-		handle.handle = (uint64_t)(uintptr_t)hin;
-		proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1,
-		    &handle, sizeof handle);
-	} else if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
+		if (client_win32_handle_tty_input) {
+			hin = GetStdHandle(STD_INPUT_HANDLE);
+			handle.handle = (uint64_t)(uintptr_t)hin;
+			proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1,
+			    &handle, sizeof handle);
+		}
+	}
+	if (client_is_console && !client_win32_handle_tty_input &&
+	    !(client_flags & CLIENT_CONTROL)) {
 		if (win32_terminal_get_size(NULL, &size.sx, &size.sy,
 		    &size.xpixel, &size.ypixel) != 0) {
 			size.sx = 80;

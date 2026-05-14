@@ -1197,6 +1197,8 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 	if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
 		DWORD error = GetLastError();
 
+		log_debug("%s: ReadFile failed: %s", __func__,
+		    win32_strerror(error));
 		EnterCriticalSection(&whe->lock);
 		if (win32_handle_event_error_is_eof(error))
 			whe->state = WIN32_HANDLE_EVENT_EOF;
