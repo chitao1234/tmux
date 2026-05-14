@@ -1160,6 +1160,9 @@ teardown:
 - if the final partial cannot be written, the backend reports
   `WIN32_IO_EVENT_ERROR` instead of silently treating the retained bytes as
   drained.
+- writer buffered/drained queries now include the retained partial sequence, so
+  ACK and close barriers do not treat bytes as fully drained while they are
+  still only held inside the console backend.
 
 This preserves the existing active console relay ACK model while closing a
 small gap where bytes could be accepted into the console writer but remain only
