@@ -377,12 +377,12 @@ Required direction:
 - Keep final close semantics strict enough to avoid losing terminal reset
   output.
 
-### P2: Native console handles cannot back detached server-side terminal I/O
+### P2: Transferable native console handles cannot yet back detached server-side terminal I/O
 
 Files:
 
 - [`client.c`](../client.c): direct Win32 handle I/O is gated to non-console
-  stdio handles; native console clients stay on relay.
+  stdio handles; native console clients stay on the explicit relay fallback.
 - [`win32-proc.c`](../win32-proc.c): the server is spawned with
   `DETACHED_PROCESS`.
 - [`win32-event.c`](../win32-event.c): detached server reads/writes through the
@@ -404,15 +404,21 @@ Why it matters:
 Handle transfer alone is not enough to replace the client console relay for
 native PowerShell, `cmd.exe`, Windows Terminal, or ConHost clients. Dropping
 relay based only on "the client can hand over handles" would break the common
-native-console attach path.
+native-console attach path unless follow-up testing proves the detached server
+can also use those duplicated handles for read, write, size, detach, reattach,
+EOF, and close behavior.
 
 Required direction:
 
-- Keep native console clients on relay until a separate console
-  attachment/helper design proves the detached server can safely use their
-  terminal I/O.
+- Keep native console clients on relay until direct duplicated console handles,
+  a console attachment design, or a helper design proves the detached server
+  can safely use their terminal I/O. Use `TMUX_WIN32_CONSOLE_RELAY=0` to
+  disable this compatibility fallback for no-relay testing.
 - Treat relay removal as gated on usable handles, not merely transferable
   handles.
+- If the full supported-client matrix proves every client path can transfer
+  handles that the detached server can use, remove the relay path instead of
+  keeping it as a second production terminal stack.
 - Continue using direct server-side handles for non-console stdio paths that
   pass native smoke tests.
 

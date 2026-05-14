@@ -41,6 +41,7 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
+static int		 client_win32_console_relay;
 static int		 client_win32_handle_tty;
 static int		 client_win32_handle_tty_input;
 static struct win32_io_endpoint *client_win32_input;
@@ -97,6 +98,7 @@ static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
+static int		 client_win32_console_relay_enabled(void);
 static int		 client_win32_handle_tty_enabled(void);
 static int		 client_win32_handle_tty_output_available(void);
 static int		 client_win32_handle_tty_input_available(void);
@@ -369,6 +371,17 @@ client_win32_valid_handle(HANDLE handle)
 }
 
 static int
+client_win32_console_relay_enabled(void)
+{
+	const char	*value;
+
+	value = getenv("TMUX_WIN32_CONSOLE_RELAY");
+	if (value != NULL && strcmp(value, "0") == 0)
+		return (0);
+	return (1);
+}
+
+static int
 client_win32_handle_tty_enabled(void)
 {
 	const char	*value;
@@ -490,8 +503,7 @@ client_win32_resize_timer_start(void)
 
 	if (client_win32_resize_timer_set)
 		return;
-	if (client_win32_handle_tty_input || !client_is_console ||
-	    (client_flags & CLIENT_CONTROL))
+	if (!client_win32_console_relay)
 		return;
 
 	if (win32_terminal_get_size(NULL, &sx, &sy, &xpixel, &ypixel) == 0) {
@@ -616,8 +628,7 @@ client_win32_input_start(void)
 
 	if (client_win32_input != NULL)
 		return;
-	if (client_win32_handle_tty_input || !client_is_console ||
-	    (client_flags & CLIENT_CONTROL))
+	if (!client_win32_console_relay)
 		return;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
@@ -879,7 +890,18 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	if (client_win32_handle_tty)
 		log_debug("using direct Win32 terminal output%s",
 		    client_win32_handle_tty_input ? " and input" : "");
-	if ((client_is_console || client_win32_handle_tty) &&
+	client_win32_console_relay = 0;
+	if (client_is_console && !client_win32_handle_tty_input &&
+	    !(client_flags & CLIENT_CONTROL)) {
+		if (client_win32_console_relay_enabled()) {
+			client_win32_console_relay = 1;
+			log_debug("using Win32 console relay fallback");
+		} else {
+			log_debug("Win32 console relay disabled by "
+			    "TMUX_WIN32_CONSOLE_RELAY=0");
+		}
+	}
+	if ((client_win32_console_relay || client_win32_handle_tty) &&
 	    (*termname == '\0' || strcmp(termname, "dumb") == 0))
 		termname = "xterm-256color";
 #endif
@@ -945,7 +967,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 	}
 #else
-	if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
+	if (client_win32_console_relay) {
 		if (win32_terminal_init_client(&cause) != 0) {
 			fprintf(stderr, "%s\n", cause);
 			free(cause);
@@ -1121,8 +1143,7 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		proc_send(client_peer, MSG_IDENTIFY_WIN32_SIZE, -1,
 		    &size, sizeof size);
 	}
-	if (client_is_console && !client_win32_handle_tty_input &&
-	    !(client_flags & CLIENT_CONTROL)) {
+	if (client_win32_console_relay) {
 		client_win32_get_terminal_size(&size);
 		proc_send(client_peer, MSG_IDENTIFY_WIN32_TERMINAL, -1,
 		    &size, sizeof size);

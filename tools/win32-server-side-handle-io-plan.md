@@ -28,16 +28,18 @@ codebase:
 The intended final product shape is simple: interactive Win32 clients hand
 terminal handles to the server, and the server performs terminal I/O through
 the Win32 I/O service. The client console relay is a migration aid only unless
-testing proves a supported interactive client cannot supply usable handles.
+testing proves a supported interactive client cannot supply handles that are
+usable by the detached server.
 
 ## Design Summary
 
 - Make server-owned direct-handle I/O the default terminal path.
 - Keep the current client console relay only as a temporary fallback for
-  clients that cannot hand over handles during migration.
+  clients whose transferred handles cannot yet drive detached server-side I/O.
 - Treat the relay as removable compatibility scaffolding, not as a permanent
   supported path. If testing finds no supported Win32 client path that cannot
-  hand over handles, drop the relay path instead of carrying it forward.
+  provide usable server-side handles, drop the relay path instead of carrying it
+  forward.
 - Migrate output first. The output path is already closer to the final shape
   because the server-side writer plumbing exists and already integrates with
   redraw and close accounting.
@@ -58,11 +60,19 @@ The removal decision is data-driven:
 - If every supported interactive Win32 client shape can transfer usable
   stdin/stdout handles, remove the relay path after direct-handle input,
   output, resize, detach, reattach, and close behavior are covered.
-- If one supported client shape cannot transfer usable handles, keep relay only
-  behind an explicit compatibility gate and document that client shape as the
-  reason.
+- If every supported client shape can transfer handles and testing proves those
+  handles are usable from the detached server, remove the relay path. Do not
+  keep it as a second implementation just because it exists.
+- If one supported client shape can transfer handles but the detached server
+  cannot use them for terminal input/output/size, keep relay only behind an
+  explicit compatibility gate and document that client shape as the reason.
 - If no such client shape is found, do not keep relay as an indefinite fallback
   just because it already exists.
+
+For this decision, a handle is not "usable" merely because `DuplicateHandle`
+succeeds. A usable direct terminal handle must pass server-side read, write,
+resize or initial-size preservation, detach, reattach, EOF, and close tests
+while the server is running in its normal detached process model.
 
 ## Current State
 
@@ -70,6 +80,8 @@ The removal decision is data-driven:
   direct stdin/stdout handle claims by default only when the stdio handles are
   non-console handles that the detached server can use. `TMUX_WIN32_HANDLE_TTY=0`
   disables this direct path for debugging.
+- Native console relay is selected explicitly as a compatibility fallback and
+  can be disabled for no-relay testing with `TMUX_WIN32_CONSOLE_RELAY=0`.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
   `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
   `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
@@ -99,8 +111,9 @@ instead of inventing a second control plane.
 - `MSG_READY` remains the attach-complete signal; it does not become a new
   handle-transfer protocol.
 - Legacy console relay remains the fallback when a client cannot supply direct
-  handles during staged rollout. It should not remain a fallback after testing
-  proves that every supported interactive Win32 client can supply handles.
+  handles that the detached server can use during staged rollout. It should not
+  remain a fallback after testing proves that every supported interactive Win32
+  client can supply usable handles.
 
 Open design point:
 
@@ -156,9 +169,9 @@ Direct-handle attach should follow this sequence:
 3. The client sends `MSG_IDENTIFY_CLIENTPID`.
 4. Direct-handle clients send both `MSG_IDENTIFY_WIN32_STDIN` and
    `MSG_IDENTIFY_WIN32_STDOUT`, followed by `MSG_IDENTIFY_WIN32_SIZE` for the
-   initial terminal size. Native console clients do not use this flow until
-   there is a proven design for using console handles from the detached server
-   process.
+   initial terminal size. Native console clients should use this flow only
+   after tests prove that the detached server can actually read, write, and
+   preserve size through the duplicated console handles.
 5. The server duplicates and validates the handles before
    `MSG_IDENTIFY_DONE` completes.
 6. `MSG_IDENTIFY_DONE` calls the existing terminal initialization path.
@@ -170,9 +183,11 @@ Direct-handle attach should follow this sequence:
 
 Relay fallback should keep its current handshake while it exists:
 
-1. The client sends `MSG_IDENTIFY_WIN32_TERMINAL` with the initial size.
-2. The server marks `c->win32_console`.
-3. Input, output, ACK, and resize continue through the relay messages.
+1. The client enables the explicit console relay fallback unless
+   `TMUX_WIN32_CONSOLE_RELAY=0` is set.
+2. The client sends `MSG_IDENTIFY_WIN32_TERMINAL` with the initial size.
+3. The server marks `c->win32_console`.
+4. Input, output, ACK, and resize continue through the relay messages.
 
 The two flows should not be combined for one client.
 
@@ -276,12 +291,15 @@ supported Win32 client shapes:
 - nested or inherited console clients where stdin/stdout are redirected;
 - non-interactive command/control clients.
 
-For each interactive client shape, verify whether the client can send usable
-stdin/stdout handles and whether the server-side reader/writer can operate on
-them without relying on relay-only console mode behavior.
+For each interactive client shape, record two separate results:
 
-If every supported interactive client can hand over handles, do not keep the
-relay as a compatibility path.
+- whether the client can transfer stdin/stdout handles to the server;
+- whether the detached server can use those transferred handles for terminal
+  read, write, size, detach, reattach, EOF, and close behavior without relying
+  on relay-only console mode behavior.
+
+If every supported interactive client can transfer usable handles, do not keep
+the relay as a compatibility path.
 
 ### 6. Drop or quarantine the console relay
 
@@ -292,9 +310,12 @@ There are two possible outcomes:
 
 - If testing finds no supported client shape that needs relay, remove the
   client console relay messages and code paths.
-- If testing finds a real supported path that cannot hand over handles, keep the
-  relay quarantined behind an explicit compatibility gate and document the
-  reason. Do not leave it as the implicit default or an untracked fallback.
+- If testing finds a real supported path whose transferred handles are not
+  usable by the detached server, keep the relay quarantined behind an explicit
+  compatibility gate and document the reason. Do not leave it as the implicit
+  default or an untracked fallback.
+  The current gate is the native console fallback controlled by
+  `TMUX_WIN32_CONSOLE_RELAY`.
 
 ## Implementation Slices
 
@@ -410,9 +431,9 @@ under MSYS2.
   being landed.
 - Verify that the client relay and direct-handle paths remain mutually
   exclusive in the session state.
-- Verify whether any supported interactive Win32 client cannot hand over
-  usable handles. If none are found, the expected final state is relay removal,
-  not indefinite relay support.
+- Verify whether any supported interactive Win32 client cannot transfer handles
+  that the detached server can use. If none are found, the expected final state
+  is relay removal, not indefinite relay support.
 
 ## Exit Criteria
 
