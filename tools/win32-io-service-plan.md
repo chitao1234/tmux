@@ -1247,6 +1247,22 @@ must work before the service is fully initialized, during shutdown, and from
 fatal/error paths, so they use a small bounded logger instead of the libevent
 completion bridge.
 
+## Backend Policy Closure
+
+Two remaining backend classes are now explicit policy rather than open-ended
+implementation debt:
+
+- borrowed non-console stdio and direct terminal handles stay on the worker
+  fallback because the handles are not reopened here with overlapped flags and
+  their blocking behavior is owned by the caller that created them;
+- process waits stay on `RegisterWaitForSingleObject()` because process handles
+  are wait-only objects, not byte-stream endpoints, and the callback already
+  posts typed completions through the tmux-owned service queue.
+
+That leaves the I/O-service migration with no unclassified Win32 handle paths.
+The only remaining hardening work around startup locks and socket setup belongs
+to the separate IPC/auth track.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1263,11 +1279,11 @@ classified rather than hidden:
   worker-fallback constructors, choosing the shared console writer backend only
   when the borrowed output handle is an actual console;
 - inherited stdio streams for client file transfer still use the worker
-  fallback for non-console handles because they are borrowed process handles and
-  are not always overlapped-capable regular files;
-- process waits still use `RegisterWaitForSingleObject()`, but process
-  completion is delivered through the service queue and the tmux thread event
-  contract;
+  fallback for non-console handles because they are borrowed process handles
+  and are not always overlapped-capable regular files;
+- process waits still use `RegisterWaitForSingleObject()`, but that is the
+  final backend and process completion is delivered through the service queue
+  and the tmux thread event contract;
 - debug logging in `log.c` and verbose tty-output logging in `tty.c` now use
   the bounded Win32 diagnostic writer, not synchronous file writes from the tmux
   server thread. This remains separate from the main I/O service because
@@ -1277,12 +1293,6 @@ classified rather than hidden:
   audited under the IPC/auth plan, not counted as pane/job/file I/O service
   work.
 
-The next implementation work should therefore be one of:
-
-- decide whether direct terminal and inherited stdio worker-fallback handles are
-  final policy or should be tightened with stronger runtime handle
-  classification;
-- replace or explicitly bless the `RegisterWaitForSingleObject()` process wait
-  backend now that process completions already use the service queue;
-- continue IPC/auth hardening separately, including startup-lock timeout and
-  socket setup behavior.
+There is no remaining open implementation work in the I/O-service track unless a
+new handle class is introduced. The next hardening work belongs to the separate
+IPC/auth plan, including startup-lock timeout and socket setup behavior.

@@ -953,6 +953,11 @@ win32_io_process_new(HANDLE process,
 	wpe->state = WIN32_PROCESS_EVENT_RUNNING;
 	win32_io_endpoint_init(&wpe->endpoint, WIN32_IO_ENDPOINT_PROCESS, wpe,
 	    eventcb, arg);
+	/*
+	 * Process handles are wait-only objects rather than IOCP byte streams.
+	 * The threadpool wait is the final backend; it only posts a typed
+	 * completion back through the tmux-owned service queue.
+	 */
 	if (!RegisterWaitForSingleObject(&wpe->wait, process,
 	    win32_process_event_wait_cb, wpe, INFINITE,
 	    WT_EXECUTEONLYONCE)) {
@@ -1696,6 +1701,11 @@ struct win32_io_endpoint *
 win32_io_reader_new_stdio(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
+	/*
+	 * Inherited stdio handles are borrowed and may be pipes, files, or
+	 * other synchronous objects. Overlapped capability is fixed when the
+	 * handle is created, so non-console stdio stays on the worker fallback.
+	 */
 	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_STDIO,
 	    eventcb, arg));
 }
@@ -1704,6 +1714,11 @@ struct win32_io_endpoint *
 win32_io_reader_new_terminal(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
+	/*
+	 * Direct terminal handles are supplied by the client and are not owned
+	 * or opened here, so the worker fallback is the final non-console
+	 * backend. Actual console input must use win32_io_reader_new_console().
+	 */
 	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_TERMINAL,
 	    eventcb, arg));
 }
@@ -2271,6 +2286,11 @@ struct win32_io_endpoint *
 win32_io_writer_new_stdio_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
+	/*
+	 * Borrowed stdio output cannot be reopened with FILE_FLAG_OVERLAPPED.
+	 * Console handles are routed to the shared console writer; everything
+	 * else remains on the explicit worker fallback.
+	 */
 	return (win32_io_writer_new_worker_borrowed(handle,
 	    win32_handle_writer_backend_for_handle(handle), eventcb, arg));
 }
@@ -2279,6 +2299,11 @@ struct win32_io_endpoint *
 win32_io_writer_new_terminal_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
+	/*
+	 * The client remains the close owner for direct terminal output. Keep
+	 * non-console borrowed handles on the worker fallback and only select
+	 * the shared console writer when the handle is an actual console.
+	 */
 	return (win32_io_writer_new_worker_borrowed(handle,
 	    win32_handle_writer_backend_for_handle(handle), eventcb, arg));
 }
