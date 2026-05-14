@@ -274,3 +274,20 @@ The client file-write protocol now has explicit completion ACKs:
 
 This slice gives file-transfer output the protocol backpressure needed before
 moving more generic fd write paths onto final endpoint objects.
+
+## Read EOF State Slice
+
+Worker-backed read handles now preserve EOF separately from hard read errors:
+
+- `win32_handle_event` tracks running, EOF, and error states instead of a
+  single generic error bit;
+- zero-byte `ReadFile()` completion and EOF-style pipe statuses such as
+  `ERROR_BROKEN_PIPE` are recorded as output EOF, while other failed
+  `ReadFile()` calls and local buffer failures are recorded as errors;
+- pane and job output callbacks drain any buffered data, then log EOF versus
+  error before running the existing compatibility error callback path;
+- pane and job helpers can now query output EOF directly, which is a bridge
+  toward the final `WIN32_IO_READ_EOF` / `WIN32_IO_ERROR` event model;
+- the read backend is still worker-thread based and the public
+  `win32_handle_event_*` compatibility API remains until endpoint objects
+  replace it.

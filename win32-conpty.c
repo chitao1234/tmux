@@ -878,6 +878,10 @@ win32_pane_error_cb(void *arg)
 	int			 status;
 
 	win32_pane_drain(wp);
+	if (win32_handle_event_error(wp->win32->output_event)) {
+		log_debug("%%%u output read error", wp->id);
+	} else if (win32_handle_event_eof(wp->win32->output_event))
+		log_debug("%%%u output EOF", wp->id);
 	if (win32_pane_exited(wp, &status)) {
 		wp->status = status;
 		wp->flags |= PANE_STATUSREADY;
@@ -1141,6 +1145,14 @@ win32_pane_output_done(struct window_pane *wp)
 	return (win32_handle_event_done(wp->win32->output_event));
 }
 
+int
+win32_pane_output_eof(struct window_pane *wp)
+{
+	if (wp->win32 == NULL || wp->win32->output_event == NULL)
+		return (1);
+	return (win32_handle_event_eof(wp->win32->output_event));
+}
+
 void
 win32_pane_set_reading(struct window_pane *wp, int enabled)
 {
@@ -1235,6 +1247,11 @@ win32_job_error_cb(void *arg)
 		if (wj->event->readcb != NULL)
 			wj->event->readcb(wj->event, wj->event->cbarg);
 	}
+	if (win32_handle_event_error(wj->output_event)) {
+		log_debug("job output read error, pid %ld",
+		    (long)wj->process_id);
+	} else if (win32_handle_event_eof(wj->output_event))
+		log_debug("job output EOF, pid %ld", (long)wj->process_id);
 	if (win32_job_exited(wj, &status))
 		wj->status = status;
 	if (wj->event != NULL && wj->event->errorcb != NULL)
@@ -1580,6 +1597,14 @@ win32_job_output_done(struct win32_job *wj)
 	if (wj == NULL || wj->output_event == NULL)
 		return (1);
 	return (win32_handle_event_done(wj->output_event));
+}
+
+int
+win32_job_output_eof(struct win32_job *wj)
+{
+	if (wj == NULL || wj->output_event == NULL)
+		return (1);
+	return (win32_handle_event_eof(wj->output_event));
 }
 
 void

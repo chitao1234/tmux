@@ -57,6 +57,8 @@ void		 win32_handle_event_set_reading(struct win32_handle_event *,
 		     int);
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_done(struct win32_handle_event *);
+int		 win32_handle_event_eof(struct win32_handle_event *);
+int		 win32_handle_event_error(struct win32_handle_event *);
 struct win32_handle_writer *win32_handle_writer_new(HANDLE *);
 struct win32_handle_writer *win32_handle_writer_new_cb(HANDLE *,
 		     void (*)(void *), void (*)(void *), void *);
@@ -101,6 +103,7 @@ void		 win32_pane_drain(struct window_pane *);
 int		 win32_pane_exited(struct window_pane *, int *);
 size_t		 win32_pane_buffered(struct window_pane *);
 int		 win32_pane_output_done(struct window_pane *);
+int		 win32_pane_output_eof(struct window_pane *);
 void		 win32_pane_set_reading(struct window_pane *, int);
 int		 win32_pane_reading_paused(struct window_pane *);
 char		*win32_pane_get_cwd(struct window_pane *);
@@ -115,6 +118,7 @@ void		 win32_job_close(struct win32_job *);
 void		 win32_job_resize(struct win32_job *, u_int, u_int);
 int		 win32_job_exited(struct win32_job *, int *);
 int		 win32_job_output_done(struct win32_job *);
+int		 win32_job_output_eof(struct win32_job *);
 void		 win32_job_drain(struct win32_job *);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);

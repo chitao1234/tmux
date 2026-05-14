@@ -18,6 +18,12 @@
 
 #ifdef TMUX_WIN32
 
+enum win32_handle_event_state {
+	WIN32_HANDLE_EVENT_RUNNING,
+	WIN32_HANDLE_EVENT_EOF,
+	WIN32_HANDLE_EVENT_ERROR
+};
+
 static int
 win32_socket_errno(int error)
 {
@@ -108,7 +114,8 @@ struct win32_handle_event {
 	void		 *arg;
 	int		 paused;
 	int		 throttled;
-	int		 error;
+	enum win32_handle_event_state state;
+	DWORD		 error;
 	int		 pending;
 	int		 active;
 };
@@ -166,6 +173,7 @@ static void	win32_io_service_enqueue_process(struct win32_process_event *);
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
+static int	win32_handle_event_error_is_eof(DWORD);
 static int	win32_handle_write(HANDLE, const void *, size_t);
 
 static int
@@ -305,7 +313,7 @@ win32_io_service_dispatch_readers(void)
 {
 	struct win32_handle_event	*whe;
 	size_t				 buffered;
-	int				 error;
+	enum win32_handle_event_state	 state;
 
 	for (;;) {
 		EnterCriticalSection(&win32_io.lock);
@@ -319,11 +327,11 @@ win32_io_service_dispatch_readers(void)
 			break;
 
 		EnterCriticalSection(&whe->lock);
-		error = whe->error;
+		state = whe->state;
 		buffered = EVBUFFER_LENGTH(whe->input);
 		LeaveCriticalSection(&whe->lock);
 
-		if (error) {
+		if (state != WIN32_HANDLE_EVENT_RUNNING) {
 			if (whe->errorcb != NULL)
 				whe->errorcb(whe->arg);
 		} else if (buffered != 0 && whe->readcb != NULL)
@@ -467,10 +475,18 @@ win32_handle_event_update_ready(struct win32_handle_event *whe)
 		whe->throttled = 0;
 	if (whe->ready == NULL)
 		return;
-	if (!whe->paused && !whe->throttled && !whe->error)
+	if (!whe->paused && !whe->throttled &&
+	    whe->state == WIN32_HANDLE_EVENT_RUNNING)
 		SetEvent(whe->ready);
 	else
 		ResetEvent(whe->ready);
+}
+
+static int
+win32_handle_event_error_is_eof(DWORD error)
+{
+	return (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF ||
+	    error == ERROR_NO_DATA);
 }
 
 static DWORD WINAPI
@@ -481,7 +497,7 @@ win32_handle_event_thread(void *arg)
 	HANDLE				 events[2];
 	DWORD				 wait;
 	DWORD				 nread;
-	int				 error;
+	enum win32_handle_event_state	 state;
 	u_int				 i;
 
 	events[0] = whe->stop;
@@ -490,10 +506,24 @@ win32_handle_event_thread(void *arg)
 		wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
 		if (wait != WAIT_OBJECT_0 + 1)
 			break;
-		if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL) ||
-		    nread == 0) {
+		if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
+			DWORD error = GetLastError();
+
 			EnterCriticalSection(&whe->lock);
-			whe->error = 1;
+			if (win32_handle_event_error_is_eof(error))
+				whe->state = WIN32_HANDLE_EVENT_EOF;
+			else
+				whe->state = WIN32_HANDLE_EVENT_ERROR;
+			whe->error = error;
+			win32_handle_event_update_ready(whe);
+			LeaveCriticalSection(&whe->lock);
+			win32_io_service_enqueue_reader(whe);
+			break;
+		}
+		if (nread == 0) {
+			EnterCriticalSection(&whe->lock);
+			whe->state = WIN32_HANDLE_EVENT_EOF;
+			whe->error = ERROR_SUCCESS;
 			win32_handle_event_update_ready(whe);
 			LeaveCriticalSection(&whe->lock);
 			win32_io_service_enqueue_reader(whe);
@@ -509,15 +539,17 @@ win32_handle_event_thread(void *arg)
 			}
 		}
 		EnterCriticalSection(&whe->lock);
-		if (evbuffer_add(whe->input, buf, nread) != 0)
-			whe->error = 1;
+		if (evbuffer_add(whe->input, buf, nread) != 0) {
+			whe->state = WIN32_HANDLE_EVENT_ERROR;
+			whe->error = ERROR_NOT_ENOUGH_MEMORY;
+		}
 		if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
 			whe->throttled = 1;
 		win32_handle_event_update_ready(whe);
-		error = whe->error;
+		state = whe->state;
 		LeaveCriticalSection(&whe->lock);
 		win32_io_service_enqueue_reader(whe);
-		if (error)
+		if (state != WIN32_HANDLE_EVENT_RUNNING)
 			break;
 	}
 	return (0);
@@ -655,9 +687,31 @@ win32_handle_event_done(struct win32_handle_event *whe)
 	int	done;
 
 	EnterCriticalSection(&whe->lock);
-	done = whe->error;
+	done = (whe->state != WIN32_HANDLE_EVENT_RUNNING);
 	LeaveCriticalSection(&whe->lock);
 	return (done);
+}
+
+int
+win32_handle_event_eof(struct win32_handle_event *whe)
+{
+	int	eof;
+
+	EnterCriticalSection(&whe->lock);
+	eof = (whe->state == WIN32_HANDLE_EVENT_EOF);
+	LeaveCriticalSection(&whe->lock);
+	return (eof);
+}
+
+int
+win32_handle_event_error(struct win32_handle_event *whe)
+{
+	int	error;
+
+	EnterCriticalSection(&whe->lock);
+	error = (whe->state == WIN32_HANDLE_EVENT_ERROR);
+	LeaveCriticalSection(&whe->lock);
+	return (error);
 }
 
 static DWORD WINAPI
