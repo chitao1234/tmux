@@ -372,3 +372,17 @@ loopback TCP listener:
   completions and write one byte to wake the tmux libevent thread;
 - this removes a leftover TCP transport from the service bridge while keeping
   the final endpoint/IOCP migration separate.
+
+## Writer High Watermark Slice
+
+Worker-backed write handles now have a service-level queue cap:
+
+- `win32_handle_writer_write()` refuses new bytes with `EAGAIN` once the
+  writer queue reaches 1 MiB;
+- writes that would cross the cap are rejected rather than partially queued,
+  preserving the existing all-or-error expectation of file, tty, and client
+  console callers;
+- existing pane and job stdin producers still keep their own tmux-side queues
+  and feed the service writer in bounded chunks;
+- tty, console relay, and file-write callers already send chunks below the cap,
+  so this is a defensive service invariant rather than a protocol redesign.

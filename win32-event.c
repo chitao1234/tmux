@@ -198,6 +198,7 @@ static struct win32_io_service win32_io;
 
 #define WIN32_HANDLE_EVENT_HIGH (1024 * 1024)
 #define WIN32_HANDLE_EVENT_LOW (512 * 1024)
+#define WIN32_HANDLE_WRITER_HIGH (1024 * 1024)
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 
 static int	win32_io_service_init(void);
@@ -994,7 +995,7 @@ int
 win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
     size_t size)
 {
-	size_t	nwrite;
+	size_t	buffered, nwrite;
 
 	if (whw == NULL) {
 		errno = EPIPE;
@@ -1011,6 +1012,17 @@ win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
 	    whw->handle == NULL) {
 		LeaveCriticalSection(&whw->lock);
 		errno = EPIPE;
+		return (-1);
+	}
+	buffered = EVBUFFER_LENGTH(whw->output);
+	if (buffered >= WIN32_HANDLE_WRITER_HIGH) {
+		LeaveCriticalSection(&whw->lock);
+		errno = EAGAIN;
+		return (-1);
+	}
+	if (nwrite > WIN32_HANDLE_WRITER_HIGH - buffered) {
+		LeaveCriticalSection(&whw->lock);
+		errno = EAGAIN;
 		return (-1);
 	}
 	if (evbuffer_add(whw->output, data, nwrite) != 0) {
