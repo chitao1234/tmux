@@ -1995,6 +1995,7 @@ struct client_file {
 	int				 flags;
 #define CLIENT_FILE_TEXT 0x1
 #define CLIENT_FILE_LAST_CR 0x2
+#define CLIENT_FILE_WIN32_CONSOLE 0x4
 	int				 fd;
 	int				 error;
 	int				 closed;

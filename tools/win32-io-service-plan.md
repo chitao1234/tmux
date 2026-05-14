@@ -260,10 +260,12 @@ The client file-write protocol now has explicit completion ACKs:
   server buffer and client in-flight bytes are drained;
 - client shutdown now treats both unflushed bufferevent output and unacknowledged
   file writes as pending work;
-- Win32 client console text writes use the shared service writer when the
-  destination stream is an actual console handle, preserving CRLF text
-  translation while sending ACKs only after the writer drains;
-- non-console file and pipe targets continue to use the ordinary fd write path.
+- Win32 client file writes use the shared service writer for both console and
+  non-console destinations, preserving console CRLF text translation when the
+  destination stream is an actual console handle;
+- the client sends ACKs only after the writer drains, so the server's in-flight
+  accounting reflects bytes accepted by the destination handle, not bytes merely
+  queued in the client process.
 
 This slice gives file-transfer output the protocol backpressure needed before
-moving more generic fd write paths onto service endpoints.
+moving more generic fd write paths onto final endpoint objects.

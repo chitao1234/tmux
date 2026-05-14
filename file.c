@@ -44,6 +44,12 @@ static void	file_push_close(struct client_file *);
 static void	file_write_record(struct client_file *, size_t);
 static void	file_write_flush_ack(struct client_file *, size_t, int);
 static void	file_write_acknowledge(struct client_file *, size_t, int);
+#ifdef TMUX_WIN32
+static void	file_write_win32_callback(void *);
+static void	file_write_win32_error_callback(void *);
+static int	file_write_console_text(struct client_file *, const char *,
+		    size_t);
+#endif
 
 RB_GENERATE(client_files, client_file, entry, file_cmp);
 
@@ -656,13 +662,106 @@ file_write_acknowledge(struct client_file *cf, size_t size, int error)
 static void
 file_write_win32_close(struct client_file *cf)
 {
+	int	fd;
+
 	if (cf->win32_writer != NULL) {
 		win32_handle_writer_free(cf->win32_writer);
 		cf->win32_writer = NULL;
 	}
-	if (cf->fd != -1)
-		close(cf->fd);
+	fd = cf->fd;
 	cf->fd = -1;
+	if (fd != -1)
+		close(fd);
+}
+
+static int
+file_write_win32_start(struct client_file *cf)
+{
+	intptr_t	osfhandle;
+	HANDLE	handle;
+
+	if (cf->win32_writer != NULL)
+		return (0);
+	if (cf->fd == -1) {
+		errno = EBADF;
+		return (-1);
+	}
+	osfhandle = _get_osfhandle(cf->fd);
+	handle = (HANDLE)osfhandle;
+	if (handle == INVALID_HANDLE_VALUE) {
+		errno = EBADF;
+		return (-1);
+	}
+	cf->win32_writer = win32_handle_writer_new_borrowed(&handle,
+	    file_write_win32_callback, file_write_win32_error_callback, cf);
+	if (cf->win32_writer == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+file_write_win32_raw(struct client_file *cf, const void *data, size_t size)
+{
+	int	written;
+
+	if (file_write_win32_start(cf) != 0)
+		return (-1);
+	written = win32_handle_writer_write(cf->win32_writer, data, size);
+	if (written != (int)size) {
+		errno = EIO;
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+file_write_win32_queue(struct client_file *cf, const void *data, size_t size)
+{
+	if (cf->flags & CLIENT_FILE_WIN32_CONSOLE)
+		return (file_write_console_text(cf, data, size) == 1 ? 0 : -1);
+	return (file_write_win32_raw(cf, data, size));
+}
+
+static void
+file_write_win32_fail(struct client_file *cf, int error)
+{
+	if (error == 0)
+		error = EIO;
+	if (cf->write_pending != 0)
+		file_write_acknowledge(cf, cf->write_pending, error);
+	if (cf->cb != NULL)
+		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+	file_write_win32_close(cf);
+}
+
+static void
+file_write_win32_queue_data(struct client_file *cf, const void *data,
+    size_t size)
+{
+	int	error;
+
+	file_write_record(cf, size);
+	if (file_write_win32_queue(cf, data, size) == 0)
+		return;
+	error = errno;
+	file_write_win32_fail(cf, error);
+}
+
+static void
+file_write_win32_open(struct client_file *cf)
+{
+	intptr_t	osfhandle;
+	HANDLE	handle;
+	DWORD	mode;
+
+	if (file_write_win32_start(cf) != 0)
+		return;
+	osfhandle = _get_osfhandle(cf->fd);
+	handle = (HANDLE)osfhandle;
+	if (handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode))
+		cf->flags |= CLIENT_FILE_WIN32_CONSOLE;
 }
 
 static void
@@ -693,15 +792,10 @@ static void
 file_write_win32_error_callback(void *arg)
 {
 	struct client_file	*cf = arg;
-	size_t			 size;
 
 	if (cf->fd == -1 && cf->win32_writer == NULL)
 		return;
-	size = cf->write_pending;
-	file_write_acknowledge(cf, size, EIO);
-	if (cf->cb != NULL)
-		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-	file_write_win32_close(cf);
+	file_write_win32_fail(cf, EIO);
 }
 
 static void
@@ -745,45 +839,6 @@ file_read_sync(struct client_file *cf)
 	cf->fd = -1;
 	RB_REMOVE(client_files, cf->tree, cf);
 	file_free(cf);
-}
-
-static void
-file_write_sync(struct client_file *cf, const void *data, size_t size)
-{
-	const char	*ptr = data;
-	ssize_t		 n;
-
-	while (size != 0) {
-		n = write(cf->fd, ptr, size);
-		if (n == -1) {
-			if (errno == EINTR)
-				continue;
-			log_debug("write error file %d: %s", cf->stream,
-			    strerror(errno));
-			close(cf->fd);
-			cf->fd = -1;
-			if (cf->cb != NULL)
-				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-			file_write_flush_ack(cf, size, errno);
-			return;
-		}
-		if (n == 0) {
-			log_debug("write error file %d: wrote zero bytes",
-			    cf->stream);
-			close(cf->fd);
-			cf->fd = -1;
-			if (cf->cb != NULL)
-				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-			file_write_flush_ack(cf, size, EIO);
-			return;
-		}
-		file_write_flush_ack(cf, n, 0);
-		ptr += n;
-		size -= n;
-	}
-
-	if (cf->cb != NULL)
-		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
 }
 
 static int
@@ -856,13 +911,8 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	const char		*path;
 	struct msg_write_ready	 reply;
-	struct client_file	 find, *cf;
+	struct client_file	 find, *cf = NULL;
 	const int		 flags = O_NONBLOCK|O_WRONLY|O_CREAT;
-#ifdef TMUX_WIN32
-	intptr_t		 osfhandle;
-	HANDLE			 handle;
-	DWORD			 mode;
-#endif
 	int			 error = 0;
 
 	if (msglen < sizeof *msg)
@@ -906,19 +956,10 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		if (msg->stream == STDOUT_FILENO || msg->stream == STDERR_FILENO)
 			cf->flags |= CLIENT_FILE_TEXT;
 	}
-	if (cf->flags & CLIENT_FILE_TEXT) {
-		osfhandle = _get_osfhandle(cf->fd);
-		handle = (HANDLE)osfhandle;
-		if (handle != INVALID_HANDLE_VALUE &&
-		    GetConsoleMode(handle, &mode)) {
-			cf->win32_writer = win32_handle_writer_new_borrowed(
-			    &handle, file_write_win32_callback,
-			    file_write_win32_error_callback, cf);
-			if (cf->win32_writer == NULL) {
-				error = EIO;
-				goto reply;
-			}
-		}
+	file_write_win32_open(cf);
+	if (cf->win32_writer == NULL) {
+		error = errno;
+		goto reply;
 	}
 #endif
 
@@ -932,6 +973,16 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	goto reply;
 
 reply:
+	if (error != 0 && cf != NULL) {
+		if (cf->win32_writer != NULL) {
+			win32_handle_writer_free(cf->win32_writer);
+			cf->win32_writer = NULL;
+		}
+		if (cf->fd != -1)
+			close(cf->fd);
+		cf->fd = -1;
+		file_free(cf);
+	}
 	reply.stream = msg->stream;
 	reply.error = error;
 	proc_send(peer, MSG_WRITE_READY, -1, &reply, sizeof reply);
@@ -955,18 +1006,8 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 
 #ifdef TMUX_WIN32
 	if (cf->event == NULL) {
-		if (cf->fd != -1) {
-			if (cf->win32_writer != NULL) {
-				file_write_record(cf, size);
-				if ((cf->flags & CLIENT_FILE_TEXT) &&
-				    file_write_console_text(cf,
-				    (const char *)(msg + 1), size))
-					return;
-				file_write_win32_error_callback(cf);
-				return;
-			}
-			file_write_sync(cf, msg + 1, size);
-		}
+		if (cf->fd != -1)
+			file_write_win32_queue_data(cf, msg + 1, size);
 		return;
 	}
 #endif
