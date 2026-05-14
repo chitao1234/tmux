@@ -215,6 +215,7 @@ struct win32_io_service {
 	TAILQ_HEAD(, win32_io_endpoint) pending;
 	int		 initialized;
 	int		 event_added;
+	int		 notify_pending;
 };
 
 static struct win32_io_service win32_io;
@@ -235,6 +236,7 @@ static void	win32_io_service_enqueue_endpoint(struct win32_io_endpoint *,
 		     uint32_t);
 static void	win32_io_service_deactivate_endpoint(
 		     struct win32_io_endpoint *);
+static void	win32_io_service_wakeup_locked(void);
 static void	win32_io_service_enqueue_reader(struct win32_handle_event *);
 static void	win32_io_service_enqueue_writer(struct win32_handle_writer *,
 		     uint32_t);
@@ -444,17 +446,36 @@ win32_io_endpoint_init(struct win32_io_endpoint *endpoint,
 }
 
 static void
+win32_io_service_wakeup_locked(void)
+{
+	char	one = 1;
+	int	error;
+
+	if (win32_io.notify_pending)
+		return;
+	if (send(win32_io.notify_write, &one, 1, 0) == 1) {
+		win32_io.notify_pending = 1;
+		return;
+	}
+	error = WSAGetLastError();
+	if (error == WSAEWOULDBLOCK) {
+		win32_io.notify_pending = 1;
+		return;
+	}
+	log_debug("%s: wakeup send failed: %s", __func__,
+	    win32_strerror(error));
+}
+
+static void
 win32_io_service_enqueue_endpoint(struct win32_io_endpoint *endpoint,
     uint32_t events)
 {
-	char	one = 1;
-
 	EnterCriticalSection(&win32_io.lock);
 	endpoint->events |= events;
 	if (endpoint->active && !endpoint->pending) {
 		TAILQ_INSERT_TAIL(&win32_io.pending, endpoint, entry);
 		endpoint->pending = 1;
-		send(win32_io.notify_write, &one, 1, 0);
+		win32_io_service_wakeup_locked();
 	}
 	LeaveCriticalSection(&win32_io.lock);
 }
@@ -676,6 +697,9 @@ win32_io_service_cb(__unused evutil_socket_t fd, __unused short events,
 
 	while (recv(win32_io.notify_read, buf, sizeof buf, 0) > 0)
 		;
+	EnterCriticalSection(&win32_io.lock);
+	win32_io.notify_pending = 0;
+	LeaveCriticalSection(&win32_io.lock);
 
 	win32_io_service_dispatch_endpoints();
 }

@@ -821,3 +821,22 @@ This only applies to the explicit worker fallback backend used for console,
 direct tty, and stdio handles. IOCP-backed endpoints still use their completion
 event as a lifetime barrier, and process waits still use the existing
 `RegisterWaitForSingleObject` backend.
+
+## Service Wakeup Coalescing Slice
+
+The shared Win32 I/O service wakeup is now level-triggered instead of
+one-byte-per-completion:
+
+- the service tracks `notify_pending` under the same lock as the pending
+  endpoint queue;
+- enqueueing the first pending endpoint sends one byte to wake libevent and
+  marks the service as notified;
+- additional completions only update endpoint event masks while the wakeup is
+  pending, avoiding notify socket growth under completion bursts;
+- `WSAEWOULDBLOCK` on wakeup send is treated as already-notified because a full
+  notify socket necessarily has readable wakeup bytes;
+- the tmux-thread service callback drains the notify socket and clears
+  `notify_pending` before dispatching all queued endpoint completions.
+
+This prevents buffered reader/writer/process completions from being stranded if
+the AF_UNIX wakeup socket reaches its nonblocking send limit.

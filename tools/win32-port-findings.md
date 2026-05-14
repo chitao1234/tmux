@@ -133,29 +133,30 @@ Required direction:
 - If a fallback is necessary, use `GetTempPathW()` plus a private
   user/integrity-specific leaf directory and secure only that leaf.
 
-### P0: ConPTY/job output notifications can be lost
+### Fixed: ConPTY/job output notifications can be lost
 
 Files:
 
-- [`win32-event.c`](../win32-event.c): `win32_handle_event_thread()` appends
-  data then calls nonblocking `send()` on the notify socket and ignores errors.
+- [`win32-event.c`](../win32-event.c): service completions wake libevent through
+  the shared nonblocking AF_UNIX notify socket.
 
-Problem:
+Original problem:
 
 The notify socketpair is nonblocking. If the notify socket fills, `send()` can
 fail with `WSAEWOULDBLOCK`. Data remains buffered in `whe->input`, but no
 libevent readiness is guaranteed. If the producer goes quiet, output can remain
 stranded forever.
 
-Required direction:
+Resolution:
 
-- Make notification level-triggered: one pending notification should represent
-  "there is data to drain", not one byte per read.
-- Track a `notified` flag under the same lock as `whe->input`.
-- Clear `notified` only after the event callback drains notification state and
-  observes no buffered data.
-- Alternatively replace the socketpair notifier with a proper Windows event
-  integrated into libevent, if that is reliable in this environment.
+- The service now tracks `notify_pending` under the service lock.
+- One outstanding wake byte represents "there are endpoint completions to
+  drain"; further completions only update endpoint event masks until the tmux
+  thread drains the wakeup.
+- `WSAEWOULDBLOCK` is treated as already-notified because a full notify socket
+  is readable.
+- The service callback drains the socket and clears `notify_pending` before
+  dispatching queued completions.
 
 ### Fixed: Win32 handle I/O teardown can block the server indefinitely
 
