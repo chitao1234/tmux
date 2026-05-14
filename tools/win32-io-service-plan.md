@@ -1169,6 +1169,30 @@ This preserves the existing active console relay ACK model while closing a
 small gap where bytes could be accepted into the console writer but remain only
 in the backend's partial UTF-8 buffer at teardown.
 
+## Shared Console Writer Slice
+
+Console output no longer creates one blocking worker thread per console writer
+endpoint:
+
+- `WIN32_HANDLE_WRITER_CONSOLE` endpoints now enqueue work on a shared
+  process-wide console writer service instead of starting their own
+  `win32_handle_writer_thread`;
+- the shared console writer serializes `WriteConsoleW()` calls, preserves the
+  existing UTF-8 partial-sequence handling, and reports write-drained,
+  write-closed, and error completions through the same Win32 I/O service queue;
+- console writer free/close waits on a per-endpoint completion event with the
+  same bounded timeout policy as IOCP and worker fallback teardown;
+- ordinary writes are rechecked when an active console endpoint finishes so
+  data appended during the finish window is requeued instead of being left
+  buffered without a wakeup;
+- non-console stdio and terminal borrowed handles still use the explicit worker
+  fallback, and overlapped pipe/file writers still use IOCP.
+
+This is the console proactor bridge for output. It cannot make console handles
+true IOCP endpoints because `WriteConsoleW()` is synchronous, but it removes the
+per-endpoint console output worker and keeps console-specific blocking behavior
+behind one tmux-owned service thread.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1177,14 +1201,14 @@ I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
 - console input uses a console-handle wait loop before reading, while console
-  output still uses a worker thread isolated in a dedicated
-  UTF-8/`WriteConsoleW` backend until a fuller console proactor exists;
+  output now uses the shared console writer service because Windows console
+  handles still require synchronous `WriteConsoleW()` calls;
 - direct terminal handles still use the purpose-specific terminal
-  worker-fallback constructors, choosing the console backend only when the
-  borrowed output handle is an actual console;
+  worker-fallback constructors, choosing the shared console writer backend only
+  when the borrowed output handle is an actual console;
 - inherited stdio streams for client file transfer still use the worker
-  fallback, because they are borrowed process handles and are not always
-  overlapped-capable regular files;
+  fallback for non-console handles because they are borrowed process handles and
+  are not always overlapped-capable regular files;
 - process waits still use `RegisterWaitForSingleObject()`, but process
   completion is delivered through the service queue and the tmux thread event
   contract;
@@ -1200,8 +1224,8 @@ or worker-backed paths are intentionally classified rather than hidden:
 
 The next implementation work should therefore be one of:
 
-- design and implement a dedicated console proactor to replace the remaining
-  console worker fallback without losing UTF-8 and `WriteConsoleW` semantics;
+- continue console input service work by replacing the current console reader
+  bridge with a fuller console-input proactor;
 - redesign debug and tty-output logging as a bounded nonblocking diagnostic
   subsystem that can safely operate before service initialization and during
   fatal paths;
