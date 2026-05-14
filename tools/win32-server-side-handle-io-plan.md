@@ -80,6 +80,10 @@ while the server is running in its normal detached process model.
   direct stdin/stdout handle claims by default only when the stdio handles are
   non-console handles that the detached server can use. `TMUX_WIN32_HANDLE_TTY=0`
   disables this direct path for debugging.
+- `TMUX_WIN32_HANDLE_TTY=force` is a diagnostic-only override for the
+  supported-client matrix. It bypasses the native console handle exclusion so
+  testers can prove whether duplicated console handles are usable from the
+  detached server. It is not a supported default path.
 - Native console relay is selected explicitly as a compatibility fallback and
   can be disabled for no-relay testing with `TMUX_WIN32_CONSOLE_RELAY=0`.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
@@ -448,6 +452,10 @@ handle loss and verifies the server remains usable afterward.
 - Verify whether any supported interactive Win32 client cannot transfer handles
   that the detached server can use. If none are found, the expected final state
   is relay removal, not indefinite relay support.
+- Use `TMUX_WIN32_HANDLE_TTY=force` only in a manual native-console probe to
+  confirm whether duplicated console handles are actually usable from the
+  detached server process. This probe should be treated as diagnostic only, not
+  as a supported mode.
 
 ## Exit Criteria
 

@@ -414,6 +414,9 @@ Required direction:
   a console attachment design, or a helper design proves the detached server
   can safely use their terminal I/O. Use `TMUX_WIN32_CONSOLE_RELAY=0` to
   disable this compatibility fallback for no-relay testing.
+- Use `TMUX_WIN32_HANDLE_TTY=force` only as a diagnostic matrix probe for
+  native console direct handles. It intentionally bypasses the console handle
+  exclusion and is not a supported product mode.
 - Treat relay removal as gated on usable handles, not merely transferable
   handles.
 - If the full supported-client matrix proves every client path can transfer

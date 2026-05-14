@@ -43,6 +43,7 @@ static int		 client_is_console;
 static int		 client_console_ready;
 static int		 client_win32_console_relay;
 static int		 client_win32_handle_tty;
+static int		 client_win32_handle_tty_force;
 static int		 client_win32_handle_tty_input;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
@@ -100,6 +101,7 @@ static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_console_relay_enabled(void);
 static int		 client_win32_handle_tty_enabled(void);
+static int		 client_win32_handle_tty_forced(void);
 static int		 client_win32_handle_tty_output_available(void);
 static int		 client_win32_handle_tty_input_available(void);
 static void		 client_win32_get_terminal_size(
@@ -393,6 +395,17 @@ client_win32_handle_tty_enabled(void)
 }
 
 static int
+client_win32_handle_tty_forced(void)
+{
+	const char	*value;
+
+	value = getenv("TMUX_WIN32_HANDLE_TTY");
+	if (value != NULL && strcmp(value, "force") == 0)
+		return (1);
+	return (0);
+}
+
+static int
 client_win32_handle_tty_output_available(void)
 {
 	HANDLE	hout;
@@ -406,7 +419,7 @@ client_win32_handle_tty_output_available(void)
 	 * Console handles can be duplicated across processes, but the detached
 	 * server cannot write to them directly.
 	 */
-	if (GetConsoleMode(hout, &mode))
+	if (!client_win32_handle_tty_force && GetConsoleMode(hout, &mode))
 		return (0);
 	return (1);
 }
@@ -425,7 +438,7 @@ client_win32_handle_tty_input_available(void)
 	 * A duplicated console input handle is not readable from the detached
 	 * server process. Keep console input on the relay path for now.
 	 */
-	if (GetConsoleMode(hin, &mode))
+	if (!client_win32_handle_tty_force && GetConsoleMode(hin, &mode))
 		return (0);
 	return (1);
 }
@@ -876,6 +889,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
 	client_win32_handle_tty = client_win32_handle_tty_enabled();
+	client_win32_handle_tty_force = client_win32_handle_tty_forced();
 	if (client_flags & CLIENT_CONTROL)
 		client_win32_handle_tty = 0;
 	else if (!client_win32_handle_tty_output_available())
@@ -887,6 +901,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	if (client_win32_handle_tty)
 		client_win32_handle_tty_input =
 		    client_win32_handle_tty_input_available();
+	if (client_win32_handle_tty && client_win32_handle_tty_force)
+		log_debug("forcing direct Win32 terminal handles by "
+		    "TMUX_WIN32_HANDLE_TTY=force");
 	if (client_win32_handle_tty)
 		log_debug("using direct Win32 terminal output%s",
 		    client_win32_handle_tty_input ? " and input" : "");
