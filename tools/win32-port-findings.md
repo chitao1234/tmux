@@ -641,9 +641,9 @@ current implementation:
 Tracked native smoke coverage now exists for the non-console direct-handle
 path in `tools/win32-direct-handle-smoke.ps1`. It verifies direct stdin/stdout
 handle identify, direct size identify, relay absence under
-`TMUX_WIN32_CONSOLE_RELAY=0`, and redirected attach/detach behavior. The tests
-below remain the broader coverage needed before treating the Win32 port as
-complete.
+`TMUX_WIN32_CONSOLE_RELAY=0`, redirected attach/detach behavior, and sustained
+direct-output stress. The tests below remain the broader coverage needed before
+treating the Win32 port as complete.
 
 High-priority native PowerShell tests:
 

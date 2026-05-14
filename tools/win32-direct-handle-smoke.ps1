@@ -94,6 +94,48 @@ function Invoke-Tmux {
     }
 }
 
+function Start-TmuxClientProcess {
+    param(
+        [string]$CaseDir,
+        [string[]]$Arguments
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $script:TmuxPath
+    $psi.WorkingDirectory = $CaseDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = Join-Win32Arguments $Arguments
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    [pscustomobject]@{
+        Process = $process
+        Stdout = $process.StandardOutput.ReadToEndAsync()
+        Stderr = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Wait-TmuxClientProcess {
+    param(
+        $Run,
+        [int]$TimeoutMs,
+        [string]$Description
+    )
+
+    if (-not $Run.Process.WaitForExit($TimeoutMs)) {
+        $Run.Process.Kill()
+        throw "$Description did not exit within ${TimeoutMs}ms"
+    }
+
+    [pscustomobject]@{
+        ExitCode = $Run.Process.ExitCode
+        Stdout = $Run.Stdout.Result
+        Stderr = $Run.Stderr.Result
+    }
+}
+
 function Get-CaseLogs {
     param([string]$CaseDir)
 
@@ -186,7 +228,7 @@ function Invoke-DirectAttachDetachSmoke {
     $caseDir = New-CaseDirectory $Root "direct-attach"
     $config = Join-Path $caseDir "empty.conf"
     $label = "$LabelPrefix-attach-" + [Guid]::NewGuid().ToString("N")
-    $process = $null
+    $run = $null
     New-Item -ItemType File -Path $config | Out-Null
 
     Push-Location $caseDir
@@ -200,14 +242,7 @@ function Invoke-DirectAttachDetachSmoke {
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
         Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "attach") | Out-Null
 
-        $psi = [System.Diagnostics.ProcessStartInfo]::new()
-        $psi.FileName = $script:TmuxPath
-        $psi.WorkingDirectory = $caseDir
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.Arguments = Join-Win32Arguments @(
+        $run = Start-TmuxClientProcess -CaseDir $caseDir -Arguments @(
             "-f",
             $config,
             "-vv",
@@ -218,18 +253,14 @@ function Invoke-DirectAttachDetachSmoke {
             "attach"
         )
 
-        $process = [System.Diagnostics.Process]::Start($psi)
         Start-Sleep -Milliseconds 750
-        $process.StandardInput.Write([char]2)
-        $process.StandardInput.Write("d")
-        $process.StandardInput.Flush()
+        $run.Process.StandardInput.Write([char]2)
+        $run.Process.StandardInput.Write("d")
+        $run.Process.StandardInput.Flush()
 
-        if (-not $process.WaitForExit(5000)) {
-            $process.Kill()
-            throw "direct attach smoke did not exit after C-b d"
-        }
-        Assert-True -Condition ($process.ExitCode -eq 0) `
-            -Message "direct attach smoke exited with code $($process.ExitCode)"
+        $result = Wait-TmuxClientProcess $run 5000 "direct attach smoke"
+        Assert-True -Condition ($result.ExitCode -eq 0) `
+            -Message "direct attach smoke exited with code $($result.ExitCode)"
 
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") | Out-Null
 
@@ -242,8 +273,83 @@ function Invoke-DirectAttachDetachSmoke {
         Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct attach smoke unexpectedly enabled relay fallback"
         Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct attach smoke logged an I/O failure"
     } finally {
-        if ($null -ne $process -and -not $process.HasExited) {
-            $process.Kill()
+        if ($null -ne $run -and -not $run.Process.HasExited) {
+            $run.Process.Kill()
+        }
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Pop-Location
+    }
+}
+
+function Invoke-DirectOutputStressSmoke {
+    param([string]$Root)
+
+    $caseDir = New-CaseDirectory $Root "direct-output-stress"
+    $config = Join-Path $caseDir "empty.conf"
+    $done = Join-Path $caseDir "stress.done"
+    $label = "$LabelPrefix-stress-" + [Guid]::NewGuid().ToString("N")
+    $run = $null
+    New-Item -ItemType File -Path $config | Out-Null
+
+    Push-Location $caseDir
+    try {
+        $env:TMUX = $null
+        $env:TMUX_WIN32_HANDLE_TTY = $null
+        $env:TMUX_WIN32_CONSOLE_RELAY = "0"
+        $env:COLUMNS = "120"
+        $env:LINES = "40"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "stress", "cmd.exe") | Out-Null
+
+        $run = Start-TmuxClientProcess -CaseDir $caseDir -Arguments @(
+            "-f",
+            $config,
+            "-vv",
+            "-L",
+            $label,
+            "attach-session",
+            "-t",
+            "stress"
+        )
+
+        Start-Sleep -Milliseconds 750
+        $command = "for /l %i in (1,1,1200) do @echo TMUX_DIRECT_STRESS_%i_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 & echo done > `"$done`""
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "stress", "-l", $command) | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "stress", "Enter") | Out-Null
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not (Test-Path -LiteralPath $done)) {
+            if ([DateTime]::UtcNow -gt $deadline) {
+                throw "direct output stress command did not finish"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        Start-Sleep -Milliseconds 250
+        $run.Process.StandardInput.Write([char]2)
+        $run.Process.StandardInput.Write("d")
+        $run.Process.StandardInput.Flush()
+
+        $result = Wait-TmuxClientProcess $run 10000 "direct output stress"
+        Assert-True -Condition ($result.ExitCode -eq 0) `
+            -Message "direct output stress exited with code $($result.ExitCode)"
+        Assert-True -Condition ($result.Stdout.Length -gt 8192) `
+            -Message "direct output stress did not produce enough terminal output"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") | Out-Null
+
+        $logs = @(Get-CaseLogs $caseDir)
+        Assert-AnyLogMatch $logs "using direct Win32 terminal output and input" "direct output stress did not use direct Win32 terminal I/O"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDOUT duplicated" "direct output stress did not duplicate stdout"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct output stress did not duplicate stdin"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 120x40" "direct output stress did not send the expected size"
+        Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct output stress unexpectedly used the relay identify path"
+        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct output stress unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct output stress logged an I/O failure"
+    } finally {
+        if ($null -ne $run -and -not $run.Process.HasExited) {
+            $run.Process.Kill()
         }
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
         Pop-Location
@@ -269,6 +375,7 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     Invoke-DirectCommandSmoke $root
     Invoke-DirectAttachDetachSmoke $root
+    Invoke-DirectOutputStressSmoke $root
     Write-Host "Win32 direct-handle smoke passed. Logs: $root"
     if (-not $KeepLogs) {
         Remove-Item -LiteralPath $root -Recurse -Force
