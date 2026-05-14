@@ -401,3 +401,16 @@ The service now exposes explicit read event reasons to callers:
   `WIN32_IO_EVENT_READ`, `WIN32_IO_EVENT_READ_EOF`, and
   `WIN32_IO_EVENT_ERROR` delivery before sending the existing tmux protocol
   messages.
+
+## Pane And Job Reader Event Slice
+
+ConPTY pane output and Win32 job output now consume explicit reader events:
+
+- pane and job output readers use `win32_handle_event_new_events()` instead of
+  separate legacy read and generic error callbacks;
+- event callbacks drain `WIN32_IO_EVENT_READ` data first, then handle EOF,
+  error, or cancel as the terminal output edge;
+- pane destruction and job completion still use the existing lifecycle gates,
+  so process exit remains separate from output EOF and buffered output drain;
+- this removes two more callers from the legacy reader callback API without
+  changing the worker-backed read backend.

@@ -853,14 +853,6 @@ win32_job_maybe_close_stdin(struct win32_job *wj)
 		win32_handle_writer_close(wj->stdin_writer);
 }
 
-static void
-win32_pane_read_cb(void *arg)
-{
-	struct window_pane	*wp = arg;
-
-	win32_pane_drain(wp);
-}
-
 void
 win32_pane_drain(struct window_pane *wp)
 {
@@ -872,16 +864,24 @@ win32_pane_drain(struct window_pane *wp)
 }
 
 static void
-win32_pane_error_cb(void *arg)
+win32_pane_output_event_cb(void *arg, uint32_t events)
 {
 	struct window_pane	*wp = arg;
 	int			 status;
 
-	win32_pane_drain(wp);
-	if (win32_handle_event_error(wp->win32->output_event)) {
+	if (events & WIN32_IO_EVENT_READ)
+		win32_pane_drain(wp);
+	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED))
+		return;
+	if (~events & WIN32_IO_EVENT_READ)
+		win32_pane_drain(wp);
+	if (events & WIN32_IO_EVENT_ERROR) {
 		log_debug("%%%u output read error", wp->id);
-	} else if (win32_handle_event_eof(wp->win32->output_event))
+	} else if (events & WIN32_IO_EVENT_READ_EOF)
 		log_debug("%%%u output EOF", wp->id);
+	else
+		log_debug("%%%u output canceled", wp->id);
 	if (win32_pane_exited(wp, &status)) {
 		wp->status = status;
 		wp->flags |= PANE_STATUSREADY;
@@ -1029,8 +1029,8 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
 
-	pw->output_event = win32_handle_event_new(pw->output_read,
-	    win32_pane_read_cb, win32_pane_error_cb, wp);
+	pw->output_event = win32_handle_event_new_events(pw->output_read,
+	    win32_pane_output_event_cb, wp);
 	if (pw->output_event == NULL) {
 		xasprintf(cause, "couldn't create pane output event");
 		goto fail;
@@ -1225,10 +1225,8 @@ win32_pane_get_event(__unused struct window_pane *wp)
 }
 
 static void
-win32_job_read_cb(void *arg)
+win32_job_read_event(struct win32_job *wj)
 {
-	struct win32_job	*wj = arg;
-
 	if (wj->event == NULL)
 		return;
 	win32_job_drain(wj);
@@ -1237,21 +1235,26 @@ win32_job_read_cb(void *arg)
 }
 
 static void
-win32_job_error_cb(void *arg)
+win32_job_output_event_cb(void *arg, uint32_t events)
 {
 	struct win32_job	*wj = arg;
 	int		 status;
 
-	if (wj->event != NULL) {
-		win32_job_drain(wj);
-		if (wj->event->readcb != NULL)
-			wj->event->readcb(wj->event, wj->event->cbarg);
-	}
-	if (win32_handle_event_error(wj->output_event)) {
+	if (events & WIN32_IO_EVENT_READ)
+		win32_job_read_event(wj);
+	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED))
+		return;
+	if (~events & WIN32_IO_EVENT_READ)
+		win32_job_read_event(wj);
+	if (events & WIN32_IO_EVENT_ERROR) {
 		log_debug("job output read error, pid %ld",
 		    (long)wj->process_id);
-	} else if (win32_handle_event_eof(wj->output_event))
+	} else if (events & WIN32_IO_EVENT_READ_EOF)
 		log_debug("job output EOF, pid %ld", (long)wj->process_id);
+	else
+		log_debug("job output canceled, pid %ld",
+		    (long)wj->process_id);
 	if (win32_job_exited(wj, &status))
 		wj->status = status;
 	if (wj->event != NULL && wj->event->errorcb != NULL)
@@ -1491,8 +1494,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	wj->event = bufferevent_new(-1, NULL, NULL, NULL, NULL);
 	if (wj->event == NULL)
 		fatalx("out of memory");
-	wj->output_event = win32_handle_event_new(wj->stdout_read,
-	    win32_job_read_cb, win32_job_error_cb, wj);
+	wj->output_event = win32_handle_event_new_events(wj->stdout_read,
+	    win32_job_output_event_cb, wj);
 	if (wj->output_event == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't create job output event");
