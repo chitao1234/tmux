@@ -1017,3 +1017,18 @@ Win32 startup prompt-history loading now uses the I/O service path:
 - missing, invalid, or unreadable history files continue to be logged at debug
   level without failing server startup;
 - the Unix load path remains synchronous and unchanged in backend policy.
+
+## Prompt History Save Slice
+
+Win32 shutdown prompt-history saving now uses the I/O service path:
+
+- `status_prompt_save_history()` serializes prompt history into an evbuffer
+  instead of writing each line through `fputs()` on Win32;
+- the configured history file is written through `file_write(NULL, ...)`,
+  reusing the regular-file I/O service writer and its close-after-drain
+  semantics;
+- server shutdown pumps the existing libevent loop until the write completion
+  callback fires, so `exit(0)` is reached only after the service has reported
+  the file handle closed or failed;
+- empty history still truncates the configured file through the same path;
+- the Unix save path remains synchronous and unchanged in backend policy.

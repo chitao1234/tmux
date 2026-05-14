@@ -20,6 +20,7 @@
 #include <sys/time.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -143,6 +144,10 @@ struct status_prompt_load_history_data {
 	struct cmdq_item	**continue_item;
 };
 
+struct status_prompt_save_history_data {
+	int		 done;
+};
+
 static void
 status_prompt_load_history_continue(
     struct status_prompt_load_history_data *data)
@@ -172,6 +177,19 @@ status_prompt_load_history_done(__unused struct client *c, const char *path,
 		status_prompt_load_history_buffer(bdata, bsize);
 
 	status_prompt_load_history_continue(ldata);
+}
+
+static void
+status_prompt_save_history_done(__unused struct client *c, const char *path,
+    int error, int closed, __unused struct evbuffer *buffer, void *data)
+{
+	struct status_prompt_save_history_data	*sdata = data;
+
+	if (!closed)
+		return;
+	if (error != 0)
+		log_debug("%s: %s", path, strerror(error));
+	sdata->done = 1;
 }
 #endif
 
@@ -248,7 +266,14 @@ status_prompt_load_history(struct cmdq_item *item,
 void
 status_prompt_save_history(void)
 {
+#ifndef TMUX_WIN32
 	FILE	*f;
+#else
+	struct evbuffer	*buffer;
+	struct status_prompt_save_history_data data;
+	const void	*bdata = "";
+	size_t		 bsize;
+#endif
 	u_int	 i, type;
 	char	*history_file;
 
@@ -256,6 +281,29 @@ status_prompt_save_history(void)
 		return;
 	log_debug("saving history to %s", history_file);
 
+#ifdef TMUX_WIN32
+	buffer = evbuffer_new();
+	if (buffer == NULL)
+		fatalx("out of memory");
+	for (type = 0; type < PROMPT_NTYPES; type++) {
+		for (i = 0; i < status_prompt_hsize[type]; i++) {
+			evbuffer_add_printf(buffer, "%s:%s\n",
+			    prompt_type_strings[type],
+			    status_prompt_hlist[type][i]);
+		}
+	}
+
+	bsize = EVBUFFER_LENGTH(buffer);
+	if (bsize != 0)
+		bdata = EVBUFFER_DATA(buffer);
+	memset(&data, 0, sizeof data);
+	file_write(NULL, history_file, O_WRONLY|O_TRUNC, bdata, bsize,
+	    status_prompt_save_history_done, &data);
+	while (!data.done)
+		event_loop(EVLOOP_ONCE);
+	evbuffer_free(buffer);
+	free(history_file);
+#else
 	f = fopen(history_file, "w");
 	if (f == NULL) {
 		log_debug("%s: %s", history_file, strerror(errno));
@@ -273,7 +321,7 @@ status_prompt_save_history(void)
 		}
 	}
 	fclose(f);
-
+#endif
 }
 
 /* Status timer callback. */
