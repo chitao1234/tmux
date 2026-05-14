@@ -184,53 +184,60 @@ Required direction:
 - Do not do blocking teardown from child polling paths.
 - Consider overlapped I/O for pipe/conpty handles in the final design.
 
-### P0: Terminal output ACK can acknowledge bytes never written
+### Fixed: Terminal output ACK can acknowledge bytes never written
 
 Files:
 
-- [`client.c`](../client.c): `client_win32_tty_output()` sets
-  `ack.size = datalen`.
-- [`win32-event.c`](../win32-event.c): `win32_handle_write()` can return a
-  short write through the file fallback path.
+- [`client.c`](../client.c): `client_win32_tty_output()` now queues output to
+  the service writer and ACKs from the writer drain callback.
+- [`win32-event.c`](../win32-event.c): console worker writes are all-or-error
+  for the accepted chunk; short `WriteConsoleW` calls are retried until the
+  full converted prefix is written.
 - [`server-client.c`](../server-client.c): ACK decrements
   `c->win32_tty_out_pending`.
 
-Problem:
+Original problem:
 
 The client ACKs the full IPC message size regardless of how many bytes reached
 the console. If `win32_handle_write()` writes fewer bytes or falls back to a
 partial `WriteFile()`, the server believes output has been delivered and drains
 its pending accounting. This can permanently drop output.
 
-Required direction:
+Resolution:
 
-- Define `win32_handle_write()` as all-or-error for console relay output, or
-  ACK only the actual consumed byte count.
-- If partial writes are possible, keep the unwritten suffix in a client-side
-  output buffer and resume later.
+- `MSG_WIN32_TTY_OUTPUT_ACK` is sent only after the client-side output writer
+  reports drain.
+- Console output no longer falls back to raw `WriteFile()` for UTF-8 decode
+  failures.
+- Complete decoded prefixes are written through `WriteConsoleW`; partial
+  trailing UTF-8 state is retained in the writer until a continuation arrives.
 
-### P0: Terminal UTF-8 decoding is not incremental
+### Fixed: Terminal UTF-8 decoding is not incremental
 
 Files:
 
 - [`tty.c`](../tty.c): Win32 console output is chunked into
   `MSG_WIN32_TTY_OUTPUT` messages.
-- [`client.c`](../client.c): each chunk is decoded independently.
-- [`win32-event.c`](../win32-event.c): `win32_handle_write()` uses
-  `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ...)` per call.
+- [`client.c`](../client.c): chunks are queued to the client-side service
+  writer.
+- [`win32-event.c`](../win32-event.c): `win32_handle_write()` now keeps a
+  bounded partial UTF-8 sequence in `struct win32_handle_writer`.
 
-Problem:
+Original problem:
 
 An IPC chunk can split a multibyte UTF-8 sequence. The client then decodes an
 incomplete sequence, fails, and falls back to raw `WriteFile()` to the console
 handle. That produces mojibake or broken rendering even though the original
 stream was valid UTF-8.
 
-Required direction:
+Resolution:
 
-- Add an incremental UTF-8 decoder for console relay output.
-- Carry incomplete trailing bytes across `MSG_WIN32_TTY_OUTPUT` messages.
-- Avoid raw console `WriteFile()` fallback for chunk-boundary decode failures.
+- Complete UTF-8 prefixes are decoded and written with `WriteConsoleW`.
+- Incomplete trailing UTF-8 bytes are carried across service write chunks.
+- Invalid complete byte sequences use Windows' replacement conversion rather
+  than raw console `WriteFile()` fallback.
+- Verification so far is build plus native noninteractive regression smoke;
+  an interactive console-boundary test is still recommended.
 
 ## Other High-Value Findings
 

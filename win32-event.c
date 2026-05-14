@@ -194,6 +194,8 @@ struct win32_handle_writer {
 	int		 pending;
 	int		 borrowed;
 	int		 stop;
+	u_char		 utf8_partial[4];
+	size_t		 utf8_partial_len;
 };
 
 struct win32_process_event {
@@ -253,7 +255,8 @@ static int	win32_handle_event_error_is_eof(DWORD);
 static void	win32_handle_event_free(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
-static int	win32_handle_write(HANDLE, const void *, size_t);
+static int	win32_handle_write(struct win32_handle_writer *, HANDLE,
+		     const void *, size_t);
 
 static int
 win32_socketpair(SOCKET pair[2])
@@ -1213,7 +1216,7 @@ win32_handle_writer_thread(void *arg)
 			handle = whw->handle;
 			LeaveCriticalSection(&whw->lock);
 
-			written = win32_handle_write(handle, buf, size);
+			written = win32_handle_write(whw, handle, buf, size);
 			if (written == -1 || written == 0) {
 				EnterCriticalSection(&whw->lock);
 				whw->state = WIN32_HANDLE_WRITER_ERROR;
@@ -1674,10 +1677,48 @@ win32_handle_write_file(HANDLE handle, const void *data, size_t size)
 	return ((int)written);
 }
 
-int
-win32_handle_write(HANDLE handle, const void *data, size_t size)
+static int
+win32_utf8_expected(u_char ch)
 {
-	DWORD	 written, mode, total;
+	if (ch < 0x80)
+		return (1);
+	if (ch >= 0xc2 && ch <= 0xdf)
+		return (2);
+	if (ch >= 0xe0 && ch <= 0xef)
+		return (3);
+	if (ch >= 0xf0 && ch <= 0xf4)
+		return (4);
+	return (0);
+}
+
+static size_t
+win32_utf8_complete_len(const u_char *data, size_t size)
+{
+	size_t	i, remaining;
+	int	needed;
+
+	i = 0;
+	while (i < size) {
+		needed = win32_utf8_expected(data[i]);
+		if (needed == 0)
+			return (size);
+		remaining = size - i;
+		if (remaining < (size_t)needed) {
+			for (size_t j = 1; j < remaining; j++) {
+				if ((data[i + j] & 0xc0) != 0x80)
+					return (size);
+			}
+			return (i);
+		}
+		i += needed;
+	}
+	return (size);
+}
+
+static int
+win32_handle_write_console(HANDLE handle, const u_char *data, size_t size)
+{
+	DWORD	 written, total;
 	wchar_t	*wdata;
 	int	 n, nbytes;
 
@@ -1685,48 +1726,114 @@ win32_handle_write(HANDLE handle, const void *data, size_t size)
 	if (nbytes == 0)
 		return (0);
 
-	if (GetConsoleMode(handle, &mode)) {
-		n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data,
-		    nbytes, NULL, 0);
+	n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, nbytes,
+	    NULL, 0);
+	if (n == 0) {
+		log_debug("%s: MultiByteToWideChar failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		n = MultiByteToWideChar(CP_UTF8, 0, data, nbytes, NULL, 0);
 		if (n == 0) {
-			log_debug("%s: MultiByteToWideChar failed: %s", __func__,
-			    win32_strerror(GetLastError()));
-			return (win32_handle_write_file(handle, data, size));
+			errno = EILSEQ;
+			return (-1);
 		}
+		wdata = xcalloc(n, sizeof *wdata);
+		if (MultiByteToWideChar(CP_UTF8, 0, data, nbytes, wdata,
+		    n) == 0) {
+			log_debug("%s: MultiByteToWideChar fallback failed: %s",
+			    __func__, win32_strerror(GetLastError()));
+			free(wdata);
+			errno = EILSEQ;
+			return (-1);
+		}
+	} else {
 		wdata = xcalloc(n, sizeof *wdata);
 		if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data,
 		    nbytes, wdata, n) == 0) {
-			log_debug("%s: MultiByteToWideChar failed: %s", __func__,
-			    win32_strerror(GetLastError()));
+			log_debug("%s: MultiByteToWideChar failed: %s",
+			    __func__, win32_strerror(GetLastError()));
 			free(wdata);
-			return (win32_handle_write_file(handle, data, size));
+			errno = EILSEQ;
+			return (-1);
 		}
-		total = 0;
-		while (total < (DWORD)n) {
-			if (!WriteConsoleW(handle, wdata + total, n - total,
-			    &written, NULL)) {
-				log_debug("%s: WriteConsoleW failed: %s",
-				    __func__, win32_strerror(GetLastError()));
-				free(wdata);
+	}
+
+	total = 0;
+	while (total < (DWORD)n) {
+		if (!WriteConsoleW(handle, wdata + total, n - total,
+		    &written, NULL)) {
+			log_debug("%s: WriteConsoleW failed: %s",
+			    __func__, win32_strerror(GetLastError()));
+			free(wdata);
+			errno = EIO;
+			return (-1);
+		}
+		if (written == 0) {
+			log_debug("%s: WriteConsoleW wrote nothing", __func__);
+			free(wdata);
+			errno = EIO;
+			return (-1);
+		}
+		total += written;
+	}
+	free(wdata);
+	if (log_get_level() > 1) {
+		log_debug("%s: WriteConsoleW wrote %lu UTF-16 units from "
+		    "%d UTF-8 bytes", __func__, (unsigned long)total,
+		    nbytes);
+	}
+	return (nbytes);
+}
+
+static int
+win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
+    const void *data, size_t size)
+{
+	DWORD		 mode;
+	u_char		*buf;
+	const u_char	*input = data;
+	size_t		 total, complete, keep, len;
+	int		 written;
+
+	if (size > INT_MAX)
+		size = INT_MAX;
+	if (size == 0)
+		return (0);
+
+	if (GetConsoleMode(handle, &mode)) {
+		total = whw->utf8_partial_len + size;
+		buf = xmalloc(total);
+		if (whw->utf8_partial_len != 0) {
+			memcpy(buf, whw->utf8_partial,
+			    whw->utf8_partial_len);
+		}
+		memcpy(buf + whw->utf8_partial_len, input, size);
+
+		complete = win32_utf8_complete_len(buf, total);
+		keep = total - complete;
+		if (keep > sizeof whw->utf8_partial) {
+			complete = total;
+			keep = 0;
+		}
+		written = 0;
+		if (complete != 0) {
+			written = win32_handle_write_console(handle, buf,
+			    complete);
+			if (written == -1) {
+				free(buf);
+				return (-1);
+			}
+			if ((size_t)written != complete) {
+				free(buf);
 				errno = EIO;
 				return (-1);
 			}
-			if (written == 0) {
-				log_debug("%s: WriteConsoleW wrote nothing",
-				    __func__);
-				free(wdata);
-				errno = EIO;
-				return (-1);
-			}
-			total += written;
 		}
-		free(wdata);
-		if (log_get_level() > 1) {
-			log_debug("%s: WriteConsoleW wrote %lu UTF-16 units "
-			    "from %d UTF-8 bytes", __func__,
-			    (unsigned long)total, nbytes);
-		}
-		return (nbytes);
+		if (keep != 0)
+			memcpy(whw->utf8_partial, buf + complete, keep);
+		whw->utf8_partial_len = keep;
+		len = size;
+		free(buf);
+		return ((int)len);
 	}
 
 	return (win32_handle_write_file(handle, data, size));

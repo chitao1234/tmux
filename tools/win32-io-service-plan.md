@@ -781,3 +781,25 @@ This fixes the previous Win32-only leak where `pipe-pane -I` or bidirectional
 helpers could survive after the pane stopped owning them. It intentionally
 chooses kill-on-detach semantics for Win32 helper jobs, matching the fact that
 tmux no longer has a logical pipe owner after `wp->pipe_job` is cleared.
+
+## Console UTF-8 Writer Slice
+
+Worker-backed console writers now preserve UTF-8 sequences across service
+write chunks:
+
+- `struct win32_handle_writer` keeps a bounded trailing UTF-8 partial sequence
+  for console handles;
+- console writes decode only complete UTF-8 prefixes with
+  `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ...)`;
+- an incomplete trailing sequence is retained for the next write instead of
+  forcing a raw `WriteFile()` fallback;
+- invalid complete byte sequences are converted through Windows' replacement
+  behavior and still go through `WriteConsoleW`, avoiding raw byte output to a
+  console handle;
+- non-console worker writes continue using `WriteFile()` unchanged.
+
+This fixes the console relay class where a `MSG_WIN32_TTY_OUTPUT` boundary or
+writer chunk boundary could split a multibyte UTF-8 character and produce
+mojibake. The server-side ACK contract is unchanged: bytes are acknowledged only
+after the writer drains them into either `WriteConsoleW` or the bounded
+one-sequence pending state that must be completed by a later chunk.
