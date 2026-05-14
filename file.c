@@ -59,7 +59,7 @@ static int	file_read_win32_local_start(struct client_file *);
 static void	file_write_win32_callback(void *);
 static void	file_write_win32_error_callback(void *);
 static void	file_write_win32_event_callback(void *, uint32_t);
-static void	file_read_win32_callback(void *);
+static int	file_read_win32_callback(void *);
 static void	file_read_win32_done_callback(void *);
 static void	file_read_win32_event_callback(void *, uint32_t);
 static int	file_write_console_text(struct client_file *, const char *,
@@ -1036,7 +1036,7 @@ file_read_win32_close(struct client_file *cf)
 	file_free(cf);
 }
 
-static void
+static int
 file_read_win32_callback(void *arg)
 {
 	struct client_file	*cf = arg;
@@ -1044,9 +1044,10 @@ file_read_win32_callback(void *arg)
 	struct msg_read_data	*msg;
 	size_t			 bsize, msglen;
 	void			*bdata;
+	int			 failed = 0;
 
 	if (cf->win32_reader == NULL)
-		return;
+		return (0);
 
 	input = evbuffer_new();
 	if (input == NULL)
@@ -1067,21 +1068,30 @@ file_read_win32_callback(void *arg)
 		msg = xrealloc(msg, msglen);
 		msg->stream = cf->stream;
 		memcpy(msg + 1, bdata, bsize);
-		proc_send(cf->peer, MSG_READ, -1, msg, msglen);
+		if (proc_send(cf->peer, MSG_READ, -1, msg, msglen) != 0) {
+			log_debug("%s: failed to send file %d data", __func__,
+			    cf->stream);
+			cf->error = EIO;
+			failed = 1;
+			break;
+		}
 
 		evbuffer_drain(input, bsize);
 	}
 	free(msg);
 	evbuffer_free(input);
+	return (failed ? -1 : 0);
 }
 
 static void
 file_read_win32_event_callback(void *arg, uint32_t events)
 {
+	int	failed = 0;
+
 	if (events & WIN32_IO_EVENT_READ)
-		file_read_win32_callback(arg);
-	if (events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED))
+		failed = (file_read_win32_callback(arg) != 0);
+	if (failed || (events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED)))
 		file_read_win32_done_callback(arg);
 }
 
@@ -1091,10 +1101,14 @@ file_read_win32_done_callback(void *arg)
 	struct client_file	*cf = arg;
 	struct msg_read_done	 msg;
 
-	file_read_win32_callback(cf);
+	if (cf->error == 0)
+		file_read_win32_callback(cf);
 
 	msg.stream = cf->stream;
-	msg.error = win32_io_reader_error(cf->win32_reader) ? EIO : 0;
+	if (cf->error != 0)
+		msg.error = cf->error;
+	else
+		msg.error = win32_io_reader_error(cf->win32_reader) ? EIO : 0;
 	proc_send(cf->peer, MSG_READ_DONE, -1, &msg, sizeof msg);
 
 	file_read_win32_close(cf);

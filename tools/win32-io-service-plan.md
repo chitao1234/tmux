@@ -942,3 +942,21 @@ reader instead of the Unix fd bufferevent path:
 
 This removes the last Win32 client file-read path that tried to treat an
 inherited Windows stdio handle as a normal libevent fd.
+
+## File Read Send Failure Slice
+
+Win32 client-side file reads now treat IPC send failure as a terminal file-read
+error instead of silently draining already-read bytes:
+
+- `file_read_win32_callback()` reports failure if `proc_send(MSG_READ)` cannot
+  queue a read-data message to the peer;
+- the event callback funnels that failure through the same close path as
+  EOF/error/cancel, avoiding a second close from inside the read-drain helper;
+- `MSG_READ_DONE` reports the recorded `EIO` instead of replacing it with the
+  reader backend state;
+- bytes are only drained from the service reader's temporary buffer after the
+  corresponding `MSG_READ` has been accepted by the IPC layer.
+
+This hardens the I/O service migration boundary: once data has moved from the
+Win32 reader endpoint into the tmux file-transfer protocol, failure to hand it
+to IPC is no longer hidden as a successful read.
