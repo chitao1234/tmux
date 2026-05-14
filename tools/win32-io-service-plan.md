@@ -1222,12 +1222,38 @@ This is the console proactor bridge for input. It still uses synchronous
 per-endpoint console input worker and keeps console-specific blocking behavior
 behind one tmux-owned service thread.
 
+## Diagnostic Logging Slice
+
+Win32 diagnostic logging no longer performs every log write synchronously on
+the caller thread:
+
+- `log_debug()` formats the log line on the caller thread, then queues the final
+  bytes to a bounded Win32 diagnostic writer;
+- the diagnostic writer owns a dedicated thread and a non-overlapped file
+  handle, keeping blocking `WriteFile()` calls out of the tmux server thread and
+  out of Win32 worker/process completion callbacks;
+- the queue is capped at 1 MiB and split into 64 KiB items, so verbose logging
+  can drop diagnostic bytes under sustained pressure instead of growing memory
+  without bound;
+- `log_close()` and fatal exits request writer shutdown and wait only for a
+  bounded interval before abandoning the writer state rather than risking a
+  server hang;
+- verbose tty output logging uses the same diagnostic writer on Win32 instead
+  of calling `write()` directly from `tty_add()`;
+- normal Unix logging remains synchronous and unchanged.
+
+This is intentionally separate from the main Win32 I/O service. Diagnostics
+must work before the service is fully initialized, during shutdown, and from
+fatal/error paths, so they use a small bounded logger instead of the libevent
+completion bridge.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
 configuration, popup editor file, and prompt-history paths now use the Win32
-I/O service or an explicitly documented service fallback. The remaining direct
-or worker-backed paths are intentionally classified rather than hidden:
+I/O service, a bounded diagnostic writer, or an explicitly documented service
+fallback. The remaining direct or worker-backed paths are intentionally
+classified rather than hidden:
 
 - console input now uses the shared console reader service, while console output
   now uses the shared console writer service, because Windows console handles
@@ -1242,11 +1268,10 @@ or worker-backed paths are intentionally classified rather than hidden:
 - process waits still use `RegisterWaitForSingleObject()`, but process
   completion is delivered through the service queue and the tmux thread event
   contract;
-- debug logging in `log.c` and verbose tty-output logging in `tty.c` remain
-  synchronous diagnostic paths. They are used before or around service setup,
-  from fatal/error paths, and in verbose-only diagnostics, so moving them into
-  the service requires a separate logging design rather than a mechanical I/O
-  endpoint migration;
+- debug logging in `log.c` and verbose tty-output logging in `tty.c` now use
+  the bounded Win32 diagnostic writer, not synchronous file writes from the tmux
+  server thread. This remains separate from the main I/O service because
+  diagnostics must work before service setup and during fatal/shutdown paths;
 - IPC socket setup, startup locking, socket-directory security, and low-level
   handle creation remain outside this I/O-service migration. They should be
   audited under the IPC/auth plan, not counted as pane/job/file I/O service
@@ -1254,8 +1279,10 @@ or worker-backed paths are intentionally classified rather than hidden:
 
 The next implementation work should therefore be one of:
 
-- redesign debug and tty-output logging as a bounded nonblocking diagnostic
-  subsystem that can safely operate before service initialization and during
-  fatal paths;
+- decide whether direct terminal and inherited stdio worker-fallback handles are
+  final policy or should be tightened with stronger runtime handle
+  classification;
+- replace or explicitly bless the `RegisterWaitForSingleObject()` process wait
+  backend now that process completions already use the service queue;
 - continue IPC/auth hardening separately, including startup-lock timeout and
   socket setup behavior.

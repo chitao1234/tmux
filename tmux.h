@@ -2680,6 +2680,7 @@ struct environ *environ_for_session(struct session *, int);
 
 /* tty.c */
 void	tty_create_log(void);
+void	tty_close_log(void);
 int	tty_window_bigger(struct tty *);
 int	tty_window_offset(struct tty *, u_int *, u_int *, u_int *, u_int *);
 void	tty_update_window_offset(struct window *);
@@ -3790,6 +3791,13 @@ void	log_close(void);
 void printflike(1, 2) log_debug(const char *, ...);
 __dead void printflike(1, 2) fatal(const char *, ...);
 __dead void printflike(1, 2) fatalx(const char *, ...);
+#ifdef TMUX_WIN32
+struct win32_diagnostic_file;
+struct win32_diagnostic_file *log_win32_diagnostic_open(const char *, int);
+void	log_win32_diagnostic_close(struct win32_diagnostic_file *);
+void	log_win32_diagnostic_write(struct win32_diagnostic_file *,
+	    const void *, size_t);
+#endif
 
 /* menu.c */
 #define MENU_NOMOUSE 0x1

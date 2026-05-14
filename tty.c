@@ -39,7 +39,11 @@
 
 #include "tmux.h"
 
+#ifdef TMUX_WIN32
+static struct win32_diagnostic_file *tty_log_file;
+#else
 static int	tty_log_fd = -1;
+#endif
 
 static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
@@ -110,10 +114,25 @@ tty_create_log(void)
 
 	xsnprintf(name, sizeof name, "tmux-out-%ld.log", (long)getpid());
 
+#ifdef TMUX_WIN32
+	tty_log_file = log_win32_diagnostic_open(name, 0);
+#else
 	tty_log_fd = open(name, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-#ifndef TMUX_WIN32
 	if (tty_log_fd != -1 && fcntl(tty_log_fd, F_SETFD, FD_CLOEXEC) == -1)
 		fatal("fcntl failed");
+#endif
+}
+
+void
+tty_close_log(void)
+{
+#ifdef TMUX_WIN32
+	log_win32_diagnostic_close(tty_log_file);
+	tty_log_file = NULL;
+#else
+	if (tty_log_fd != -1)
+		close(tty_log_fd);
+	tty_log_fd = -1;
 #endif
 }
 
@@ -973,8 +992,13 @@ tty_add(struct tty *tty, const char *buf, size_t len)
 	log_debug("%s: %.*s", c->name, (int)len, buf);
 	c->written += len;
 
+#ifdef TMUX_WIN32
+	if (tty_log_file != NULL)
+		log_win32_diagnostic_write(tty_log_file, buf, len);
+#else
 	if (tty_log_fd != -1)
 		write(tty_log_fd, buf, len);
+#endif
 	if (tty->flags & TTY_STARTED) {
 		tty_write_schedule(tty);
 	}

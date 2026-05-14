@@ -745,6 +745,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			fprintf(stderr, "error connecting to %s (%s)\n",
 			    socket_path, strerror(errno));
 		}
+		log_close();
 		return (1);
 	}
 	client_peer = proc_add_peer(client_proc, fd, client_dispatch, NULL);
@@ -799,6 +800,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 		fprintf(stderr, "%s\n", cause);
 		free(cause);
+		log_close();
 		return (1);
 	}
 
@@ -816,6 +818,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (tcgetattr(STDIN_FILENO, &saved_tio) != 0) {
 			fprintf(stderr, "tcgetattr failed: %s\n",
 			    strerror(errno));
+			log_close();
 			return (1);
 		}
 		cfmakeraw(&tio);
@@ -836,6 +839,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (win32_terminal_init_client(&cause) != 0) {
 			fprintf(stderr, "%s\n", cause);
 			free(cause);
+			log_close();
 			return (1);
 		}
 		client_console_ready = 1;
@@ -859,6 +863,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			client_restore_terminal();
 #endif
 			fprintf(stderr, "command too long\n");
+			log_close();
 			return (1);
 		}
 		data = xmalloc((sizeof *data) + size);
@@ -871,6 +876,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 			fprintf(stderr, "command too long\n");
 			free(data);
+			log_close();
 			return (1);
 		}
 		size += sizeof *data;
@@ -882,6 +888,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 			fprintf(stderr, "failed to send command\n");
 			free(data);
+			log_close();
 			return (1);
 		}
 		free(data);
@@ -943,6 +950,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		}
 	} else if (client_exitreason != CLIENT_EXIT_NONE)
 		fprintf(stderr, "%s\n", client_exit_message());
+	log_close();
 	return (client_exitval);
 }
 
@@ -1033,6 +1041,7 @@ client_exec(const char *shell, const char *shellcmd)
 	setblocking(STDOUT_FILENO, 1);
 	setblocking(STDERR_FILENO, 1);
 	closefrom(STDERR_FILENO + 1);
+	log_close();
 
 	execl(shell, argv0, "-c", shellcmd, (char *) NULL);
 	fatal("execl failed");

@@ -292,6 +292,8 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 #endif
 	job_kill_all();
 	status_prompt_save_history();
+	tty_close_log();
+	log_close();
 
 	exit(0);
 }
