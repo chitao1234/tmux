@@ -377,35 +377,44 @@ Required direction:
 - Keep final close semantics strict enough to avoid losing terminal reset
   output.
 
-### P2: Win32 terminal handle relay is still disabled
+### P2: Native console handles cannot back detached server-side terminal I/O
 
 Files:
 
-- [`client.c`](../client.c): the client sends
-  `MSG_IDENTIFY_WIN32_TERMINAL` only for detected console clients.
-- [`server-client.c`](../server-client.c): `MSG_IDENTIFY_WIN32_STDIN` and
-  `MSG_IDENTIFY_WIN32_STDOUT` are rejected.
-- [`server-client.c`](../server-client.c): `server_client_open()` requires a
-  console flag or both relayed handles before setting `CLIENT_TERMINAL`.
+- [`client.c`](../client.c): `TMUX_WIN32_HANDLE_TTY=1` is now gated to
+  non-console stdio handles; native console clients stay on relay.
+- [`win32-proc.c`](../win32-proc.c): the server is spawned with
+  `DETACHED_PROCESS`.
+- [`win32-event.c`](../win32-event.c): detached server reads/writes through the
+  handle workers.
+- [`tools/win32-server-side-handle-io-plan.md`](win32-server-side-handle-io-plan.md):
+  records the native-console limitation.
 
 Problem:
 
-The handle-based terminal path exists structurally, but the identify messages
-for real stdin/stdout handles are intentionally rejected until authenticated
-handle duplication exists.
+Native console stdin/stdout handles can be duplicated from the client process,
+but they are not usable from the detached server process. Testing showed
+duplicated console stdin fails on server-side `ReadFile()` with
+`ERROR_INVALID_HANDLE`; duplicated console stdout also fails when the server
+writer attempts to write. Non-console stdio handles such as pipes can use the
+direct handle path.
 
 Why it matters:
 
-Non-console Win32 frontends cannot become interactive tmux terminals. Future
-native relay or ConPTY frontend paths remain blocked on authenticated handle
-transfer.
+Handle transfer alone is not enough to replace the client console relay for
+native PowerShell, `cmd.exe`, Windows Terminal, or ConHost clients. Dropping
+relay based only on "the client can hand over handles" would break the common
+native-console attach path.
 
 Required direction:
 
-- Implement authenticated handle duplication/transfer end-to-end.
-- Accept `MSG_IDENTIFY_WIN32_STDIN` and `MSG_IDENTIFY_WIN32_STDOUT` only after
-  tying the handles to the authenticated peer model.
-- Keep the current rejection until the auth/duplication design is complete.
+- Keep native console clients on relay until a separate console
+  attachment/helper design proves the detached server can safely use their
+  terminal I/O.
+- Treat relay removal as gated on usable handles, not merely transferable
+  handles.
+- Continue using direct server-side handles for non-console stdio paths that
+  pass native smoke tests.
 
 ### P2: Slash-rooted and backslash-rooted path semantics are inconsistent
 

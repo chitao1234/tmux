@@ -147,10 +147,10 @@ Direct-handle attach should follow this sequence:
 2. The client sends normal identify metadata: flags, term, tty name, cwd,
    features, terminfo, and environment.
 3. The client sends `MSG_IDENTIFY_CLIENTPID`.
-4. During output-only rollout, a test client may send
-   `MSG_IDENTIFY_WIN32_STDOUT` alone for targeted smoke coverage. Normal
-   interactive attach requires both `MSG_IDENTIFY_WIN32_STDIN` and
-   `MSG_IDENTIFY_WIN32_STDOUT`.
+4. Direct-handle clients send both `MSG_IDENTIFY_WIN32_STDIN` and
+   `MSG_IDENTIFY_WIN32_STDOUT`. Native console clients do not use this flow
+   until there is a proven design for using console handles from the detached
+   server process.
 5. The server duplicates and validates the handles before
    `MSG_IDENTIFY_DONE` completes.
 6. `MSG_IDENTIFY_DONE` calls the existing terminal initialization path.
@@ -393,8 +393,8 @@ under MSYS2.
 - Verify that the client relay and direct-handle paths remain mutually
   exclusive in the session state.
 - Verify whether any supported interactive Win32 client cannot hand over
-  handles. If none are found, the expected final state is relay removal, not
-  indefinite relay support.
+  usable handles. If none are found, the expected final state is relay removal,
+  not indefinite relay support.
 
 ## Exit Criteria
 
@@ -402,6 +402,9 @@ under MSYS2.
 - Server-owned handles drive the normal input and output path.
 - Console relay is removed if no supported client needs it, or quarantined
   behind an explicit compatibility gate with a documented reason if one does.
+- Native console clients either have a proven server-side console
+  attachment/helper design or remain the documented reason for relay
+  quarantine.
 - Output migration lands before the input migration, and each step has native
   smoke coverage.
 - The direct-handle path passes the native smoke and stress tests above.
