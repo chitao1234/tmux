@@ -34,6 +34,7 @@ struct win32_pane {
 	struct win32_handle_event *output_event;
 	struct win32_handle_writer *input_writer;
 	struct win32_process_event *process_event;
+	int		 output_paused;
 	int		 exited;
 	int		 status;
 };
@@ -1003,6 +1004,23 @@ win32_pane_output_done(struct window_pane *wp)
 	if (wp->win32 == NULL || wp->win32->output_event == NULL)
 		return (1);
 	return (win32_handle_event_done(wp->win32->output_event));
+}
+
+void
+win32_pane_set_reading(struct window_pane *wp, int enabled)
+{
+	if (wp->win32 == NULL || wp->win32->output_event == NULL)
+		return;
+	wp->win32->output_paused = !enabled;
+	win32_handle_event_set_reading(wp->win32->output_event, enabled);
+}
+
+int
+win32_pane_reading_paused(struct window_pane *wp)
+{
+	if (wp->win32 == NULL)
+		return (0);
+	return (wp->win32->output_paused);
 }
 
 int

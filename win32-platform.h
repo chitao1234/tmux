@@ -53,6 +53,8 @@ void		 win32_handle_event_drain(struct win32_handle_event *,
 		     struct evbuffer *);
 void		 win32_handle_event_drain_bev(struct win32_handle_event *,
 		     struct bufferevent *);
+void		 win32_handle_event_set_reading(struct win32_handle_event *,
+		     int);
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_done(struct win32_handle_event *);
 int		 win32_handle_event_write(struct win32_handle_event *,
@@ -102,6 +104,8 @@ void		 win32_pane_drain(struct window_pane *);
 int		 win32_pane_exited(struct window_pane *, int *);
 size_t		 win32_pane_buffered(struct window_pane *);
 int		 win32_pane_output_done(struct window_pane *);
+void		 win32_pane_set_reading(struct window_pane *, int);
+int		 win32_pane_reading_paused(struct window_pane *);
 char		*win32_pane_get_cwd(struct window_pane *);
 
 struct bufferevent *win32_pane_get_event(struct window_pane *);

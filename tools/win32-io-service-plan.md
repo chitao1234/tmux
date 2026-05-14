@@ -165,6 +165,21 @@ The legacy Win32 child polling pass has been removed:
 The next cleanup should move the pipe read/write backends from blocking worker
 threads to overlapped I/O/IOCP where the handle type allows it.
 
+## Read Watermark Slice
+
+Worker-backed read handles now have service-level read watermarks:
+
+- `win32_handle_event` has a ready event separate from its stop event;
+- the read worker waits until the endpoint is both unpaused and below its high
+  watermark before issuing the next blocking `ReadFile()`;
+- once the service buffer reaches the high watermark, the worker pauses until
+  tmux drains it below the low watermark;
+- ConPTY pane output connects the existing pane-buffer backpressure decision to
+  the service pause API, so Win32 panes can stop reading when pane output has no
+  consumer instead of unboundedly growing memory;
+- this is still a worker-backed compatibility layer, not the final IOCP
+  endpoint backend.
+
 ## Terminal Handle Output Slice
 
 The server-side direct terminal output handle path now uses the shared service

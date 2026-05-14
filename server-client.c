@@ -54,6 +54,9 @@ static int	server_client_dispatch_identify(struct client *, struct imsg *);
 static int	server_client_dispatch_shell(struct client *);
 static void	server_client_report_theme(struct client *, enum client_theme);
 #ifdef TMUX_WIN32
+#define SERVER_CLIENT_WIN32_PANE_HIGH (1024 * 1024)
+#define SERVER_CLIENT_WIN32_PANE_LOW (512 * 1024)
+
 static int	server_client_win32_tty_output_ack(struct client *,
 		    struct imsg *);
 static int	server_client_win32_resize(struct client *, struct imsg *);
@@ -1739,8 +1742,15 @@ out:
 	 */
 	log_debug("%s: pane %%%u is %s", __func__, wp->id, off ? "off" : "on");
 #ifdef TMUX_WIN32
-	if (wp->win32 != NULL)
+	if (wp->win32 != NULL) {
+		if (win32_pane_reading_paused(wp) &&
+		    EVBUFFER_LENGTH(evb) > SERVER_CLIENT_WIN32_PANE_LOW)
+			off = 1;
+		if (EVBUFFER_LENGTH(evb) >= SERVER_CLIENT_WIN32_PANE_HIGH)
+			off = 1;
+		win32_pane_set_reading(wp, !off);
 		return;
+	}
 #endif
 	if (off)
 		bufferevent_disable(wp->event, EV_READ);

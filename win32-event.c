@@ -100,11 +100,14 @@ struct win32_handle_event {
 	HANDLE		 handle;
 	HANDLE		 thread;
 	HANDLE		 stop;
+	HANDLE		 ready;
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
 	void		(*readcb)(void *);
 	void		(*errorcb)(void *);
 	void		 *arg;
+	int		 paused;
+	int		 throttled;
 	int		 error;
 	int		 pending;
 	int		 active;
@@ -152,6 +155,8 @@ struct win32_io_service {
 
 static struct win32_io_service win32_io;
 
+#define WIN32_HANDLE_EVENT_HIGH (1024 * 1024)
+#define WIN32_HANDLE_EVENT_LOW (512 * 1024)
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 
 static int	win32_io_service_init(void);
@@ -159,6 +164,8 @@ static void	win32_io_service_enqueue_reader(struct win32_handle_event *);
 static void	win32_io_service_enqueue_writer(struct win32_handle_writer *);
 static void	win32_io_service_enqueue_process(struct win32_process_event *);
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
+static void	win32_handle_event_update_ready(
+		     struct win32_handle_event *);
 
 static int
 win32_socketpair(SOCKET pair[2])
@@ -449,21 +456,44 @@ win32_process_event_notify(struct win32_process_event *wpe)
 		win32_io_service_enqueue_process(wpe);
 }
 
+static void
+win32_handle_event_update_ready(struct win32_handle_event *whe)
+{
+	size_t	buffered;
+
+	buffered = EVBUFFER_LENGTH(whe->input);
+	if (whe->throttled && buffered <= WIN32_HANDLE_EVENT_LOW)
+		whe->throttled = 0;
+	if (whe->ready == NULL)
+		return;
+	if (!whe->paused && !whe->throttled && !whe->error)
+		SetEvent(whe->ready);
+	else
+		ResetEvent(whe->ready);
+}
+
 static DWORD WINAPI
 win32_handle_event_thread(void *arg)
 {
 	struct win32_handle_event	*whe = arg;
 	char				 buf[8192];
+	HANDLE				 events[2];
+	DWORD				 wait;
 	DWORD				 nread;
+	int				 error;
 	u_int				 i;
 
+	events[0] = whe->stop;
+	events[1] = whe->ready;
 	for (;;) {
-		if (WaitForSingleObject(whe->stop, 0) == WAIT_OBJECT_0)
+		wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+		if (wait != WAIT_OBJECT_0 + 1)
 			break;
 		if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL) ||
 		    nread == 0) {
 			EnterCriticalSection(&whe->lock);
 			whe->error = 1;
+			win32_handle_event_update_ready(whe);
 			LeaveCriticalSection(&whe->lock);
 			win32_io_service_enqueue_reader(whe);
 			break;
@@ -478,9 +508,16 @@ win32_handle_event_thread(void *arg)
 			}
 		}
 		EnterCriticalSection(&whe->lock);
-		evbuffer_add(whe->input, buf, nread);
+		if (evbuffer_add(whe->input, buf, nread) != 0)
+			whe->error = 1;
+		if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
+			whe->throttled = 1;
+		win32_handle_event_update_ready(whe);
+		error = whe->error;
 		LeaveCriticalSection(&whe->lock);
 		win32_io_service_enqueue_reader(whe);
+		if (error)
+			break;
 	}
 	return (0);
 }
@@ -506,6 +543,13 @@ win32_handle_event_new(HANDLE handle, void (*readcb)(void *),
 	whe->arg = arg;
 	whe->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
 	if (whe->stop == NULL) {
+		evbuffer_free(whe->input);
+		free(whe);
+		return (NULL);
+	}
+	whe->ready = CreateEventW(NULL, TRUE, TRUE, NULL);
+	if (whe->ready == NULL) {
+		CloseHandle(whe->stop);
 		evbuffer_free(whe->input);
 		free(whe);
 		return (NULL);
@@ -547,6 +591,8 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		CloseHandle(whe->thread);
 	if (whe->stop != NULL)
 		CloseHandle(whe->stop);
+	if (whe->ready != NULL)
+		CloseHandle(whe->ready);
 	DeleteCriticalSection(&whe->lock);
 	free(whe);
 }
@@ -562,6 +608,7 @@ win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
 {
 	EnterCriticalSection(&whe->lock);
 	evbuffer_add_buffer(dst, whe->input);
+	win32_handle_event_update_ready(whe);
 	LeaveCriticalSection(&whe->lock);
 }
 
@@ -574,8 +621,20 @@ win32_handle_event_drain_bev(struct win32_handle_event *whe,
 	evbuffer_unfreeze(dst, 0);
 	EnterCriticalSection(&whe->lock);
 	evbuffer_add_buffer(dst, whe->input);
+	win32_handle_event_update_ready(whe);
 	LeaveCriticalSection(&whe->lock);
 	evbuffer_freeze(dst, 0);
+}
+
+void
+win32_handle_event_set_reading(struct win32_handle_event *whe, int enabled)
+{
+	if (whe == NULL)
+		return;
+	EnterCriticalSection(&whe->lock);
+	whe->paused = !enabled;
+	win32_handle_event_update_ready(whe);
+	LeaveCriticalSection(&whe->lock);
 }
 
 size_t
