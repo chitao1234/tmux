@@ -200,6 +200,17 @@ the service writer:
   remaining input producers to understand retry/backpressure instead of
   assuming every write is fully accepted.
 
+## Helper Cleanup Slice
+
+One unused synchronous compatibility helper has been removed:
+
+- `win32_handle_event_write()` had no callers after pane, job, tty, and process
+  paths moved to the shared service bridge;
+- removing it eliminates one stale direct `win32_handle_write()` wrapper from
+  the public Win32 platform surface;
+- this is only a cleanup step. The remaining compatibility APIs still exist
+  until the endpoint/event object model replaces them.
+
 ## Terminal Handle Output Slice
 
 The server-side direct terminal output handle path now uses the shared service
