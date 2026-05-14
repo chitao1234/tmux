@@ -826,9 +826,18 @@ int
 tty_close_graceful(struct tty *tty)
 {
 #ifdef TMUX_WIN32
+	struct client	*c = tty->client;
+
 	if ((tty->flags & TTY_OPENED) && tty->win32_out != NULL) {
 		tty_stop_tty(tty);
 		if (!tty_win32_out_drained(tty)) {
+			tty->flags |= TTY_CLOSEPENDING;
+			return (1);
+		}
+	}
+	if ((tty->flags & TTY_OPENED) && c->win32_console) {
+		tty_stop_tty(tty);
+		if (c->win32_tty_out_pending != 0) {
 			tty->flags |= TTY_CLOSEPENDING;
 			return (1);
 		}

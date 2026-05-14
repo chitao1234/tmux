@@ -885,3 +885,21 @@ continue draining buffered output:
 This keeps all terminal output continuation on the tmux event loop, avoids
 unbounded callback recursion during large redraws, and leaves the existing
 Win32 service writer/console ACK accounting intact.
+
+## Console Close ACK Slice
+
+The active Win32 console relay path now waits for outstanding console-output
+ACKs before completing terminal close:
+
+- `tty_close_graceful()` treats `client->win32_tty_out_pending` as a close
+  barrier for console-relay clients, matching the existing direct Win32 writer
+  drain barrier;
+- `tty_stop_tty()` may enqueue terminal reset bytes through `tty_raw()`, and
+  those bytes are included in `win32_tty_out_pending`;
+- `MSG_EXITED` is deferred while console relay output remains unacknowledged;
+- `MSG_WIN32_TTY_OUTPUT_ACK` retries the graceful close once pending console
+  output reaches zero.
+
+This prevents the server from telling the client to exit before the active
+console relay has acknowledged teardown/reset output that was already handed to
+the client-side I/O service writer.

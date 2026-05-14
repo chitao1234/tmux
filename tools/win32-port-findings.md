@@ -209,6 +209,9 @@ Resolution:
 
 - `MSG_WIN32_TTY_OUTPUT_ACK` is sent only after the client-side output writer
   reports drain.
+- The server now defers `MSG_EXITED` while the active console relay has
+  unacknowledged output, so terminal reset bytes queued during close are not
+  bypassed by client shutdown.
 - Console output no longer falls back to raw `WriteFile()` for UTF-8 decode
   failures.
 - Complete decoded prefixes are written through `WriteConsoleW`; partial

@@ -2576,9 +2576,14 @@ server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
 	    size, c->win32_tty_out_pending);
 
 	if ((c->flags & CLIENT_TERMINAL) &&
-	    (c->tty.flags & TTY_OPENED) &&
-	    EVBUFFER_LENGTH(c->tty.out) != 0)
-		tty_write_pending(&c->tty);
+	    (c->tty.flags & TTY_OPENED)) {
+		if (EVBUFFER_LENGTH(c->tty.out) != 0)
+			tty_write_pending(&c->tty);
+		if ((c->tty.flags & TTY_CLOSEPENDING) &&
+		    c->win32_tty_out_pending == 0 &&
+		    tty_close_graceful(&c->tty) == 0)
+			proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
+	}
 	return (0);
 }
 
