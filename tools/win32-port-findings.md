@@ -381,8 +381,8 @@ Required direction:
 
 Files:
 
-- [`client.c`](../client.c): `TMUX_WIN32_HANDLE_TTY=1` is now gated to
-  non-console stdio handles; native console clients stay on relay.
+- [`client.c`](../client.c): direct Win32 handle I/O is gated to non-console
+  stdio handles; native console clients stay on relay.
 - [`win32-proc.c`](../win32-proc.c): the server is spawned with
   `DETACHED_PROCESS`.
 - [`win32-event.c`](../win32-event.c): detached server reads/writes through the

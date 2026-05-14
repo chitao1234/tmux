@@ -49,6 +49,7 @@ static void	tty_read_callback(tmux_event_fd, short, void *);
 static void	tty_write_callback(tmux_event_fd, short, void *);
 static void	tty_write_schedule(struct tty *);
 #ifdef TMUX_WIN32
+static void	tty_win32_in_close(struct tty *, uint32_t);
 static void	tty_win32_in_event_callback(void *, uint32_t);
 static void	tty_win32_out_callback(void *);
 static void	tty_win32_out_error_callback(void *);
@@ -240,7 +241,7 @@ tty_read_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		nread = EVBUFFER_LENGTH(tty->in) - size;
 		if (nread == 0) {
 			log_debug("%s: read closed", name);
-			server_client_lost(tty->client);
+			tty_win32_in_close(tty, WIN32_IO_EVENT_READ_EOF);
 			return;
 		}
 		goto read_done;
@@ -437,18 +438,32 @@ tty_write_pending(struct tty *tty)
 
 #ifdef TMUX_WIN32
 static void
+tty_win32_in_close(struct tty *tty, uint32_t events)
+{
+	if (tty->win32_in == NULL)
+		return;
+	log_debug("%s: %s terminal input closed, events %#x", __func__,
+	    tty->client->name, events);
+	win32_io_endpoint_free(tty->win32_in);
+	tty->win32_in = NULL;
+}
+
+static void
 tty_win32_in_event_callback(void *data, uint32_t events)
 {
 	struct tty	*tty = data;
 
 	if (events & WIN32_IO_EVENT_READ)
 		tty_read_callback(-1, EV_READ, tty);
-	if ((events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED)) && !(tty->client->flags & CLIENT_DEAD)) {
+	if ((events & WIN32_IO_EVENT_ERROR) &&
+	    !(tty->client->flags & CLIENT_DEAD)) {
 		log_debug("%s: %s terminal input closed, events %#x",
 		    __func__, tty->client->name, events);
 		server_client_lost(tty->client);
+		return;
 	}
+	if (events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_CANCELED))
+		tty_win32_in_close(tty, events);
 }
 
 static void
@@ -743,7 +758,8 @@ tty_stop_tty(struct tty *tty)
 	tty->flags &= ~TTY_BLOCK;
 
 #ifdef TMUX_WIN32
-	if (!c->win32_console && tty->win32_in == NULL)
+	if (!c->win32_console && tty->win32_in == NULL &&
+	    event_initialized(&tty->event_in))
 		event_del(&tty->event_in);
 	if (event_initialized(&tty->event_out))
 		event_del(&tty->event_out);
@@ -824,7 +840,8 @@ tty_close(struct tty *tty)
 		if (tty->win32_in != NULL) {
 			win32_io_endpoint_free(tty->win32_in);
 			tty->win32_in = NULL;
-		} else if (!tty->client->win32_console)
+		} else if (!tty->client->win32_console &&
+		    event_initialized(&tty->event_in))
 			event_del(&tty->event_in);
 		if (tty->win32_out != NULL) {
 			win32_io_endpoint_free(tty->win32_out);

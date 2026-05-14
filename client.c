@@ -371,7 +371,7 @@ client_win32_handle_tty_enabled(void)
 	const char	*value;
 
 	value = getenv("TMUX_WIN32_HANDLE_TTY");
-	if (value == NULL || *value == '\0' || strcmp(value, "0") == 0)
+	if (value != NULL && strcmp(value, "0") == 0)
 		return (0);
 	return (1);
 }

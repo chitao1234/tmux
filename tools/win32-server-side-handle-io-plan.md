@@ -66,10 +66,10 @@ The removal decision is data-driven:
 
 ## Current State
 
-- `client.c` uses the console relay path for native console clients. With
-  `TMUX_WIN32_HANDLE_TTY=1`, it sends direct stdin/stdout handle claims only
-  when the stdio handles are non-console handles that the detached server can
-  use.
+- `client.c` uses the console relay path for native console clients. It sends
+  direct stdin/stdout handle claims by default only when the stdio handles are
+  non-console handles that the detached server can use. `TMUX_WIN32_HANDLE_TTY=0`
+  disables this direct path for debugging.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
   `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
   `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
@@ -78,6 +78,9 @@ The removal decision is data-driven:
   console relay size signal.
 - `tty.c` opens server-owned Win32 input and output handles through the Win32
   I/O service when they are present on the client object.
+- `tty.c` treats EOF on a server-owned direct input handle as an input
+  half-close. This lets pipe-backed clients finish output and normal session
+  teardown instead of being destroyed immediately when stdin closes.
 
 ## Attachment Model
 
@@ -227,6 +230,8 @@ This means:
   relay;
 - EOF, error, and cancellation should propagate through the existing tty and
   client loss paths;
+- direct stdin EOF should be a half-close rather than immediate client loss,
+  while hard input errors still detach the client;
 - the reader backend choice for direct terminal handles must be made
   deliberately, because actual console input needs the console reader backend
   while pipe or redirected terminal input can use the worker-backed terminal
@@ -283,15 +288,16 @@ There are two possible outcomes:
 
 ## Implementation Slices
 
-### Slice A: accept duplicated stdout behind an opt-in path
+### Slice A: accept duplicated stdout behind the direct path
 
 - Teach the client to send `MSG_IDENTIFY_CLIENTPID` before Win32 handle
   messages.
 - Add the minimal server-side handle duplication helper.
 - Accept `MSG_IDENTIFY_WIN32_STDOUT` for a client process handle claim.
-- Use `TMUX_WIN32_HANDLE_TTY=1` as the initial native testing opt-in.
-- Use this only for targeted output smoke coverage, not as a normal
-  interactive attach mode.
+- Use `TMUX_WIN32_HANDLE_TTY=0` as the native debugging escape hatch while the
+  direct path is being promoted.
+- Keep this path capability-gated while it is becoming the normal non-console
+  attach mode.
 - Do not enable direct stdout for native console clients until the server has a
   proven way to use the duplicated console output handle from its detached
   process.
@@ -299,7 +305,7 @@ There are two possible outcomes:
 - Verify `tty->win32_out` is used and `MSG_WIN32_TTY_OUTPUT` is not used for
   direct-handle output.
 
-### Slice B: accept full direct-handle attach behind an opt-in path
+### Slice B: accept full direct-handle attach behind the direct path
 
 - Require both stdin and stdout handles for interactive direct-handle attach.
 - Prefer direct stdout when the client supplies usable handles.
