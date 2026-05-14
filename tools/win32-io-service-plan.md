@@ -653,3 +653,25 @@ endpoints:
 This removes regular filesystem transfers from the blocking worker backend
 without changing the file-transfer protocol window, ACK, close-after-drain, or
 stdio/console behavior.
+
+## Process Wait State Hardening Slice
+
+Process wait endpoints now carry explicit process-wait state around the
+existing `RegisterWaitForSingleObject` backend:
+
+- a process wait endpoint transitions from running to exited only once, so the
+  threadpool wait callback and delayed job-exit replay both use the same
+  one-shot process-exit event edge;
+- process endpoint dispatch checks the endpoint state before delivering
+  `WIN32_IO_EVENT_PROCESS_EXIT`, instead of treating any queued process event
+  as sufficient by itself;
+- endpoint free marks the process endpoint canceled before deactivation and
+  wait unregistration, preventing delayed replay from delivering after
+  teardown;
+- `win32_io_process_notify()` now updates the same process state before
+  enqueueing a replayed process-exit event for jobs that register an exit
+  callback after the process has already exited.
+
+This does not replace the threadpool wait backend with IOCP. It tightens the
+state/lifetime contract so process waits behave more like the read and write
+endpoints while preserving the existing process-exit delivery mechanism.

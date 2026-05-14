@@ -33,6 +33,12 @@ enum win32_handle_writer_state {
 	WIN32_HANDLE_WRITER_ERROR
 };
 
+enum win32_process_event_state {
+	WIN32_PROCESS_EVENT_RUNNING,
+	WIN32_PROCESS_EVENT_EXITED,
+	WIN32_PROCESS_EVENT_CANCELED
+};
+
 enum win32_handle_event_backend {
 	WIN32_HANDLE_EVENT_WORKER,
 	WIN32_HANDLE_EVENT_IOCP
@@ -193,6 +199,8 @@ struct win32_handle_writer {
 struct win32_process_event {
 	struct win32_io_endpoint endpoint;
 	HANDLE		 wait;
+	CRITICAL_SECTION lock;
+	enum win32_process_event_state state;
 };
 
 struct win32_io_service {
@@ -571,7 +579,14 @@ static void
 win32_io_service_dispatch_process(struct win32_process_event *wpe,
     uint32_t events)
 {
-	if (events & WIN32_IO_EVENT_PROCESS_EXIT)
+	enum win32_process_event_state state;
+
+	EnterCriticalSection(&wpe->lock);
+	state = wpe->state;
+	LeaveCriticalSection(&wpe->lock);
+
+	if (state == WIN32_PROCESS_EVENT_EXITED &&
+	    (events & WIN32_IO_EVENT_PROCESS_EXIT))
 		wpe->endpoint.eventcb(wpe->endpoint.arg, events);
 }
 
@@ -649,8 +664,18 @@ static VOID CALLBACK
 win32_process_event_wait_cb(PVOID arg, __unused BOOLEAN timed_out)
 {
 	struct win32_process_event	*wpe = arg;
+	int				 notify = 0;
 
-	win32_io_service_enqueue_process(wpe, WIN32_IO_EVENT_PROCESS_EXIT);
+	EnterCriticalSection(&wpe->lock);
+	if (wpe->state == WIN32_PROCESS_EVENT_RUNNING) {
+		wpe->state = WIN32_PROCESS_EVENT_EXITED;
+		notify = 1;
+	}
+	LeaveCriticalSection(&wpe->lock);
+
+	if (notify)
+		win32_io_service_enqueue_process(wpe,
+		    WIN32_IO_EVENT_PROCESS_EXIT);
 }
 
 struct win32_io_endpoint *
@@ -667,11 +692,14 @@ win32_io_process_new(HANDLE process,
 		return (NULL);
 
 	wpe = xcalloc(1, sizeof *wpe);
+	InitializeCriticalSection(&wpe->lock);
+	wpe->state = WIN32_PROCESS_EVENT_RUNNING;
 	win32_io_endpoint_init(&wpe->endpoint, WIN32_IO_ENDPOINT_PROCESS, wpe,
 	    eventcb, arg);
 	if (!RegisterWaitForSingleObject(&wpe->wait, process,
 	    win32_process_event_wait_cb, wpe, INFINITE,
 	    WT_EXECUTEONLYONCE)) {
+		DeleteCriticalSection(&wpe->lock);
 		free(wpe);
 		return (NULL);
 	}
@@ -683,12 +711,16 @@ win32_process_event_free(struct win32_process_event *wpe)
 {
 	if (wpe == NULL)
 		return;
+	EnterCriticalSection(&wpe->lock);
+	wpe->state = WIN32_PROCESS_EVENT_CANCELED;
+	LeaveCriticalSection(&wpe->lock);
 	win32_io_service_deactivate_endpoint(&wpe->endpoint);
 	if (wpe->wait != NULL &&
 	    !UnregisterWaitEx(wpe->wait, INVALID_HANDLE_VALUE)) {
 		log_debug("%s: UnregisterWaitEx failed: %s", __func__,
 		    win32_strerror(GetLastError()));
 	}
+	DeleteCriticalSection(&wpe->lock);
 	free(wpe);
 }
 
@@ -696,11 +728,20 @@ void
 win32_io_process_notify(struct win32_io_endpoint *endpoint)
 {
 	struct win32_process_event	*wpe;
+	int				 notify = 0;
 
 	if (endpoint == NULL)
 		return;
 	wpe = endpoint->owner;
-	if (wpe != NULL)
+	if (wpe == NULL)
+		return;
+	EnterCriticalSection(&wpe->lock);
+	if (wpe->state != WIN32_PROCESS_EVENT_CANCELED) {
+		wpe->state = WIN32_PROCESS_EVENT_EXITED;
+		notify = 1;
+	}
+	LeaveCriticalSection(&wpe->lock);
+	if (notify)
 		win32_io_service_enqueue_process(wpe,
 		    WIN32_IO_EVENT_PROCESS_EXIT);
 }
