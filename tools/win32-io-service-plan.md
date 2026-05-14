@@ -837,6 +837,9 @@ worker fallback backend:
 - the IOCP service thread now exits only on the explicit service-shutdown
   sentinel packet, so canceled-operation completions with a null overlapped
   pointer cannot accidentally stop the backend thread;
+- service shutdown waits for the IOCP backend thread with a bounded timeout
+  and abandons final service cleanup if it does not exit, preferring a process
+  exit leak over hanging the tmux thread;
 - this keeps the existing IOCP backend and completion contract, but removes
   another teardown path that could hang the server.
 

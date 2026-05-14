@@ -226,6 +226,7 @@ static struct win32_io_service win32_io;
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 #define WIN32_WORKER_STOP_TIMEOUT 1000
 #define WIN32_IOCP_STOP_TIMEOUT 1000
+#define WIN32_IOCP_SERVICE_STOP_TIMEOUT 1000
 #define WIN32_IOCP_STOP_KEY ((ULONG_PTR)-1)
 
 static int	win32_io_service_init(void);
@@ -249,6 +250,7 @@ static void	win32_io_service_dispatch_endpoint(
 		     struct win32_io_endpoint *, uint32_t);
 static int	win32_wait_worker_thread(HANDLE, const char *);
 static int	win32_wait_iocp_endpoint(HANDLE, const char *);
+static int	win32_wait_iocp_thread(HANDLE, const char *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
@@ -421,8 +423,8 @@ win32_io_service_fini(void)
 	if (win32_io.iocp != NULL)
 		PostQueuedCompletionStatus(win32_io.iocp, 0,
 		    WIN32_IOCP_STOP_KEY, NULL);
-	if (win32_io.iocp_thread != NULL)
-		WaitForSingleObject(win32_io.iocp_thread, INFINITE);
+	if (win32_wait_iocp_thread(win32_io.iocp_thread, __func__) != 0)
+		return;
 	if (win32_io.event_added)
 		event_del(&win32_io.event);
 	if (win32_io.iocp_thread != NULL)
@@ -684,6 +686,21 @@ win32_wait_iocp_endpoint(HANDLE complete, const char *name)
 		return (0);
 	log_debug("%s: IOCP endpoint did not stop within %u ms",
 	    name, WIN32_IOCP_STOP_TIMEOUT);
+	return (-1);
+}
+
+static int
+win32_wait_iocp_thread(HANDLE thread, const char *name)
+{
+	DWORD	wait;
+
+	if (thread == NULL)
+		return (0);
+	wait = WaitForSingleObject(thread, WIN32_IOCP_SERVICE_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0)
+		return (0);
+	log_debug("%s: IOCP service thread did not stop within %u ms",
+	    name, WIN32_IOCP_SERVICE_STOP_TIMEOUT);
 	return (-1);
 }
 
