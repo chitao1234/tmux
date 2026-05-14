@@ -57,8 +57,6 @@ void		 win32_handle_event_set_reading(struct win32_handle_event *,
 		     int);
 size_t		 win32_handle_event_buffered(struct win32_handle_event *);
 int		 win32_handle_event_done(struct win32_handle_event *);
-int		 win32_handle_event_write(struct win32_handle_event *,
-		     const void *, size_t);
 struct win32_handle_writer *win32_handle_writer_new(HANDLE *);
 struct win32_handle_writer *win32_handle_writer_new_cb(HANDLE *,
 		     void (*)(void *), void (*)(void *), void *);

@@ -898,13 +898,6 @@ win32_handle_writer_done(struct win32_handle_writer *whw)
 	return (done);
 }
 
-int
-win32_handle_event_write(__unused struct win32_handle_event *whe,
-    const void *data, size_t size)
-{
-	return (win32_handle_write(whe->handle, data, size));
-}
-
 static int
 win32_handle_write_file(HANDLE handle, const void *data, size_t size)
 {
