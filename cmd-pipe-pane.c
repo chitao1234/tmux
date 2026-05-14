@@ -96,9 +96,7 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 	/* Destroy the old pipe. */
 	old_pipe = window_pane_pipe_active(wp);
 	if (wp->pipe_job != NULL) {
-		job_close_stdin(wp->pipe_job);
-		wp->pipe_job = NULL;
-		wp->pipe_pid = -1;
+		window_pane_close_pipe(wp);
 
 		if (window_pane_destroy_ready(wp)) {
 			server_destroy_pane(wp, 1);

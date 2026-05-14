@@ -270,44 +270,47 @@ Fix direction:
 - Replace recursive re-entry with scheduled callbacks or event-loop deferral.
 - Preserve the pending-output limit but yield between chunks.
 
-### Win32 `pipe-pane` teardown loses helper job ownership
+### Fixed: Win32 `pipe-pane` teardown loses helper job ownership
 
 Files:
 
-- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): old Win32 pipe teardown calls only
-  `job_close_stdin()` and clears `wp->pipe_job`.
-- [`window.c`](../window.c): pane destroy does the same.
+- [`window.c`](../window.c): `window_pane_close_pipe()` now owns both Unix
+  pipe-fd cleanup and Win32 helper-job teardown.
+- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 toggle-off now uses the shared
+  pipe close helper instead of only closing helper stdin.
 
-Impact:
+Original impact:
 
 `pipe-pane -I` and bidirectional pipe jobs can outlive the pane indefinitely.
 After `wp->pipe_job` is cleared, later callbacks are no longer associated with
 the pane, so tmux loses the control path for that logical pipe.
 
-Fix direction:
+Resolution:
 
-- Decide explicit semantics: kill pipe helper on detach, or detach and keep it
-  as an owned job until natural completion.
-- Do not clear `wp->pipe_job` until ownership is transferred or cleanup is
-  complete.
-- Make toggling pipe-pane off actually stop or fully detach the helper.
+- Win32 now chooses kill-on-detach semantics for pipe helpers.
+- Toggle-off and pane destruction clear pane ownership and then `job_free()`
+  the helper, so the Win32 job object tears down the helper process tree.
+- Native lifecycle smoke verified both toggle-off and pane destruction terminate
+  long-running `pipe-pane -I` helper processes.
 
-### `pipe-pane -I` ignores pane write failure
+### Fixed: `pipe-pane -I` ignores pane write failure
 
 File:
 
-- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): `cmd_pipe_pane_job_update()` ignores
-  `win32_pane_write()` return value and drains all data.
+- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 `pipe-pane -I` now checks pane
+  input readiness and the `win32_pane_write()` result.
 
-Impact:
+Original impact:
 
 If the target pane is closed or the writer rejects input, data is discarded even
 though it was never queued.
 
-Fix direction:
+Resolution:
 
-- Drain only the bytes successfully queued.
-- On error, close or complete the pipe job consistently.
+- Helper-job output is not drained when pane input is saturated.
+- The job output reader is paused and retried from a tmux-thread timer.
+- Completion makes a final no-pause delivery attempt and logs if pane input is
+  still saturated.
 
 ### Child exit polling does heavy synchronous teardown
 
@@ -544,4 +547,3 @@ High-priority native PowerShell tests:
 6. Path semantics and glob:
    Win32 path-list separator, consistent slash-root policy, case/normalization
    rules, and POSIX-compatible glob behavior over wide directory enumeration.
-

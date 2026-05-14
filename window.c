@@ -414,6 +414,29 @@ window_pane_pipe_active(struct window_pane *wp)
 }
 
 void
+window_pane_close_pipe(struct window_pane *wp)
+{
+#ifdef TMUX_WIN32
+	struct job	*job;
+#endif
+
+#ifdef TMUX_WIN32
+	if (wp->pipe_job != NULL) {
+		job = wp->pipe_job;
+		wp->pipe_job = NULL;
+		wp->pipe_pid = -1;
+		wp->pipe_fd = -1;
+		job_free(job);
+	}
+#endif
+	if (wp->pipe_fd != -1) {
+		bufferevent_free(wp->pipe_event);
+		close(wp->pipe_fd);
+		wp->pipe_fd = -1;
+	}
+}
+
+void
 window_add_ref(struct window *w, const char *from)
 {
 	w->references++;
@@ -1057,12 +1080,8 @@ window_pane_destroy(struct window_pane *wp)
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL)
 		win32_pane_close(wp);
-	if (wp->pipe_job != NULL) {
-		job_close_stdin(wp->pipe_job);
-		wp->pipe_job = NULL;
-		wp->pipe_fd = -1;
-	}
 #endif
+	window_pane_close_pipe(wp);
 
 	if (wp->fd != -1) {
 #ifdef HAVE_UTEMPTER
@@ -1078,11 +1097,6 @@ window_pane_destroy(struct window_pane *wp)
 	screen_free(&wp->status_screen);
 
 	screen_free(&wp->base);
-
-	if (wp->pipe_fd != -1) {
-		bufferevent_free(wp->pipe_event);
-		close(wp->pipe_fd);
-	}
 
 	if (event_initialized(&wp->resize_timer))
 		event_del(&wp->resize_timer);

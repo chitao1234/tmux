@@ -761,3 +761,23 @@ preserving the existing job lifetime model. It does not keep a completed helper
 job alive indefinitely solely to wait for future pane stdin capacity; the final
 completion edge still drops undelivered helper output if the pane remains
 saturated after the job has exited.
+
+## Pipe Pane Helper Ownership Slice
+
+Win32 `pipe-pane` teardown now owns the helper job until cleanup is complete:
+
+- `window_pane_close_pipe()` centralizes pipe close logic for both Unix pipe
+  fds and Win32 helper jobs;
+- the Win32 path detaches `wp->pipe_job`, clears `pane_pipe_pid`, and frees the
+  helper job, which terminates the process tree through the existing Win32 job
+  object cleanup;
+- `pipe-pane` toggle-off and pane destruction both use the same helper instead
+  of only closing helper stdin and losing ownership;
+- callbacks that arrive during teardown see the pane as no longer owning that
+  job and discard any remaining helper output through the normal stale-job
+  path.
+
+This fixes the previous Win32-only leak where `pipe-pane -I` or bidirectional
+helpers could survive after the pane stopped owning them. It intentionally
+chooses kill-on-detach semantics for Win32 helper jobs, matching the fact that
+tmux no longer has a logical pipe owner after `wp->pipe_job` is cleared.
