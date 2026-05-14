@@ -475,6 +475,7 @@ server_client_lost(struct client *c)
 		RB_REMOVE(client_windows, &c->windows, cw);
 		free(cw);
 	}
+	cfg_client_lost(c);
 
 	TAILQ_REMOVE(&clients, c, entry);
 	log_debug("lost client %p", c);

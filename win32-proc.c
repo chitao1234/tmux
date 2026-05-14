@@ -28,6 +28,7 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	BOOL		 ok;
 	char		*exe_utf8, **argv;
 	int		 argc, i, log_level;
+	u_int		 j, cfg_args;
 
 	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
 	if (n == 0 || n == MAX_PATH) {
@@ -41,7 +42,9 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 		return (-1);
 	}
 	log_level = log_get_level();
-	argc = 5 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0);
+	cfg_args = (cfg_quiet ? 0 : 2 * cfg_nfiles);
+	argc = 5 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0) +
+	    cfg_args;
 	argv = xcalloc((size_t)argc, sizeof *argv);
 	i = 0;
 	argv[i++] = exe_utf8;
@@ -50,6 +53,10 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 		argv[i++] = xstrdup("-v");
 	argv[i++] = xstrdup("-S");
 	argv[i++] = xstrdup(path);
+	for (j = 0; j < cfg_nfiles && !cfg_quiet; j++) {
+		argv[i++] = xstrdup("-f");
+		argv[i++] = xstrdup(cfg_files[j]);
+	}
 	if (flags & CLIENT_WIN32_HELPER)
 		argv[i++] = xstrdup("-w");
 	cmd = win32_build_argv_command(i, argv);

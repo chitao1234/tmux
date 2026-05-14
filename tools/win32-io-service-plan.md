@@ -960,3 +960,28 @@ error instead of silently draining already-read bytes:
 This hardens the I/O service migration boundary: once data has moved from the
 Win32 reader endpoint into the tmux file-transfer protocol, failure to hand it
 to IPC is no longer hidden as a successful read.
+
+## Startup Config Read Slice
+
+Win32 startup configuration file reads now use the I/O service regular-file
+path instead of synchronous `fopen()` on the server thread:
+
+- `start_cfg()` resolves the startup config file list before asynchronous
+  reads begin, preserving relative-path behavior even if the first client later
+  disconnects;
+- detached Win32 server startup carries explicit client `-f` arguments into the
+  spawned native server process, so the async reader sees the same startup
+  config list that the client requested;
+- each startup config file is read through `file_read(NULL, ...)`, reusing the
+  Win32 `CreateFileW` plus `win32_io_reader_new_file()` path used by
+  `source-file`;
+- parsed command lists are stored and appended to the global command queue only
+  after all startup config reads complete, preserving the old behavior where
+  every startup config file was parsed before any config command ran;
+- parse-time format expansion still sees the initial client while it is alive,
+  but a client-lost hook clears the startup client pointer before free;
+- the existing `cfg_done` callback remains the startup barrier that releases
+  the first client command queue.
+
+This removes another direct server-thread filesystem read from the Win32 port
+without changing the startup command ordering model.
