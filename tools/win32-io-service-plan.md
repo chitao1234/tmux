@@ -558,3 +558,30 @@ Pane and job pipes are now created through a named-pipe helper instead of
   is a behavior-preserving prerequisite rather than an I/O backend change;
 - this removes the `CreatePipe` limitation that prevented parent-side pipe
   handles from being opened in overlapped mode for future IOCP endpoints.
+
+## Overlapped Reader Backend Slice
+
+Pane and job output readers now use an IOCP-backed overlapped read backend:
+
+- the named-pipe helper can create parent-side output read handles with
+  `FILE_FLAG_OVERLAPPED`;
+- ConPTY pane output and Win32 job stdout pipes use overlapped parent-side read
+  handles while keeping the child-side write handles synchronous and
+  inheritable;
+- `win32_io_reader_new_overlapped()` associates eligible read handles with a
+  shared IOCP and reports completions through the existing service completion
+  bridge;
+- pane and job output keep the explicit read, EOF, and error event semantics
+  already used by the worker-backed reader API;
+- cancellation waits for any pending overlapped read to complete before freeing
+  the endpoint, so the IOCP thread cannot enqueue stale endpoint pointers after
+  teardown;
+- worker-backed readers remain in use for client console input, direct tty
+  input, and client file reads;
+- writers still use the worker-thread backend, and process waits still use
+  `RegisterWaitForSingleObject`.
+
+This is the first real backend replacement slice. It validates the endpoint
+model against the two output streams most affected by process-exit-versus-EOF
+ordering, while intentionally leaving stdin writers and console/file readers on
+the existing backend until their handle-specific semantics are migrated.

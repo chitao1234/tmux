@@ -111,6 +111,7 @@ win32_make_pipe_flags(HANDLE *readp, HANDLE *writep, int inherit_read,
 	OVERLAPPED	    ov;
 	HANDLE		    event = NULL, read = INVALID_HANDLE_VALUE;
 	HANDLE		    write = INVALID_HANDLE_VALUE;
+	DWORD		    open_flags;
 	wchar_t		    name[128];
 	DWORD		    error, n;
 	int		    pending = 0, connected = 0;
@@ -157,8 +158,11 @@ win32_make_pipe_flags(HANDLE *readp, HANDLE *writep, int inherit_read,
 		}
 	}
 
+	open_flags = FILE_ATTRIBUTE_NORMAL|write_flags;
+	if (open_flags & FILE_FLAG_OVERLAPPED)
+		open_flags &= ~FILE_ATTRIBUTE_NORMAL;
 	write = CreateFileW(name, GENERIC_WRITE, 0, &wsa, OPEN_EXISTING,
-	    FILE_ATTRIBUTE_NORMAL|write_flags, NULL);
+	    open_flags, NULL);
 	if (write == INVALID_HANDLE_VALUE)
 		goto fail;
 
@@ -208,6 +212,13 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
 {
 	return (win32_make_pipe_flags(readp, writep, inherit_read,
 	    inherit_write, 0, 0));
+}
+
+static int
+win32_make_output_pipe(HANDLE *readp, HANDLE *writep)
+{
+	return (win32_make_pipe_flags(readp, writep, 0, 1,
+	    FILE_FLAG_OVERLAPPED, 0));
 }
 
 static win32_nt_query_information_process
@@ -1051,7 +1062,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 		size.Y = 24;
 
 	if (win32_make_pipe(&pw->input_read, &pw->input_write, 1, 0) != 0 ||
-	    win32_make_pipe(&pw->output_read, &pw->output_write, 0, 1) != 0) {
+	    win32_make_output_pipe(&pw->output_read, &pw->output_write) != 0) {
 		xasprintf(cause, "CreatePipe failed: %s",
 		    win32_strerror(GetLastError()));
 		goto fail;
@@ -1125,7 +1136,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
 
-	pw->output_event = win32_io_reader_new(pw->output_read,
+	pw->output_event = win32_io_reader_new_overlapped(pw->output_read,
 	    win32_pane_output_event_cb, wp);
 	if (pw->output_event == NULL) {
 		xasprintf(cause, "couldn't create pane output event");
@@ -1456,7 +1467,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	wj = xcalloc(1, sizeof *wj);
 	wj->pty = !!(flags & JOB_PTY);
 	if (win32_make_pipe(&wj->stdin_read, &wj->stdin_write, 1, 0) != 0 ||
-	    win32_make_pipe(&wj->stdout_read, &wj->stdout_write, 0, 1) != 0) {
+	    win32_make_output_pipe(&wj->stdout_read, &wj->stdout_write) != 0) {
 		if (cause != NULL) {
 			xasprintf(cause, "CreatePipe failed: %s",
 			    win32_strerror(GetLastError()));
@@ -1609,7 +1620,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	wj->event = bufferevent_new(-1, NULL, NULL, NULL, NULL);
 	if (wj->event == NULL)
 		fatalx("out of memory");
-	wj->output_event = win32_io_reader_new(wj->stdout_read,
+	wj->output_event = win32_io_reader_new_overlapped(wj->stdout_read,
 	    win32_job_output_event_cb, wj);
 	if (wj->output_event == NULL) {
 		if (cause != NULL)

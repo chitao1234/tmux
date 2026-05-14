@@ -55,6 +55,8 @@ long		 win32_console_ctrl_c_events(void);
 void		 win32_io_service_fini(void);
 struct win32_io_endpoint *win32_io_reader_new(HANDLE,
 		     void (*)(void *, uint32_t), void *);
+struct win32_io_endpoint *win32_io_reader_new_overlapped(HANDLE,
+		     void (*)(void *, uint32_t), void *);
 void		 win32_io_endpoint_free(struct win32_io_endpoint *);
 void		 win32_io_reader_drain(struct win32_io_endpoint *,
 		     struct evbuffer *);
