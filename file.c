@@ -53,6 +53,11 @@ static void	file_read_win32_done_callback(void *);
 static void	file_read_win32_event_callback(void *, uint32_t);
 static int	file_write_console_text(struct client_file *, const char *,
 		    size_t);
+static int	file_write_win32_open_path(struct client_file *, const char *,
+		    int);
+static int	file_read_win32_open_path(struct client_file *, const char *,
+		    int);
+static void	file_win32_close_handle(HANDLE *);
 #endif
 
 RB_GENERATE(client_files, client_file, entry, file_cmp);
@@ -168,6 +173,7 @@ file_free(struct client_file *cf)
 		win32_io_endpoint_free(cf->win32_writer);
 	if (cf->win32_reader != NULL)
 		win32_io_endpoint_free(cf->win32_reader);
+	file_win32_close_handle(&cf->win32_handle);
 #endif
 
 	if (cf->tree != NULL)
@@ -665,6 +671,147 @@ file_write_acknowledge(struct client_file *cf, size_t size, int error)
 }
 
 #ifdef TMUX_WIN32
+static int
+file_win32_errno(DWORD error)
+{
+	switch (error) {
+	case ERROR_FILE_NOT_FOUND:
+	case ERROR_PATH_NOT_FOUND:
+		return (ENOENT);
+	case ERROR_ACCESS_DENIED:
+	case ERROR_SHARING_VIOLATION:
+	case ERROR_LOCK_VIOLATION:
+		return (EACCES);
+	case ERROR_FILE_EXISTS:
+	case ERROR_ALREADY_EXISTS:
+		return (EEXIST);
+	case ERROR_INVALID_NAME:
+	case ERROR_INVALID_PARAMETER:
+		return (EINVAL);
+	case ERROR_NOT_ENOUGH_MEMORY:
+	case ERROR_OUTOFMEMORY:
+		return (ENOMEM);
+	case ERROR_DISK_FULL:
+	case ERROR_HANDLE_DISK_FULL:
+		return (ENOSPC);
+	default:
+		return (EIO);
+	}
+}
+
+static void
+file_win32_close_handle(HANDLE *handle)
+{
+	if (*handle != NULL && *handle != INVALID_HANDLE_VALUE)
+		CloseHandle(*handle);
+	*handle = NULL;
+}
+
+static int
+file_win32_regular_handle(HANDLE handle)
+{
+	DWORD	type, error;
+
+	SetLastError(NO_ERROR);
+	type = GetFileType(handle);
+	if (type == FILE_TYPE_DISK)
+		return (1);
+	if (type == FILE_TYPE_UNKNOWN) {
+		error = GetLastError();
+		if (error != NO_ERROR) {
+			errno = file_win32_errno(error);
+			return (-1);
+		}
+	}
+	return (0);
+}
+
+static DWORD
+file_write_win32_disposition(int flags)
+{
+	if ((flags & O_CREAT) && (flags & O_EXCL))
+		return (CREATE_NEW);
+	if (flags & O_TRUNC)
+		return (CREATE_ALWAYS);
+	return (OPEN_ALWAYS);
+}
+
+static int
+file_write_win32_open_path(struct client_file *cf, const char *path, int flags)
+{
+	wchar_t	*wpath;
+	HANDLE	 handle;
+	int	 regular;
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	handle = CreateFileW(wpath, GENERIC_WRITE,
+	    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL,
+	    file_write_win32_disposition(flags),
+	    FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, NULL);
+	free(wpath);
+	if (handle == INVALID_HANDLE_VALUE) {
+		errno = file_win32_errno(GetLastError());
+		return (-1);
+	}
+
+	regular = file_win32_regular_handle(handle);
+	if (regular == 1) {
+		cf->win32_handle = handle;
+		cf->win32_offset = 0;
+		cf->win32_append = !!(flags & O_APPEND);
+		return (0);
+	}
+	file_win32_close_handle(&handle);
+	if (regular == -1)
+		return (-1);
+
+	cf->fd = open(path, flags, 0644);
+	if (cf->fd == -1)
+		return (-1);
+	return (0);
+}
+
+static int
+file_read_win32_open_path(struct client_file *cf, const char *path, int flags)
+{
+	wchar_t	*wpath;
+	HANDLE	 handle;
+	int	 regular;
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	handle = CreateFileW(wpath, GENERIC_READ,
+	    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL,
+	    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, NULL);
+	free(wpath);
+	if (handle == INVALID_HANDLE_VALUE) {
+		errno = file_win32_errno(GetLastError());
+		return (-1);
+	}
+
+	regular = file_win32_regular_handle(handle);
+	if (regular == 1) {
+		cf->win32_handle = handle;
+		cf->win32_offset = 0;
+		return (0);
+	}
+	file_win32_close_handle(&handle);
+	if (regular == -1)
+		return (-1);
+
+	cf->fd = open(path, flags);
+	if (cf->fd == -1)
+		return (-1);
+	return (0);
+}
+
 static void
 file_write_win32_close(struct client_file *cf)
 {
@@ -678,6 +825,7 @@ file_write_win32_close(struct client_file *cf)
 	cf->fd = -1;
 	if (fd != -1)
 		close(fd);
+	file_win32_close_handle(&cf->win32_handle);
 }
 
 static int
@@ -688,6 +836,16 @@ file_write_win32_start(struct client_file *cf)
 
 	if (cf->win32_writer != NULL)
 		return (0);
+	if (cf->win32_handle != NULL) {
+		cf->win32_writer = win32_io_writer_new_file_borrowed(
+		    &cf->win32_handle, cf->win32_offset, cf->win32_append,
+		    file_write_win32_event_callback, cf);
+		if (cf->win32_writer == NULL) {
+			errno = EIO;
+			return (-1);
+		}
+		return (0);
+	}
 	if (cf->fd == -1) {
 		errno = EBADF;
 		return (-1);
@@ -764,6 +922,8 @@ file_write_win32_open(struct client_file *cf)
 
 	if (file_write_win32_start(cf) != 0)
 		return;
+	if (cf->win32_handle != NULL)
+		return;
 	osfhandle = _get_osfhandle(cf->fd);
 	handle = (HANDLE)osfhandle;
 	if (handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode))
@@ -799,7 +959,8 @@ file_write_win32_error_callback(void *arg)
 {
 	struct client_file	*cf = arg;
 
-	if (cf->fd == -1 && cf->win32_writer == NULL)
+	if (cf->fd == -1 && cf->win32_handle == NULL &&
+	    cf->win32_writer == NULL)
 		return;
 	file_write_win32_fail(cf, EIO);
 }
@@ -829,6 +990,7 @@ file_read_win32_close(struct client_file *cf)
 	cf->fd = -1;
 	if (fd != -1)
 		close(fd);
+	file_win32_close_handle(&cf->win32_handle);
 	file_free(cf);
 }
 
@@ -902,6 +1064,15 @@ file_read_win32_start(struct client_file *cf)
 	intptr_t	osfhandle;
 	HANDLE	handle;
 
+	if (cf->win32_handle != NULL) {
+		cf->win32_reader = win32_io_reader_new_file(cf->win32_handle,
+		    cf->win32_offset, file_read_win32_event_callback, cf);
+		if (cf->win32_reader == NULL) {
+			errno = EIO;
+			return (-1);
+		}
+		return (0);
+	}
 	osfhandle = _get_osfhandle(cf->fd);
 	handle = (HANDLE)osfhandle;
 	if (handle == INVALID_HANDLE_VALUE) {
@@ -928,6 +1099,8 @@ file_write_console_text(struct client_file *cf, const char *data, size_t size)
 	int		 error;
 
 	errno = 0;
+	if (cf->win32_handle != NULL)
+		return (0);
 	osfhandle = _get_osfhandle(cf->fd);
 	handle = (HANDLE)osfhandle;
 	if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode))
@@ -1011,8 +1184,18 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	}
 
 	cf->fd = -1;
+#ifdef TMUX_WIN32
+	if (msg->fd == -1) {
+		if (file_write_win32_open_path(cf, path,
+		    msg->flags|flags) != 0) {
+			error = errno;
+			goto reply;
+		}
+	}
+#else
 	if (msg->fd == -1)
 		cf->fd = open(path, msg->flags|flags, 0644);
+#endif
 	else if (allow_streams) {
 		if (msg->fd != STDOUT_FILENO && msg->fd != STDERR_FILENO)
 			errno = EBADF;
@@ -1023,7 +1206,11 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		}
 	} else
 	      errno = EBADF;
-	if (cf->fd == -1) {
+	if (cf->fd == -1
+#ifdef TMUX_WIN32
+	    && cf->win32_handle == NULL
+#endif
+	    ) {
 		error = errno;
 		goto reply;
 	}
@@ -1050,10 +1237,13 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 
 reply:
 	if (error != 0 && cf != NULL) {
+#ifdef TMUX_WIN32
 		if (cf->win32_writer != NULL) {
 			win32_io_endpoint_free(cf->win32_writer);
 			cf->win32_writer = NULL;
 		}
+		file_win32_close_handle(&cf->win32_handle);
+#endif
 		if (cf->fd != -1)
 			close(cf->fd);
 		cf->fd = -1;
@@ -1082,7 +1272,7 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 
 #ifdef TMUX_WIN32
 	if (cf->event == NULL) {
-		if (cf->fd != -1)
+		if (cf->fd != -1 || cf->win32_handle != NULL)
 			file_write_win32_queue_data(cf, msg + 1, size);
 		return;
 	}
@@ -1216,8 +1406,17 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	}
 
 	cf->fd = -1;
+#ifdef TMUX_WIN32
+	if (msg->fd == -1) {
+		if (file_read_win32_open_path(cf, path, flags) != 0) {
+			error = errno;
+			goto reply;
+		}
+	}
+#else
 	if (msg->fd == -1)
 		cf->fd = open(path, flags);
+#endif
 	else if (allow_streams) {
 		if (msg->fd != STDIN_FILENO)
 			errno = EBADF;
@@ -1228,7 +1427,11 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 		}
 	} else
 		errno = EBADF;
-	if (cf->fd == -1) {
+	if (cf->fd == -1
+#ifdef TMUX_WIN32
+	    && cf->win32_handle == NULL
+#endif
+	    ) {
 		error = errno;
 		goto reply;
 	}
@@ -1256,6 +1459,7 @@ reply:
 			win32_io_endpoint_free(cf->win32_reader);
 			cf->win32_reader = NULL;
 		}
+		file_win32_close_handle(&cf->win32_handle);
 #endif
 		if (cf->event != NULL) {
 			bufferevent_free(cf->event);

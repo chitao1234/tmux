@@ -158,7 +158,9 @@ struct win32_handle_event {
 	char		 iocp_buf[8192];
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
+	uint64_t	 offset;
 	enum win32_handle_event_backend backend;
+	int		 use_offset;
 	int		 pending;
 	int		 paused;
 	int		 stopping;
@@ -178,8 +180,11 @@ struct win32_handle_writer {
 	size_t		 iocp_size;
 	struct evbuffer	*output;
 	CRITICAL_SECTION lock;
+	uint64_t	 offset;
 	enum win32_handle_writer_backend backend;
 	enum win32_handle_writer_state state;
+	int		 use_offset;
+	int		 append;
 	int		 pending;
 	int		 borrowed;
 	int		 stop;
@@ -746,6 +751,10 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 		return (0);
 
 	memset(&whe->overlapped, 0, sizeof whe->overlapped);
+	if (whe->use_offset) {
+		whe->overlapped.Offset = (DWORD)(whe->offset & 0xffffffff);
+		whe->overlapped.OffsetHigh = (DWORD)(whe->offset >> 32);
+	}
 	ResetEvent(whe->complete);
 	whe->pending = 1;
 	if (ReadFile(whe->handle, whe->iocp_buf, sizeof whe->iocp_buf, &nread,
@@ -807,6 +816,8 @@ win32_handle_event_iocp_complete(struct win32_handle_event *whe, DWORD error,
 		events = WIN32_IO_EVENT_ERROR;
 		goto out;
 	}
+	if (whe->use_offset)
+		whe->offset += nread;
 	if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
 		whe->throttled = 1;
 	events = WIN32_IO_EVENT_READ;
@@ -940,8 +951,8 @@ win32_io_reader_new(HANDLE handle,
 	return (&whe->endpoint);
 }
 
-struct win32_io_endpoint *
-win32_io_reader_new_overlapped(HANDLE handle,
+static struct win32_io_endpoint *
+win32_io_reader_new_iocp(HANDLE handle, uint64_t offset, int use_offset,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
@@ -957,6 +968,8 @@ win32_io_reader_new_overlapped(HANDLE handle,
 	whe = xcalloc(1, sizeof *whe);
 	whe->handle = handle;
 	whe->backend = WIN32_HANDLE_EVENT_IOCP;
+	whe->offset = offset;
+	whe->use_offset = use_offset;
 	whe->input = evbuffer_new();
 	if (whe->input == NULL) {
 		free(whe);
@@ -982,6 +995,20 @@ win32_io_reader_new_overlapped(HANDLE handle,
 	if (events != 0)
 		win32_io_service_enqueue_endpoint(&whe->endpoint, events);
 	return (&whe->endpoint);
+}
+
+struct win32_io_endpoint *
+win32_io_reader_new_overlapped(HANDLE handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_reader_new_iocp(handle, 0, 0, eventcb, arg));
+}
+
+struct win32_io_endpoint *
+win32_io_reader_new_file(HANDLE handle, uint64_t offset,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	return (win32_io_reader_new_iocp(handle, offset, 1, eventcb, arg));
 }
 
 static void
@@ -1220,6 +1247,13 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 	memcpy(whw->iocp_buf, EVBUFFER_DATA(whw->output), size);
 
 	memset(&whw->overlapped, 0, sizeof whw->overlapped);
+	if (whw->append) {
+		whw->overlapped.Offset = 0xffffffff;
+		whw->overlapped.OffsetHigh = 0xffffffff;
+	} else if (whw->use_offset) {
+		whw->overlapped.Offset = (DWORD)(whw->offset & 0xffffffff);
+		whw->overlapped.OffsetHigh = (DWORD)(whw->offset >> 32);
+	}
 	ResetEvent(whw->complete);
 	whw->iocp_size = size;
 	whw->pending = 1;
@@ -1269,6 +1303,8 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
 	if (nwritten > whw->iocp_size)
 		nwritten = whw->iocp_size;
 	evbuffer_drain(whw->output, nwritten);
+	if (whw->use_offset && !whw->append)
+		whw->offset += nwritten;
 	whw->iocp_size = 0;
 	events = win32_handle_writer_iocp_start(whw);
 
@@ -1328,8 +1364,8 @@ win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
 }
 
 static struct win32_handle_writer *
-win32_handle_writer_new_iocp(HANDLE *handle,
-    void (*eventcb)(void *, uint32_t), void *arg)
+win32_handle_writer_new_iocp(HANDLE *handle, uint64_t offset, int use_offset,
+    int append, void (*eventcb)(void *, uint32_t), void *arg, int borrowed)
 {
 	struct win32_handle_writer	*whw;
 	uint32_t			 events;
@@ -1343,7 +1379,11 @@ win32_handle_writer_new_iocp(HANDLE *handle,
 
 	whw = xcalloc(1, sizeof *whw);
 	whw->handle = *handle;
+	whw->borrowed = borrowed;
 	whw->backend = WIN32_HANDLE_WRITER_IOCP;
+	whw->offset = offset;
+	whw->use_offset = use_offset;
+	whw->append = append;
 	whw->iocp_buf = xmalloc(WIN32_HANDLE_WRITER_CHUNK);
 	whw->output = evbuffer_new();
 	if (whw->output == NULL) {
@@ -1370,7 +1410,8 @@ win32_handle_writer_new_iocp(HANDLE *handle,
 		free(whw);
 		return (NULL);
 	}
-	*handle = NULL;
+	if (!borrowed)
+		*handle = NULL;
 	EnterCriticalSection(&whw->lock);
 	events = win32_handle_writer_iocp_start(whw);
 	LeaveCriticalSection(&whw->lock);
@@ -1397,7 +1438,21 @@ win32_io_writer_new_overlapped(HANDLE *handle,
 {
 	struct win32_handle_writer	*whw;
 
-	whw = win32_handle_writer_new_iocp(handle, eventcb, arg);
+	whw = win32_handle_writer_new_iocp(handle, 0, 0, 0, eventcb, arg, 0);
+	if (whw == NULL)
+		return (NULL);
+	return (&whw->endpoint);
+}
+
+struct win32_io_endpoint *
+win32_io_writer_new_file_borrowed(HANDLE *handle, uint64_t offset, int append,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	struct win32_handle_writer	*whw;
+
+	whw = win32_handle_writer_new_iocp(handle, offset, 1, append,
+	    eventcb, arg,
+	    1);
 	if (whw == NULL)
 		return (NULL);
 	return (&whw->endpoint);

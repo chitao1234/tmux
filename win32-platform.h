@@ -57,6 +57,8 @@ struct win32_io_endpoint *win32_io_reader_new(HANDLE,
 		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_reader_new_overlapped(HANDLE,
 		     void (*)(void *, uint32_t), void *);
+struct win32_io_endpoint *win32_io_reader_new_file(HANDLE, uint64_t,
+		     void (*)(void *, uint32_t), void *);
 void		 win32_io_endpoint_free(struct win32_io_endpoint *);
 void		 win32_io_reader_drain(struct win32_io_endpoint *,
 		     struct evbuffer *);
@@ -72,6 +74,8 @@ struct win32_io_endpoint *win32_io_writer_new(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_writer_new_overlapped(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
+struct win32_io_endpoint *win32_io_writer_new_file_borrowed(HANDLE *,
+		     uint64_t, int, void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_writer_new_borrowed(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 int		 win32_io_writer_write(struct win32_io_endpoint *,

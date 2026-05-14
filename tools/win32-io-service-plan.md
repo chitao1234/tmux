@@ -629,3 +629,27 @@ barrier:
 
 This prevents teardown from freeing reader or writer endpoint memory while the
 IOCP thread can still reference it.
+
+## Overlapped File Endpoint Slice
+
+Path-backed Win32 client file transfers now use IOCP-backed regular-file
+endpoints:
+
+- the IOCP reader and writer backends can issue offset-aware operations for
+  regular files while preserving the offsetless pipe mode used by pane and job
+  pipes;
+- path-backed `MSG_READ_OPEN` opens regular files with `CreateFileW` and
+  `FILE_FLAG_OVERLAPPED`, then sends `MSG_READ` and `MSG_READ_DONE` from the
+  shared service reader instead of a synchronous client event-path read loop;
+- path-backed `MSG_WRITE_OPEN` opens regular files with `CreateFileW` and
+  `FILE_FLAG_OVERLAPPED`, then sends `MSG_WRITE_ACK` only after IOCP write
+  completions drain bytes to the destination;
+- append writes use the Windows append-offset sentinel while normal writes
+  advance an explicit endpoint offset after each successful completion;
+- stdin, stdout, stderr, and console text output remain on the existing
+  worker-backed borrowed-handle path so console UTF-8 and CRLF behavior is not
+  changed by the regular-file migration.
+
+This removes regular filesystem transfers from the blocking worker backend
+without changing the file-transfer protocol window, ACK, close-after-drain, or
+stdio/console behavior.

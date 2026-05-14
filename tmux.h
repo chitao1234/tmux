@@ -1992,6 +1992,9 @@ struct client_file {
 #ifdef TMUX_WIN32
 	struct win32_io_endpoint		*win32_writer;
 	struct win32_io_endpoint		*win32_reader;
+	HANDLE				 win32_handle;
+	uint64_t			 win32_offset;
+	int				 win32_append;
 #endif
 
 	int				 flags;
