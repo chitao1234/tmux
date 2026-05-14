@@ -724,6 +724,9 @@ service writer queue:
   instead of allowing the pane-owned queue to grow without bound;
 - `win32_job_write()` applies the same cap to job stdin, covering popup and
   pipe-pane style producers that feed job input through tmux-side buffers;
+- `paste-buffer` now propagates pane input write failure as a command error,
+  so the largest direct pane input command does not silently ignore a capped
+  Win32 stdin queue;
 - the IOCP writer ordering and close-after-drain behavior are unchanged. This
   slice only bounds the compatibility queues that exist above the service
   writer because several tmux input producers still have fire-and-forget

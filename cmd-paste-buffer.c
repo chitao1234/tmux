@@ -43,27 +43,30 @@ const struct cmd_entry cmd_paste_buffer_entry = {
 	.exec = cmd_paste_buffer_exec
 };
 
-static void
+static int
 cmd_paste_buffer_write(struct window_pane *wp, const char *buf, size_t len)
 {
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL) {
-		win32_pane_write(wp, buf, len);
-		return;
+		if (win32_pane_write(wp, buf, len) == -1)
+			return (-1);
+		return (0);
 	}
 #endif
-	bufferevent_write(wp->event, buf, len);
+	return (bufferevent_write(wp->event, buf, len));
 }
 
-static void
+static int
 cmd_paste_buffer_paste(struct window_pane *wp, const char *buf, size_t len)
 {
 	char	*cp;
 	size_t	 n;
+	int	 ret;
 
 	n = utf8_stravisx(&cp, buf, len, VIS_SAFE|VIS_NOSLASH);
-	cmd_paste_buffer_write(wp, cp, n);
+	ret = cmd_paste_buffer_write(wp, cp, n);
 	free(cp);
+	return (ret);
 }
 
 static enum cmd_retval
@@ -106,8 +109,9 @@ cmd_paste_buffer_exec(struct cmd *self, struct cmdq_item *item)
 		}
 		seplen = strlen(sepstr);
 
-		if (bracket && (wp->screen->mode & MODE_BRACKETPASTE))
-			cmd_paste_buffer_write(wp, "\033[200~", 6);
+		if (bracket && (wp->screen->mode & MODE_BRACKETPASTE) &&
+		    cmd_paste_buffer_write(wp, "\033[200~", 6) != 0)
+			goto fail;
 
 		bufdata = paste_buffer_data(pb, &bufsize);
 		bufend = bufdata + bufsize;
@@ -117,28 +121,44 @@ cmd_paste_buffer_exec(struct cmd *self, struct cmdq_item *item)
 			if (line == NULL)
 				break;
 			len = line - bufdata;
-			if (args_has(args, 'S'))
-				cmd_paste_buffer_write(wp, bufdata, len);
-			else
-				cmd_paste_buffer_paste(wp, bufdata, len);
-			cmd_paste_buffer_write(wp, sepstr, seplen);
+			if (args_has(args, 'S')) {
+				if (cmd_paste_buffer_write(wp, bufdata,
+				    len) != 0)
+					goto fail;
+			} else {
+				if (cmd_paste_buffer_paste(wp, bufdata,
+				    len) != 0)
+					goto fail;
+			}
+			if (cmd_paste_buffer_write(wp, sepstr, seplen) != 0)
+				goto fail;
 
 			bufdata = line + 1;
 		}
 		if (bufdata != bufend) {
 			len = bufend - bufdata;
-			if (args_has(args, 'S'))
-				cmd_paste_buffer_write(wp, bufdata, len);
-			else
-				cmd_paste_buffer_paste(wp, bufdata, len);
+			if (args_has(args, 'S')) {
+				if (cmd_paste_buffer_write(wp, bufdata,
+				    len) != 0)
+					goto fail;
+			} else {
+				if (cmd_paste_buffer_paste(wp, bufdata,
+				    len) != 0)
+					goto fail;
+			}
 		}
 
-		if (bracket && (wp->screen->mode & MODE_BRACKETPASTE))
-			cmd_paste_buffer_write(wp, "\033[201~", 6);
+		if (bracket && (wp->screen->mode & MODE_BRACKETPASTE) &&
+		    cmd_paste_buffer_write(wp, "\033[201~", 6) != 0)
+			goto fail;
 	}
 
 	if (pb != NULL && args_has(args, 'd'))
 		paste_free(pb);
 
 	return (CMD_RETURN_NORMAL);
+
+fail:
+	cmdq_error(item, "pane input failed: %s", strerror(errno));
+	return (CMD_RETURN_ERROR);
 }
