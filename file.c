@@ -47,6 +47,7 @@ static void	file_write_acknowledge(struct client_file *, size_t, int);
 #ifdef TMUX_WIN32
 static void	file_write_win32_callback(void *);
 static void	file_write_win32_error_callback(void *);
+static void	file_write_win32_event_callback(void *, uint32_t);
 static void	file_read_win32_callback(void *);
 static void	file_read_win32_done_callback(void *);
 static void	file_read_win32_event_callback(void *, uint32_t);
@@ -697,8 +698,8 @@ file_write_win32_start(struct client_file *cf)
 		errno = EBADF;
 		return (-1);
 	}
-	cf->win32_writer = win32_handle_writer_new_borrowed(&handle,
-	    file_write_win32_callback, file_write_win32_error_callback, cf);
+	cf->win32_writer = win32_handle_writer_new_events_borrowed(&handle,
+	    file_write_win32_event_callback, cf);
 	if (cf->win32_writer == NULL) {
 		errno = EIO;
 		return (-1);
@@ -801,6 +802,18 @@ file_write_win32_error_callback(void *arg)
 	if (cf->fd == -1 && cf->win32_writer == NULL)
 		return;
 	file_write_win32_fail(cf, EIO);
+}
+
+static void
+file_write_win32_event_callback(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_ERROR) {
+		file_write_win32_error_callback(arg);
+		return;
+	}
+	if (events & (WIN32_IO_EVENT_WRITE_DRAINED|
+	    WIN32_IO_EVENT_WRITE_CLOSED))
+		file_write_win32_callback(arg);
 }
 
 static void

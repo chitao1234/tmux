@@ -436,3 +436,15 @@ The old split read/error reader constructor has been removed:
   of separate read, error, and event callbacks;
 - reader dispatch now always delivers the explicit reason mask, matching all
   remaining reader consumers.
+
+## Explicit Writer Event API Slice
+
+The service now exposes explicit writer event reasons to callers:
+
+- `win32_handle_writer_new_events()` and
+  `win32_handle_writer_new_events_borrowed()` let callers receive write
+  drained, write closed, and error reason masks;
+- the existing split write/error constructors remain as compatibility shims
+  while pane, job, tty, and client writers migrate;
+- Win32 client file writes are the first migrated consumer, using explicit
+  writer events before sending existing write ACKs or failure callbacks.

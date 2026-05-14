@@ -73,6 +73,10 @@ struct win32_handle_writer *win32_handle_writer_new_cb(HANDLE *,
 		     void (*)(void *), void (*)(void *), void *);
 struct win32_handle_writer *win32_handle_writer_new_borrowed(HANDLE *,
 		     void (*)(void *), void (*)(void *), void *);
+struct win32_handle_writer *win32_handle_writer_new_events(HANDLE *,
+		     void (*)(void *, uint32_t), void *);
+struct win32_handle_writer *win32_handle_writer_new_events_borrowed(HANDLE *,
+		     void (*)(void *, uint32_t), void *);
 void		 win32_handle_writer_free(struct win32_handle_writer *);
 int		 win32_handle_writer_write(struct win32_handle_writer *,
 		     const void *, size_t);
