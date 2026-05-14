@@ -63,6 +63,8 @@ static int	server_client_win32_resize(struct client *, struct imsg *);
 static int	server_client_win32_tty_input(struct client *, struct imsg *);
 static int	server_client_win32_identify_handle(struct client *,
 		    struct imsg *, int);
+static int	server_client_win32_identify_size(struct client *,
+		    struct imsg *);
 #endif
 
 /* Compare client windows. */
@@ -2307,6 +2309,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	case MSG_IDENTIFY_WIN32_STDIN:
 	case MSG_IDENTIFY_WIN32_STDOUT:
 	case MSG_IDENTIFY_WIN32_TERMINAL:
+	case MSG_IDENTIFY_WIN32_SIZE:
 #endif
 	case MSG_IDENTIFY_TERM:
 	case MSG_IDENTIFY_TERMINFO:
@@ -2678,6 +2681,35 @@ server_client_win32_identify_handle(struct client *c, struct imsg *imsg,
 	log_debug("client %p %s duplicated handle %p", c, name, handle);
 	return (0);
 }
+
+static int
+server_client_win32_identify_size(struct client *c, struct imsg *imsg)
+{
+	struct msg_win32_terminal_size	 size;
+	ssize_t				 datalen;
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen != sizeof size)
+		return (-1);
+	if (c->win32_console) {
+		log_debug("client %p IDENTIFY_WIN32_SIZE rejected: relay "
+		    "client", c);
+		return (-1);
+	}
+	if (c->win32_stdin == NULL || c->win32_stdout == NULL) {
+		log_debug("client %p IDENTIFY_WIN32_SIZE rejected: missing "
+		    "direct handles", c);
+		return (-1);
+	}
+
+	memcpy(&size, imsg->data, sizeof size);
+	if (size.sx == 0 || size.sy == 0)
+		return (-1);
+	tty_set_size(&c->tty, size.sx, size.sy, size.xpixel, size.ypixel);
+	log_debug("client %p IDENTIFY_WIN32_SIZE %ux%u (%ux%u)", c,
+	    size.sx, size.sy, size.xpixel, size.ypixel);
+	return (0);
+}
 #endif
 
 /* Handle identify message. */
@@ -2790,6 +2822,10 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		log_debug("client %p IDENTIFY_WIN32_TERMINAL %ux%u (%ux%u)",
 		    c, size.sx, size.sy, size.xpixel, size.ypixel);
 		break;
+	case MSG_IDENTIFY_WIN32_SIZE:
+		if (server_client_win32_identify_size(c, imsg) != 0)
+			return (-1);
+		break;
 #endif
 	case MSG_IDENTIFY_ENVIRON:
 		if (datalen == 0 || data[datalen - 1] != '\0')
@@ -2842,8 +2878,14 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		}
 	}
 	else if (c->win32_stdin != NULL && c->win32_stdout != NULL) {
+		u_int sx = c->tty.sx, sy = c->tty.sy;
+		u_int xpixel = c->tty.xpixel, ypixel = c->tty.ypixel;
+
 		if (tty_init(&c->tty, c) == 0) {
-			tty_resize(&c->tty);
+			if (sx != 0 && sy != 0)
+				tty_set_size(&c->tty, sx, sy, xpixel, ypixel);
+			else
+				tty_resize(&c->tty);
 			c->flags |= CLIENT_TERMINAL;
 		}
 	}

@@ -27,6 +27,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,8 @@ static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_handle_tty_enabled(void);
 static int		 client_win32_handle_tty_output_available(void);
 static int		 client_win32_handle_tty_input_available(void);
+static void		 client_win32_get_terminal_size(
+			     struct msg_win32_terminal_size *);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -412,6 +415,36 @@ client_win32_handle_tty_input_available(void)
 	if (GetConsoleMode(hin, &mode))
 		return (0);
 	return (1);
+}
+
+static void
+client_win32_get_terminal_size(struct msg_win32_terminal_size *size)
+{
+	const char	*errstr, *value;
+	long long	 ll;
+
+	memset(size, 0, sizeof *size);
+	if (client_is_console &&
+	    win32_terminal_get_size(NULL, &size->sx, &size->sy,
+	    &size->xpixel, &size->ypixel) == 0)
+		return;
+
+	value = getenv("COLUMNS");
+	if (value != NULL && *value != '\0') {
+		ll = strtonum(value, 1, UINT_MAX, &errstr);
+		if (errstr == NULL)
+			size->sx = ll;
+	}
+	value = getenv("LINES");
+	if (value != NULL && *value != '\0') {
+		ll = strtonum(value, 1, UINT_MAX, &errstr);
+		if (errstr == NULL)
+			size->sy = ll;
+	}
+	if (size->sx == 0)
+		size->sx = 80;
+	if (size->sy == 0)
+		size->sy = 24;
 }
 
 static void
@@ -1084,16 +1117,13 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 			proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1,
 			    &handle, sizeof handle);
 		}
+		client_win32_get_terminal_size(&size);
+		proc_send(client_peer, MSG_IDENTIFY_WIN32_SIZE, -1,
+		    &size, sizeof size);
 	}
 	if (client_is_console && !client_win32_handle_tty_input &&
 	    !(client_flags & CLIENT_CONTROL)) {
-		if (win32_terminal_get_size(NULL, &size.sx, &size.sy,
-		    &size.xpixel, &size.ypixel) != 0) {
-			size.sx = 80;
-			size.sy = 24;
-			size.xpixel = 0;
-			size.ypixel = 0;
-		}
+		client_win32_get_terminal_size(&size);
 		proc_send(client_peer, MSG_IDENTIFY_WIN32_TERMINAL, -1,
 		    &size, sizeof size);
 	}

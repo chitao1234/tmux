@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 12
+#define PROTOCOL_VERSION 13
 
 /* Message types. */
 enum msgtype {
@@ -42,6 +42,7 @@ enum msgtype {
 	MSG_IDENTIFY_WIN32_STDIN,
 	MSG_IDENTIFY_WIN32_STDOUT,
 	MSG_IDENTIFY_WIN32_TERMINAL,
+	MSG_IDENTIFY_WIN32_SIZE,
 
 	MSG_COMMAND = 200,
 	MSG_DETACH,

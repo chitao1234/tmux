@@ -76,6 +76,8 @@ The removal decision is data-driven:
   and rejects mixed relay/direct identify state.
 - `server-client.c` still treats `MSG_IDENTIFY_WIN32_TERMINAL` as the legacy
   console relay size signal.
+- Direct clients send `MSG_IDENTIFY_WIN32_SIZE` after stdin/stdout handles so
+  the server can preserve the initial terminal size across `tty_init()`.
 - `tty.c` opens server-owned Win32 input and output handles through the Win32
   I/O service when they are present on the client object.
 - `tty.c` treats EOF on a server-owned direct input handle as an input
@@ -151,16 +153,17 @@ Direct-handle attach should follow this sequence:
    features, terminfo, and environment.
 3. The client sends `MSG_IDENTIFY_CLIENTPID`.
 4. Direct-handle clients send both `MSG_IDENTIFY_WIN32_STDIN` and
-   `MSG_IDENTIFY_WIN32_STDOUT`. Native console clients do not use this flow
-   until there is a proven design for using console handles from the detached
-   server process.
+   `MSG_IDENTIFY_WIN32_STDOUT`, followed by `MSG_IDENTIFY_WIN32_SIZE` for the
+   initial terminal size. Native console clients do not use this flow until
+   there is a proven design for using console handles from the detached server
+   process.
 5. The server duplicates and validates the handles before
    `MSG_IDENTIFY_DONE` completes.
 6. `MSG_IDENTIFY_DONE` calls the existing terminal initialization path.
 7. `tty_open()` creates `tty->win32_out` and, once enabled,
    `tty->win32_in`.
 8. Commands attach normally and the server sends `MSG_READY`.
-9. Direct-handle clients use the generic `MSG_RESIZE` / server-side size path.
+9. Direct-handle clients use the direct size identify path for initial size.
    Relay-specific `MSG_WIN32_TTY_RESIZE` remains relay-only during migration.
 
 Relay fallback should keep its current handshake while it exists:
@@ -252,6 +255,9 @@ This means:
 
 - direct-handle sessions should use the server-side size helpers rather than
   the legacy console-relay identify path;
+- direct-handle sessions should preserve an initial size supplied by the
+  client when the server cannot query a Win32 console size for non-console
+  handles;
 - the client-side console mode shim should remain compatibility-only;
 - resize propagation must stay correct when the direct-handle path is active.
 
@@ -325,6 +331,7 @@ There are two possible outcomes:
 ### Slice D: move resize and terminal state
 
 - Use server-side size helpers for direct-handle clients.
+- Preserve the client-supplied initial size with `MSG_IDENTIFY_WIN32_SIZE`.
 - Keep `MSG_WIN32_TTY_RESIZE` relay-only.
 - Remove assumptions that a Win32 terminal client implies
   `c->win32_console`.
