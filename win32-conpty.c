@@ -103,18 +103,81 @@ typedef NTSTATUS (NTAPI *win32_nt_query_information_process)(HANDLE,
     PROCESSINFOCLASS, PVOID, ULONG, PULONG);
 
 static int
-win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
-    int inherit_write)
+win32_make_pipe_flags(HANDLE *readp, HANDLE *writep, int inherit_read,
+    int inherit_write, DWORD read_flags, DWORD write_flags)
 {
-	SECURITY_ATTRIBUTES sa;
-	HANDLE		    read, write;
-	DWORD		    error;
+	static LONG	    serial;
+	SECURITY_ATTRIBUTES rsa, wsa;
+	OVERLAPPED	    ov;
+	HANDLE		    event = NULL, read = INVALID_HANDLE_VALUE;
+	HANDLE		    write = INVALID_HANDLE_VALUE;
+	wchar_t		    name[128];
+	DWORD		    error, n;
+	int		    pending = 0, connected = 0;
 
-	memset(&sa, 0, sizeof sa);
-	sa.nLength = sizeof sa;
-	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(&read, &write, &sa, 0))
+	*readp = NULL;
+	*writep = NULL;
+
+	if (swprintf(name, nitems(name), L"\\\\.\\pipe\\tmux-%lu-%ld-%llx",
+	    (unsigned long)GetCurrentProcessId(),
+	    (long)InterlockedIncrement(&serial),
+	    (unsigned long long)GetTickCount64()) < 0) {
+		SetLastError(ERROR_FILENAME_EXCED_RANGE);
 		return (-1);
+	}
+
+	memset(&rsa, 0, sizeof rsa);
+	rsa.nLength = sizeof rsa;
+	rsa.bInheritHandle = inherit_read;
+	memset(&wsa, 0, sizeof wsa);
+	wsa.nLength = sizeof wsa;
+	wsa.bInheritHandle = inherit_write;
+
+	read = CreateNamedPipeW(name, PIPE_ACCESS_INBOUND|read_flags,
+	    PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT, 1, 0, 0, 0, &rsa);
+	if (read == INVALID_HANDLE_VALUE)
+		return (-1);
+
+	if (read_flags & FILE_FLAG_OVERLAPPED) {
+		memset(&ov, 0, sizeof ov);
+		event = CreateEventW(NULL, TRUE, FALSE, NULL);
+		if (event == NULL)
+			goto fail;
+		ov.hEvent = event;
+		if (ConnectNamedPipe(read, &ov))
+			connected = 1;
+		else {
+			error = GetLastError();
+			if (error == ERROR_IO_PENDING)
+				pending = 1;
+			else if (error == ERROR_PIPE_CONNECTED)
+				connected = 1;
+			else
+				goto fail;
+		}
+	}
+
+	write = CreateFileW(name, GENERIC_WRITE, 0, &wsa, OPEN_EXISTING,
+	    FILE_ATTRIBUTE_NORMAL|write_flags, NULL);
+	if (write == INVALID_HANDLE_VALUE)
+		goto fail;
+
+	if (read_flags & FILE_FLAG_OVERLAPPED) {
+		if (pending &&
+		    !GetOverlappedResult(read, &ov, &n, TRUE))
+			goto fail;
+	} else if (!ConnectNamedPipe(read, NULL)) {
+		error = GetLastError();
+		if (error != ERROR_PIPE_CONNECTED)
+			goto fail;
+		connected = 1;
+	} else
+		connected = 1;
+
+	if (!connected && !pending) {
+		SetLastError(ERROR_PIPE_NOT_CONNECTED);
+		goto fail;
+	}
 	if (!inherit_read &&
 	    !SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0))
 		goto fail;
@@ -123,14 +186,28 @@ win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
 		goto fail;
 	*readp = read;
 	*writep = write;
+	if (event != NULL)
+		CloseHandle(event);
 	return (0);
 
 fail:
 	error = GetLastError();
-	CloseHandle(read);
-	CloseHandle(write);
+	if (event != NULL)
+		CloseHandle(event);
+	if (read != INVALID_HANDLE_VALUE)
+		CloseHandle(read);
+	if (write != INVALID_HANDLE_VALUE)
+		CloseHandle(write);
 	SetLastError(error);
 	return (-1);
+}
+
+static int
+win32_make_pipe(HANDLE *readp, HANDLE *writep, int inherit_read,
+    int inherit_write)
+{
+	return (win32_make_pipe_flags(readp, writep, inherit_read,
+	    inherit_write, 0, 0));
 }
 
 static win32_nt_query_information_process

@@ -545,3 +545,16 @@ reader, writer, and process-specific opaque handles:
 - this removes another compatibility seam before the overlapped/IOCP backend
   work. The underlying read/write backends are still synchronous worker
   threads, and process waits still use `RegisterWaitForSingleObject`.
+
+## Named Pipe Creation Slice
+
+Pane and job pipes are now created through a named-pipe helper instead of
+`CreatePipe`:
+
+- the helper preserves the existing synchronous behavior for current callers;
+- each pipe endpoint can independently request inheritable handles and
+  `FILE_FLAG_OVERLAPPED` when a later backend is ready to consume it;
+- current pane and job call sites still pass no overlapped flags, so this slice
+  is a behavior-preserving prerequisite rather than an I/O backend change;
+- this removes the `CreatePipe` limitation that prevented parent-side pipe
+  handles from being opened in overlapped mode for future IOCP endpoints.
