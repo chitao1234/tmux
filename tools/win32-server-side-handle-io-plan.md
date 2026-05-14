@@ -398,7 +398,8 @@ This script creates isolated temporary log directories, runs native `tmux.exe`
 clients, disables the console relay with `TMUX_WIN32_CONSOLE_RELAY=0`, and
 asserts that the server receives direct stdin/stdout handles and direct size
 messages without using `MSG_IDENTIFY_WIN32_TERMINAL`. It also includes a
-redirected attach/detach check and a sustained direct-output stress case.
+redirected attach/detach check, a sustained direct-output stress case, and a
+direct stdin EOF half-close check.
 
 ### Baseline Regression
 

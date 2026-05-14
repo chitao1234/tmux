@@ -356,6 +356,83 @@ function Invoke-DirectOutputStressSmoke {
     }
 }
 
+function Invoke-DirectInputEofSmoke {
+    param([string]$Root)
+
+    $caseDir = New-CaseDirectory $Root "direct-input-eof"
+    $config = Join-Path $caseDir "empty.conf"
+    $done = Join-Path $caseDir "eof.done"
+    $label = "$LabelPrefix-eof-" + [Guid]::NewGuid().ToString("N")
+    $run = $null
+    New-Item -ItemType File -Path $config | Out-Null
+
+    Push-Location $caseDir
+    try {
+        $env:TMUX = $null
+        $env:TMUX_WIN32_HANDLE_TTY = $null
+        $env:TMUX_WIN32_CONSOLE_RELAY = "0"
+        $env:COLUMNS = "110"
+        $env:LINES = "35"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "eof", "cmd.exe") | Out-Null
+
+        $run = Start-TmuxClientProcess -CaseDir $caseDir -Arguments @(
+            "-f",
+            $config,
+            "-vv",
+            "-L",
+            $label,
+            "attach-session",
+            "-t",
+            "eof"
+        )
+
+        Start-Sleep -Milliseconds 750
+        $run.Process.StandardInput.Close()
+
+        $command = "echo TMUX_DIRECT_EOF_OUTPUT & for /l %i in (1,1,80) do @echo EOF_AFTER_CLOSE_%i & echo done > `"$done`""
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "eof", "-l", $command) | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "send-keys", "-t", "eof", "Enter") | Out-Null
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $done)) {
+            if ([DateTime]::UtcNow -gt $deadline) {
+                throw "direct input EOF output command did not finish"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        Assert-True -Condition (-not $run.Process.HasExited) `
+            -Message "direct input EOF closed the attach client before output completed"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "detach-client", "-s", "eof") | Out-Null
+        $result = Wait-TmuxClientProcess $run 5000 "direct input EOF smoke"
+        Assert-True -Condition ($result.ExitCode -eq 0) `
+            -Message "direct input EOF smoke exited with code $($result.ExitCode)"
+        Assert-True -Condition ($result.Stdout.Contains("TMUX_DIRECT_EOF_OUTPUT")) `
+            -Message "direct input EOF smoke did not preserve output after stdin closed"
+
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") | Out-Null
+
+        $logs = @(Get-CaseLogs $caseDir)
+        Assert-AnyLogMatch $logs "using direct Win32 terminal output and input" "direct input EOF smoke did not use direct Win32 terminal I/O"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDOUT duplicated" "direct input EOF smoke did not duplicate stdout"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct input EOF smoke did not duplicate stdin"
+        Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 110x35" "direct input EOF smoke did not send the expected size"
+        Assert-AnyLogMatch $logs "tty_win32_in_close" "direct input EOF smoke did not close direct input as a half-close"
+        Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct input EOF smoke unexpectedly used the relay identify path"
+        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct input EOF smoke unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct input EOF smoke logged an I/O failure"
+    } finally {
+        if ($null -ne $run -and -not $run.Process.HasExited) {
+            $run.Process.Kill()
+        }
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Pop-Location
+    }
+}
+
 if (-not (Test-Path -LiteralPath $TmuxPath -PathType Leaf)) {
     throw "tmux executable not found: $TmuxPath"
 }
@@ -376,6 +453,7 @@ try {
     Invoke-DirectCommandSmoke $root
     Invoke-DirectAttachDetachSmoke $root
     Invoke-DirectOutputStressSmoke $root
+    Invoke-DirectInputEofSmoke $root
     Write-Host "Win32 direct-handle smoke passed. Logs: $root"
     if (-not $KeepLogs) {
         Remove-Item -LiteralPath $root -Recurse -Force

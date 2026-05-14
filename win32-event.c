@@ -1196,10 +1196,11 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 
 	if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
 		DWORD error = GetLastError();
+		int eof = win32_handle_event_error_is_eof(error);
 
 		EnterCriticalSection(&whe->lock);
 		if (whe->stopping) {
-			if (win32_handle_event_error_is_eof(error))
+			if (eof)
 				whe->state = WIN32_HANDLE_EVENT_EOF;
 			else
 				whe->state = WIN32_HANDLE_EVENT_ERROR;
@@ -1207,15 +1208,17 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 			LeaveCriticalSection(&whe->lock);
 			return (-1);
 		}
-		if (win32_handle_event_error_is_eof(error))
+		if (eof)
 			whe->state = WIN32_HANDLE_EVENT_EOF;
 		else
 			whe->state = WIN32_HANDLE_EVENT_ERROR;
 		whe->error = error;
 		win32_handle_event_update_ready(whe);
 		LeaveCriticalSection(&whe->lock);
-		log_debug("%s: ReadFile failed: %s", __func__,
-		    win32_strerror(error));
+		if (!eof) {
+			log_debug("%s: ReadFile failed: %s", __func__,
+			    win32_strerror(error));
+		}
 		win32_io_service_enqueue_reader(whe);
 		return (-1);
 	}
