@@ -291,3 +291,20 @@ Worker-backed read handles now preserve EOF separately from hard read errors:
 - the read backend is still worker-thread based and the public
   `win32_handle_event_*` compatibility API remains until endpoint objects
   replace it.
+
+## Writer State Slice
+
+Worker-backed write handles now expose explicit write-side state queries:
+
+- the writer backend uses one state machine for running, closing, closed, and
+  error instead of independent `closing`, `closed`, and `error` booleans;
+- the public compatibility API no longer exposes a generic
+  `win32_handle_writer_done()` predicate;
+- callers that want to enqueue more stdin bytes use
+  `win32_handle_writer_writable()`;
+- callers that only need to know whether queued bytes have drained use
+  `win32_handle_writer_drained()`;
+- `win32_handle_writer_closed()` and `win32_handle_writer_error()` are bridge
+  helpers for the final write-closed/write-error event model;
+- this keeps the existing worker backend and callbacks, but removes another
+  collapsed lifecycle predicate from pane, job, tty, and file paths.

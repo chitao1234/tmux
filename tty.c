@@ -336,7 +336,7 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 		size_t	nsend = size;
 
 		if (tty->win32_out_pending != 0 ||
-		    win32_handle_writer_buffered(tty->win32_out) != 0)
+		    !win32_handle_writer_drained(tty->win32_out))
 			return;
 		if (tty->win32_out_pending >= TTY_WIN32_OUT_PENDING_LIMIT)
 			return;
@@ -477,7 +477,7 @@ tty_win32_out_drained(struct tty *tty)
 		return (1);
 	if (tty->win32_out_pending != 0)
 		return (0);
-	return (win32_handle_writer_buffered(tty->win32_out) == 0);
+	return (win32_handle_writer_drained(tty->win32_out));
 }
 #endif
 

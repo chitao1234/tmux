@@ -782,7 +782,7 @@ file_write_win32_callback(void *arg)
 	file_write_acknowledge(cf, size, 0);
 	if (cf->cb != NULL)
 		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-	if (cf->closed && win32_handle_writer_buffered(cf->win32_writer) == 0) {
+	if (cf->closed && win32_handle_writer_drained(cf->win32_writer)) {
 		file_write_win32_close(cf);
 		file_free(cf);
 	}

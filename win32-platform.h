@@ -69,7 +69,10 @@ int		 win32_handle_writer_write(struct win32_handle_writer *,
 		     const void *, size_t);
 void		 win32_handle_writer_close(struct win32_handle_writer *);
 size_t		 win32_handle_writer_buffered(struct win32_handle_writer *);
-int		 win32_handle_writer_done(struct win32_handle_writer *);
+int		 win32_handle_writer_drained(struct win32_handle_writer *);
+int		 win32_handle_writer_writable(struct win32_handle_writer *);
+int		 win32_handle_writer_closed(struct win32_handle_writer *);
+int		 win32_handle_writer_error(struct win32_handle_writer *);
 struct win32_process_event *win32_process_event_new(HANDLE,
 		     void (*)(void *), void *);
 void		 win32_process_event_free(struct win32_process_event *);

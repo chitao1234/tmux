@@ -24,6 +24,13 @@ enum win32_handle_event_state {
 	WIN32_HANDLE_EVENT_ERROR
 };
 
+enum win32_handle_writer_state {
+	WIN32_HANDLE_WRITER_RUNNING,
+	WIN32_HANDLE_WRITER_CLOSING,
+	WIN32_HANDLE_WRITER_CLOSED,
+	WIN32_HANDLE_WRITER_ERROR
+};
+
 static int
 win32_socket_errno(int error)
 {
@@ -130,13 +137,11 @@ struct win32_handle_writer {
 	void		(*writecb)(void *);
 	void		(*errorcb)(void *);
 	void		 *arg;
-	int		 closing;
-	int		 error;
+	enum win32_handle_writer_state state;
 	int		 borrowed;
 	int		 stop;
 	int		 pending;
 	int		 active;
-	int		 closed;
 };
 
 struct win32_process_event {
@@ -343,7 +348,7 @@ static void
 win32_io_service_dispatch_writers(void)
 {
 	struct win32_handle_writer	*whw;
-	int				 error;
+	enum win32_handle_writer_state	 state;
 	size_t				 buffered;
 
 	for (;;) {
@@ -358,11 +363,11 @@ win32_io_service_dispatch_writers(void)
 			break;
 
 		EnterCriticalSection(&whw->lock);
-		error = whw->error;
+		state = whw->state;
 		buffered = EVBUFFER_LENGTH(whw->output);
 		LeaveCriticalSection(&whw->lock);
 
-		if (error) {
+		if (state == WIN32_HANDLE_WRITER_ERROR) {
 			if (whw->errorcb != NULL)
 				whw->errorcb(whw->arg);
 		} else if (buffered == 0 && whw->writecb != NULL)
@@ -732,11 +737,12 @@ win32_handle_writer_thread(void *arg)
 			EnterCriticalSection(&whw->lock);
 			if (whw->stop)
 				goto stop;
-			if (whw->error || whw->handle == NULL)
+			if (whw->state == WIN32_HANDLE_WRITER_ERROR ||
+			    whw->handle == NULL)
 				goto stop;
 			size = EVBUFFER_LENGTH(whw->output);
 			if (size == 0) {
-				if (whw->closing)
+				if (whw->state == WIN32_HANDLE_WRITER_CLOSING)
 					goto stop;
 				ResetEvent(whw->ready);
 				LeaveCriticalSection(&whw->lock);
@@ -751,8 +757,7 @@ win32_handle_writer_thread(void *arg)
 			written = win32_handle_write(handle, buf, size);
 			if (written == -1 || written == 0) {
 				EnterCriticalSection(&whw->lock);
-				whw->error = 1;
-				whw->closed = 1;
+				whw->state = WIN32_HANDLE_WRITER_ERROR;
 				evbuffer_drain(whw->output,
 				    EVBUFFER_LENGTH(whw->output));
 				handle = whw->handle;
@@ -778,7 +783,8 @@ stop:
 	evbuffer_drain(whw->output, EVBUFFER_LENGTH(whw->output));
 	handle = whw->handle;
 	whw->handle = NULL;
-	whw->closed = 1;
+	if (whw->state != WIN32_HANDLE_WRITER_ERROR)
+		whw->state = WIN32_HANDLE_WRITER_CLOSED;
 	LeaveCriticalSection(&whw->lock);
 	if (handle != NULL && !whw->borrowed)
 		CloseHandle(handle);
@@ -897,7 +903,8 @@ win32_handle_writer_write(struct win32_handle_writer *whw, const void *data,
 		return (0);
 
 	EnterCriticalSection(&whw->lock);
-	if (whw->closing || whw->error || whw->stop || whw->handle == NULL) {
+	if (whw->state != WIN32_HANDLE_WRITER_RUNNING || whw->stop ||
+	    whw->handle == NULL) {
 		LeaveCriticalSection(&whw->lock);
 		errno = EPIPE;
 		return (-1);
@@ -918,11 +925,11 @@ win32_handle_writer_close(struct win32_handle_writer *whw)
 	if (whw == NULL)
 		return;
 	EnterCriticalSection(&whw->lock);
-	if (whw->closing || whw->closed) {
+	if (whw->state != WIN32_HANDLE_WRITER_RUNNING) {
 		LeaveCriticalSection(&whw->lock);
 		return;
 	}
-	whw->closing = 1;
+	whw->state = WIN32_HANDLE_WRITER_CLOSING;
 	SetEvent(whw->ready);
 	LeaveCriticalSection(&whw->lock);
 }
@@ -941,16 +948,57 @@ win32_handle_writer_buffered(struct win32_handle_writer *whw)
 }
 
 int
-win32_handle_writer_done(struct win32_handle_writer *whw)
+win32_handle_writer_drained(struct win32_handle_writer *whw)
 {
-	int	done;
+	int	drained;
 
 	if (whw == NULL)
 		return (1);
 	EnterCriticalSection(&whw->lock);
-	done = whw->closed || whw->error || whw->handle == NULL;
+	drained = (EVBUFFER_LENGTH(whw->output) == 0);
 	LeaveCriticalSection(&whw->lock);
-	return (done);
+	return (drained);
+}
+
+int
+win32_handle_writer_writable(struct win32_handle_writer *whw)
+{
+	int	writable;
+
+	if (whw == NULL)
+		return (0);
+	EnterCriticalSection(&whw->lock);
+	writable = (whw->state == WIN32_HANDLE_WRITER_RUNNING &&
+	    !whw->stop && whw->handle != NULL);
+	LeaveCriticalSection(&whw->lock);
+	return (writable);
+}
+
+int
+win32_handle_writer_closed(struct win32_handle_writer *whw)
+{
+	int	closed;
+
+	if (whw == NULL)
+		return (1);
+	EnterCriticalSection(&whw->lock);
+	closed = (whw->state == WIN32_HANDLE_WRITER_CLOSED ||
+	    whw->handle == NULL);
+	LeaveCriticalSection(&whw->lock);
+	return (closed);
+}
+
+int
+win32_handle_writer_error(struct win32_handle_writer *whw)
+{
+	int	error;
+
+	if (whw == NULL)
+		return (0);
+	EnterCriticalSection(&whw->lock);
+	error = (whw->state == WIN32_HANDLE_WRITER_ERROR);
+	LeaveCriticalSection(&whw->lock);
+	return (error);
 }
 
 static int

@@ -1184,7 +1184,7 @@ win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 		errno = EPIPE;
 		return (-1);
 	}
-	if (win32_handle_writer_done(wp->win32->input_writer)) {
+	if (!win32_handle_writer_writable(wp->win32->input_writer)) {
 		errno = EPIPE;
 		return (-1);
 	}
@@ -1202,7 +1202,7 @@ win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 	}
 	if (win32_pane_flush_input(wp) != 0 &&
 	    (wp->win32->input_writer == NULL ||
-	    win32_handle_writer_done(wp->win32->input_writer))) {
+	    !win32_handle_writer_writable(wp->win32->input_writer))) {
 		errno = EPIPE;
 		return (-1);
 	}
@@ -1666,7 +1666,7 @@ win32_job_write(struct win32_job *wj, const void *data, size_t size)
 		return (-1);
 	}
 	if (wj->event == NULL || wj->stdin_closing ||
-	    win32_handle_writer_done(wj->stdin_writer)) {
+	    !win32_handle_writer_writable(wj->stdin_writer)) {
 		errno = EPIPE;
 		return (-1);
 	}
@@ -1684,7 +1684,7 @@ win32_job_write(struct win32_job *wj, const void *data, size_t size)
 	}
 	if (win32_job_flush_input(wj) != 0 &&
 	    (wj->stdin_writer == NULL ||
-	    win32_handle_writer_done(wj->stdin_writer))) {
+	    !win32_handle_writer_writable(wj->stdin_writer))) {
 		errno = EPIPE;
 		return (-1);
 	}
