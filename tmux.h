@@ -3165,7 +3165,8 @@ void	 status_prompt_clear(struct client *);
 int	 status_prompt_redraw(struct client *);
 int	 status_prompt_key(struct client *, key_code);
 void	 status_prompt_update(struct client *, const char *, const char *);
-void	 status_prompt_load_history(void);
+enum cmd_retval status_prompt_load_history(struct cmdq_item *,
+	     struct cmdq_item **);
 void	 status_prompt_save_history(void);
 const char *status_prompt_type_string(u_int);
 enum prompt_type status_prompt_type(const char *type);

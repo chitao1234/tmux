@@ -1003,3 +1003,17 @@ Win32 popup editor temp-file I/O now uses the I/O service path:
   Windows temp paths with spaces.
 
 The Unix popup editor path remains synchronous and unchanged in backend policy.
+
+## Prompt History Load Slice
+
+Win32 startup prompt-history loading now uses the I/O service path:
+
+- `cfg_done()` keeps the first-client startup barrier in place while prompt
+  history is loaded asynchronously;
+- `status_prompt_load_history()` reads the configured history file through
+  `file_read(NULL, ...)` on Win32, reusing the regular-file I/O service reader;
+- the completion callback parses the final accumulated buffer, then releases
+  both the first-client barrier and the waiting global queue item;
+- missing, invalid, or unreadable history files continue to be logged at debug
+  level without failing server startup;
+- the Unix load path remains synchronous and unchanged in backend policy.

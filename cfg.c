@@ -54,7 +54,7 @@ cfg_client_done(__unused struct cmdq_item *item, __unused void *data)
 }
 
 static enum cmd_retval
-cfg_done(__unused struct cmdq_item *item, __unused void *data)
+cfg_done(struct cmdq_item *item, __unused void *data)
 {
 	if (cfg_finished)
 		return (CMD_RETURN_NORMAL);
@@ -62,12 +62,7 @@ cfg_done(__unused struct cmdq_item *item, __unused void *data)
 
 	cfg_show_causes(NULL);
 
-	if (cfg_item != NULL)
-		cmdq_continue(cfg_item);
-
-	status_prompt_load_history();
-
-	return (CMD_RETURN_NORMAL);
+	return (status_prompt_load_history(item, &cfg_item));
 }
 
 #ifdef TMUX_WIN32

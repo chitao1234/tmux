@@ -33,6 +33,7 @@ static void	 status_message_callback(tmux_event_fd, short, void *);
 static void	 status_timer_callback(tmux_event_fd, short, void *);
 
 static char	*status_prompt_find_history_file(void);
+static void	 status_prompt_load_history_buffer(const void *, size_t);
 static const char *status_prompt_up_history(u_int *, u_int);
 static const char *status_prompt_down_history(u_int *, u_int);
 static void	 status_prompt_add_history(const char *, u_int);
@@ -103,23 +104,117 @@ status_prompt_add_typed_history(char *line)
 		status_prompt_add_history(line, type);
 }
 
-/* Load status prompt history from file. */
-void
-status_prompt_load_history(void)
+/* Load status prompt history from a buffer. */
+static void
+status_prompt_load_history_buffer(const void *bdata, size_t bsize)
 {
+	const char	*end, *start, *line;
+	size_t		 length;
+	char		*tmp;
+
+	if (bsize == 0)
+		return;
+	start = bdata;
+	end = start + bsize;
+	while (start < end) {
+		line = memchr(start, '\n', end - start);
+		if (line != NULL)
+			length = line - start;
+		else
+			length = end - start;
+
+		if (length != 0) {
+			tmp = xmalloc(length + 1);
+			memcpy(tmp, start, length);
+			tmp[length] = '\0';
+			status_prompt_add_typed_history(tmp);
+			free(tmp);
+		}
+
+		if (line == NULL)
+			break;
+		start = line + 1;
+	}
+}
+
+#ifdef TMUX_WIN32
+struct status_prompt_load_history_data {
+	struct cmdq_item	*item;
+	struct cmdq_item	**continue_item;
+};
+
+static void
+status_prompt_load_history_continue(
+    struct status_prompt_load_history_data *data)
+{
+	if (data->continue_item != NULL && *data->continue_item != NULL) {
+		cmdq_continue(*data->continue_item);
+		*data->continue_item = NULL;
+	}
+	cmdq_continue(data->item);
+	free(data);
+}
+
+static void
+status_prompt_load_history_done(__unused struct client *c, const char *path,
+    int error, int closed, struct evbuffer *buffer, void *data)
+{
+	struct status_prompt_load_history_data *ldata = data;
+	void			*bdata = EVBUFFER_DATA(buffer);
+	size_t			 bsize = EVBUFFER_LENGTH(buffer);
+
+	if (!closed)
+		return;
+
+	if (error != 0)
+		log_debug("%s: %s", path, strerror(error));
+	else
+		status_prompt_load_history_buffer(bdata, bsize);
+
+	status_prompt_load_history_continue(ldata);
+}
+#endif
+
+/* Load status prompt history from file. */
+enum cmd_retval
+status_prompt_load_history(struct cmdq_item *item,
+    struct cmdq_item **continue_item)
+{
+#ifndef TMUX_WIN32
 	FILE	*f;
 	char	*history_file, *line, *tmp;
 	size_t	 length;
+#else
+	char	*history_file;
+	struct status_prompt_load_history_data *data;
+#endif
 
-	if ((history_file = status_prompt_find_history_file()) == NULL)
-		return;
+	if ((history_file = status_prompt_find_history_file()) == NULL) {
+		if (continue_item != NULL && *continue_item != NULL) {
+			cmdq_continue(*continue_item);
+			*continue_item = NULL;
+		}
+		return (CMD_RETURN_NORMAL);
+	}
 	log_debug("loading history from %s", history_file);
 
+#ifdef TMUX_WIN32
+	data = xcalloc(1, sizeof *data);
+	data->item = item;
+	data->continue_item = continue_item;
+	file_read(NULL, history_file, status_prompt_load_history_done, data);
+	free(history_file);
+	return (CMD_RETURN_WAIT);
+#else
 	f = fopen(history_file, "r");
 	if (f == NULL) {
 		log_debug("%s: %s", history_file, strerror(errno));
 		free(history_file);
-		return;
+		if (continue_item != NULL && *continue_item != NULL) {
+			cmdq_continue(*continue_item);
+			*continue_item = NULL;
+		}
+		return (CMD_RETURN_NORMAL);
 	}
 	free(history_file);
 
@@ -141,6 +236,12 @@ status_prompt_load_history(void)
 		}
 	}
 	fclose(f);
+	if (continue_item != NULL && *continue_item != NULL) {
+		cmdq_continue(*continue_item);
+		*continue_item = NULL;
+	}
+	return (CMD_RETURN_NORMAL);
+#endif
 }
 
 /* Save status prompt history to file. */
