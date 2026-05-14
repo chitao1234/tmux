@@ -41,6 +41,9 @@ enum win32_process_event_state {
 
 enum win32_handle_event_backend {
 	WIN32_HANDLE_EVENT_WORKER,
+	WIN32_HANDLE_EVENT_CONSOLE,
+	WIN32_HANDLE_EVENT_STDIO,
+	WIN32_HANDLE_EVENT_TERMINAL,
 	WIN32_HANDLE_EVENT_IOCP
 };
 
@@ -265,6 +268,7 @@ static int	win32_handle_event_error_is_eof(DWORD);
 static void	win32_handle_event_free(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
+static int	win32_console_handle(HANDLE);
 static int	win32_handle_write(struct win32_handle_writer *, HANDLE,
 		     const void *, size_t);
 static enum win32_handle_writer_backend
@@ -1035,11 +1039,13 @@ win32_handle_event_thread(void *arg)
 }
 
 static struct win32_io_endpoint *
-win32_io_reader_new_worker(HANDLE handle,
+win32_io_reader_new_worker(HANDLE handle, enum win32_handle_event_backend backend,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_handle_event	*whe;
 
+	if (handle == NULL || handle == INVALID_HANDLE_VALUE)
+		return (NULL);
 	if (eventcb == NULL)
 		return (NULL);
 	if (win32_io_service_init() != 0)
@@ -1047,6 +1053,7 @@ win32_io_reader_new_worker(HANDLE handle,
 
 	whe = xcalloc(1, sizeof *whe);
 	whe->handle = handle;
+	whe->backend = backend;
 	whe->input = evbuffer_new();
 	if (whe->input == NULL) {
 		free(whe);
@@ -1081,21 +1088,28 @@ struct win32_io_endpoint *
 win32_io_reader_new_console(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_reader_new_worker(handle, eventcb, arg));
+	if (!win32_console_handle(handle)) {
+		errno = ENOTTY;
+		return (NULL);
+	}
+	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_CONSOLE,
+	    eventcb, arg));
 }
 
 struct win32_io_endpoint *
 win32_io_reader_new_stdio(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_reader_new_worker(handle, eventcb, arg));
+	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_STDIO,
+	    eventcb, arg));
 }
 
 struct win32_io_endpoint *
 win32_io_reader_new_terminal(HANDLE handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_reader_new_worker(handle, eventcb, arg));
+	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_TERMINAL,
+	    eventcb, arg));
 }
 
 static struct win32_io_endpoint *
@@ -1617,11 +1631,9 @@ struct win32_io_endpoint *
 win32_io_writer_new_console_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	DWORD	mode;
-
 	if (handle == NULL || *handle == NULL || *handle == INVALID_HANDLE_VALUE)
 		return (NULL);
-	if (!GetConsoleMode(*handle, &mode)) {
+	if (!win32_console_handle(*handle)) {
 		errno = ENOTTY;
 		return (NULL);
 	}
@@ -1827,6 +1839,16 @@ win32_handle_write_file(HANDLE handle, const void *data, size_t size)
 }
 
 static int
+win32_console_handle(HANDLE handle)
+{
+	DWORD	mode;
+
+	if (handle == NULL || handle == INVALID_HANDLE_VALUE)
+		return (0);
+	return (GetConsoleMode(handle, &mode));
+}
+
+static int
 win32_utf8_expected(u_char ch)
 {
 	if (ch < 0x80)
@@ -1990,10 +2012,7 @@ win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
 static enum win32_handle_writer_backend
 win32_handle_writer_backend_for_handle(HANDLE *handle)
 {
-	DWORD	mode;
-
-	if (handle != NULL && *handle != NULL && *handle != INVALID_HANDLE_VALUE &&
-	    GetConsoleMode(*handle, &mode))
+	if (handle != NULL && win32_console_handle(*handle))
 		return (WIN32_HANDLE_WRITER_CONSOLE);
 	return (WIN32_HANDLE_WRITER_WORKER);
 }

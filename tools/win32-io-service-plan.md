@@ -1094,6 +1094,21 @@ This is not the final console proactor. It creates a dedicated replacement
 point for console output so a later slice can change console write scheduling
 without touching file, pipe, or generic stdio handle behavior.
 
+## Reader Fallback Backend Slice
+
+Worker-backed readers now carry the same explicit purpose boundary as writers:
+
+- console input uses a `WIN32_HANDLE_EVENT_CONSOLE` backend and rejects
+  non-console handles at construction time;
+- inherited stdio reads use `WIN32_HANDLE_EVENT_STDIO`;
+- direct terminal handle reads use `WIN32_HANDLE_EVENT_TERMINAL`;
+- all three reader backends still use the same blocking worker implementation
+  and service completion queue, so this slice does not change read scheduling,
+  buffering, EOF, error, or backpressure behavior.
+
+This keeps the remaining non-IOCP reader paths visible in endpoint state and
+creates a narrow replacement point for the later console-input proactor.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1101,10 +1116,8 @@ configuration, popup editor file, and prompt-history paths now use the Win32
 I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
-- console input still uses the purpose-specific console worker-fallback
-  constructor, and console output still uses a worker thread, but console
-  output is now isolated in a dedicated UTF-8/`WriteConsoleW` backend until a
-  dedicated console proactor exists;
+- console input and output still use worker threads, but they are now isolated
+  in dedicated console backends until a dedicated console proactor exists;
 - direct terminal handles still use the purpose-specific terminal
   worker-fallback constructors, choosing the console backend only when the
   borrowed output handle is an actual console;
