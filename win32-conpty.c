@@ -34,6 +34,7 @@ struct win32_pane {
 	struct win32_handle_event *output_event;
 	struct win32_handle_writer *input_writer;
 	struct win32_process_event *process_event;
+	struct evbuffer	*input_queue;
 	int		 output_paused;
 	int		 exited;
 	int		 status;
@@ -57,6 +58,7 @@ struct win32_job {
 	void		(*exitcb)(void *);
 	void		 *exitarg;
 	int		 exit_pending;
+	int		 stdin_closing;
 	int		 pty;
 	int		 exited;
 	int		 status;
@@ -94,6 +96,8 @@ struct win32_job_process {
 };
 
 #define WIN32_CHILD_KILL_TIMEOUT 1000
+#define WIN32_INPUT_WRITER_HIGH (1024 * 1024)
+#define WIN32_INPUT_WRITER_CHUNK (256 * 1024)
 
 typedef NTSTATUS (NTAPI *win32_nt_query_information_process)(HANDLE,
     PROCESSINFOCLASS, PVOID, ULONG, PULONG);
@@ -685,6 +689,10 @@ win32_pane_disconnect(struct win32_pane *pw)
 		win32_handle_writer_free(pw->input_writer);
 		pw->input_writer = NULL;
 	}
+	if (pw->input_queue != NULL) {
+		evbuffer_free(pw->input_queue);
+		pw->input_queue = NULL;
+	}
 	win32_child_disconnect(&pw->hpcon, &pw->input_read, &pw->input_write,
 	    &pw->output_write);
 }
@@ -692,12 +700,81 @@ win32_pane_disconnect(struct win32_pane *pw)
 static void
 win32_pane_close_stdin(struct win32_pane *pw)
 {
+	if (pw->input_queue != NULL)
+		evbuffer_drain(pw->input_queue, EVBUFFER_LENGTH(pw->input_queue));
 	if (pw->input_writer != NULL) {
 		win32_handle_writer_free(pw->input_writer);
 		pw->input_writer = NULL;
 	}
 	win32_close_handle(&pw->input_write);
 	win32_close_handle(&pw->input_read);
+}
+
+static int
+win32_pane_flush_input(struct window_pane *wp)
+{
+	struct win32_pane	*pw;
+	struct evbuffer		*evb;
+	size_t			 buffered, available, nwrite;
+	int			 written;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return (0);
+	pw = wp->win32;
+	if (pw->input_queue == NULL)
+		return (0);
+	if (pw->input_writer == NULL) {
+		errno = EPIPE;
+		return (-1);
+	}
+
+	evb = pw->input_queue;
+	for (;;) {
+		buffered = win32_handle_writer_buffered(pw->input_writer);
+		if (buffered >= WIN32_INPUT_WRITER_HIGH)
+			return (0);
+
+		available = EVBUFFER_LENGTH(evb);
+		if (available == 0)
+			return (0);
+		nwrite = WIN32_INPUT_WRITER_HIGH - buffered;
+		if (nwrite > available)
+			nwrite = available;
+		if (nwrite > WIN32_INPUT_WRITER_CHUNK)
+			nwrite = WIN32_INPUT_WRITER_CHUNK;
+
+		written = win32_handle_writer_write(pw->input_writer,
+		    EVBUFFER_DATA(evb), nwrite);
+		if (written <= 0)
+			return (-1);
+		evbuffer_drain(evb, written);
+	}
+}
+
+static void
+win32_pane_input_write_cb(void *arg)
+{
+	struct window_pane	*wp = arg;
+
+	(void)win32_pane_flush_input(wp);
+}
+
+static void
+win32_pane_input_error_cb(void *arg)
+{
+	struct window_pane	*wp = arg;
+	struct win32_pane	*pw;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return;
+	pw = wp->win32;
+	if (pw->input_queue != NULL)
+		evbuffer_drain(pw->input_queue,
+		    EVBUFFER_LENGTH(pw->input_queue));
+	if (pw->input_writer != NULL) {
+		win32_handle_writer_free(pw->input_writer);
+		pw->input_writer = NULL;
+	}
 }
 
 static void
@@ -714,12 +791,66 @@ win32_job_disconnect(struct win32_job *wj)
 static void
 win32_job_close_input(struct win32_job *wj)
 {
+	if (wj->event != NULL)
+		evbuffer_drain(wj->event->output,
+		    EVBUFFER_LENGTH(wj->event->output));
 	if (wj->stdin_writer != NULL) {
 		win32_handle_writer_free(wj->stdin_writer);
 		wj->stdin_writer = NULL;
 	}
 	win32_close_handle(&wj->stdin_write);
 	win32_close_handle(&wj->stdin_read);
+}
+
+static int
+win32_job_flush_input(struct win32_job *wj)
+{
+	struct evbuffer	*evb;
+	size_t		 buffered, available, nwrite;
+	int		 written;
+
+	if (wj == NULL || wj->event == NULL)
+		return (0);
+	if (wj->stdin_writer == NULL) {
+		errno = EPIPE;
+		return (-1);
+	}
+
+	evb = wj->event->output;
+	for (;;) {
+		buffered = win32_handle_writer_buffered(wj->stdin_writer);
+		if (buffered >= WIN32_INPUT_WRITER_HIGH)
+			return (0);
+
+		available = EVBUFFER_LENGTH(evb);
+		if (available == 0)
+			return (0);
+		nwrite = WIN32_INPUT_WRITER_HIGH - buffered;
+		if (nwrite > available)
+			nwrite = available;
+		if (nwrite > WIN32_INPUT_WRITER_CHUNK)
+			nwrite = WIN32_INPUT_WRITER_CHUNK;
+
+		written = win32_handle_writer_write(wj->stdin_writer,
+		    EVBUFFER_DATA(evb), nwrite);
+		if (written <= 0)
+			return (-1);
+		evbuffer_drain(evb, written);
+	}
+}
+
+static void
+win32_job_maybe_close_stdin(struct win32_job *wj)
+{
+	size_t	queued = 0, buffered = 0;
+
+	if (wj == NULL || !wj->stdin_closing || wj->stdin_writer == NULL)
+		return;
+	if (wj->event != NULL)
+		queued = EVBUFFER_LENGTH(wj->event->output);
+	buffered = win32_handle_writer_buffered(wj->stdin_writer);
+	if (queued == 0 && buffered == 0)
+		win32_handle_writer_close(wj->stdin_writer);
 }
 
 static void
@@ -882,7 +1013,11 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 	win32_close_handle(&pw->input_read);
 	win32_close_handle(&pw->output_write);
-	pw->input_writer = win32_handle_writer_new(&pw->input_write);
+	pw->input_queue = evbuffer_new();
+	if (pw->input_queue == NULL)
+		fatalx("out of memory");
+	pw->input_writer = win32_handle_writer_new_cb(&pw->input_write,
+	    win32_pane_input_write_cb, win32_pane_input_error_cb, wp);
 	if (pw->input_writer == NULL) {
 		xasprintf(cause, "couldn't create pane input writer");
 		goto fail;
@@ -1026,11 +1161,40 @@ win32_pane_reading_paused(struct window_pane *wp)
 int
 win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 {
+	struct evbuffer	*evb;
+	size_t		 nwrite;
+
 	if (wp->win32 == NULL || wp->win32->input_writer == NULL) {
 		errno = EPIPE;
 		return (-1);
 	}
-	return (win32_handle_writer_write(wp->win32->input_writer, data, size));
+	if (wp->win32->input_queue == NULL) {
+		errno = EPIPE;
+		return (-1);
+	}
+	if (win32_handle_writer_done(wp->win32->input_writer)) {
+		errno = EPIPE;
+		return (-1);
+	}
+
+	nwrite = size;
+	if (nwrite > INT_MAX)
+		nwrite = INT_MAX;
+	if (nwrite == 0)
+		return (0);
+
+	evb = wp->win32->input_queue;
+	if (evbuffer_add(evb, data, nwrite) != 0) {
+		errno = ENOMEM;
+		return (-1);
+	}
+	if (win32_pane_flush_input(wp) != 0 &&
+	    (wp->win32->input_writer == NULL ||
+	    win32_handle_writer_done(wp->win32->input_writer))) {
+		errno = EPIPE;
+		return (-1);
+	}
+	return ((int)nwrite);
 }
 
 char *
@@ -1082,6 +1246,8 @@ win32_job_write_cb(void *arg)
 {
 	struct win32_job	*wj = arg;
 
+	(void)win32_job_flush_input(wj);
+	win32_job_maybe_close_stdin(wj);
 	if (wj->event != NULL && wj->event->writecb != NULL)
 		wj->event->writecb(wj->event, wj->event->cbarg);
 }
@@ -1096,6 +1262,10 @@ win32_job_write_error_cb(void *arg)
 	 * Notify the write side only; output completion is delivered by the
 	 * output reader.
 	 */
+	wj->stdin_closing = 1;
+	if (wj->event != NULL)
+		evbuffer_drain(wj->event->output,
+		    EVBUFFER_LENGTH(wj->event->output));
 	if (wj->event != NULL && wj->event->writecb != NULL)
 		wj->event->writecb(wj->event, wj->event->cbarg);
 }
@@ -1463,19 +1633,50 @@ win32_job_set_exit_callback(struct win32_job *wj, void (*exitcb)(void *),
 int
 win32_job_write(struct win32_job *wj, const void *data, size_t size)
 {
+	struct evbuffer	*evb;
+	size_t		 nwrite;
+
 	if (wj == NULL || wj->stdin_writer == NULL) {
 		errno = EPIPE;
 		return (-1);
 	}
-	return (win32_handle_writer_write(wj->stdin_writer, data, size));
+	if (wj->event == NULL || wj->stdin_closing ||
+	    win32_handle_writer_done(wj->stdin_writer)) {
+		errno = EPIPE;
+		return (-1);
+	}
+
+	nwrite = size;
+	if (nwrite > INT_MAX)
+		nwrite = INT_MAX;
+	if (nwrite == 0)
+		return (0);
+
+	evb = wj->event->output;
+	if (evbuffer_add(evb, data, nwrite) != 0) {
+		errno = ENOMEM;
+		return (-1);
+	}
+	if (win32_job_flush_input(wj) != 0 &&
+	    (wj->stdin_writer == NULL ||
+	    win32_handle_writer_done(wj->stdin_writer))) {
+		errno = EPIPE;
+		return (-1);
+	}
+	return ((int)nwrite);
 }
 
 size_t
 win32_job_stdin_buffered(struct win32_job *wj)
 {
+	size_t	buffered = 0;
+
 	if (wj == NULL || wj->stdin_writer == NULL)
 		return (0);
-	return (win32_handle_writer_buffered(wj->stdin_writer));
+	if (wj->event != NULL)
+		buffered += EVBUFFER_LENGTH(wj->event->output);
+	buffered += win32_handle_writer_buffered(wj->stdin_writer);
+	return (buffered);
 }
 
 void
@@ -1483,9 +1684,11 @@ win32_job_close_stdin(struct win32_job *wj)
 {
 	if (wj == NULL)
 		return;
-	if (wj->stdin_writer != NULL)
-		win32_handle_writer_close(wj->stdin_writer);
-	else
+	if (wj->stdin_writer != NULL) {
+		wj->stdin_closing = 1;
+		(void)win32_job_flush_input(wj);
+		win32_job_maybe_close_stdin(wj);
+	} else
 		win32_close_handle(&wj->stdin_write);
 }
 

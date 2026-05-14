@@ -180,6 +180,26 @@ Worker-backed read handles now have service-level read watermarks:
 - this is still a worker-backed compatibility layer, not the final IOCP
   endpoint backend.
 
+## Input Write Queue Slice
+
+Win32 pane and job stdin now have a durable tmux-side queue before data enters
+the service writer:
+
+- Win32 pane input writes append to a pane-owned input queue first, preserving
+  the existing full-write acceptance contract for callers that ignore return
+  values;
+- pane input writer drain callbacks move bounded chunks from that tmux-side
+  queue into the service writer instead of letting callers fill the worker
+  buffer directly;
+- Win32 job stdin follows the same queue/drain model using the job event output
+  buffer;
+- job stdin close now waits for both the tmux-side queue and the service writer
+  queue to drain before closing, preserving non-`JOB_KEEPWRITE` semantics;
+- the service writer side is capped while flushing, but this is still a
+  compatibility slice. Hard caller-visible write watermarks require the
+  remaining input producers to understand retry/backpressure instead of
+  assuming every write is fully accepted.
+
 ## Terminal Handle Output Slice
 
 The server-side direct terminal output handle path now uses the shared service
