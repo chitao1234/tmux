@@ -14,7 +14,8 @@ Related docs:
 Move the default Win32 terminal path from client console relay to server-owned
 terminal handles. The Win32 I/O service is already in place; this plan uses it
 to make direct handle I/O the normal path and keep console relay only as a
-compatibility fallback.
+temporary compatibility fallback while the supported-client matrix is still
+being proven.
 
 The current target is the server-side handle path that already exists in the
 codebase:
@@ -32,8 +33,8 @@ testing proves a supported interactive client cannot supply usable handles.
 ## Design Summary
 
 - Make server-owned direct-handle I/O the default terminal path.
-- Keep the current client console relay only as a fallback for clients that
-  cannot hand over handles during migration.
+- Keep the current client console relay only as a temporary fallback for
+  clients that cannot hand over handles during migration.
 - Treat the relay as removable compatibility scaffolding, not as a permanent
   supported path. If testing finds no supported Win32 client path that cannot
   hand over handles, drop the relay path instead of carrying it forward.
@@ -45,6 +46,23 @@ testing proves a supported interactive client cannot supply usable handles.
   design pass.
 - Add only the minimal handle-claim / duplication infrastructure needed to
   unblock implementation if the current reject-all path becomes the blocker.
+
+## Relay Removal Decision
+
+The client console relay should not become a second production terminal stack.
+It exists to keep the port usable while direct server-side handle I/O is being
+implemented and tested.
+
+The removal decision is data-driven:
+
+- If every supported interactive Win32 client shape can transfer usable
+  stdin/stdout handles, remove the relay path after direct-handle input,
+  output, resize, detach, reattach, and close behavior are covered.
+- If one supported client shape cannot transfer usable handles, keep relay only
+  behind an explicit compatibility gate and document that client shape as the
+  reason.
+- If no such client shape is found, do not keep relay as an indefinite fallback
+  just because it already exists.
 
 ## Current State
 
