@@ -132,6 +132,7 @@ int		 win32_job_exited(struct win32_job *, int *);
 int		 win32_job_output_done(struct win32_job *);
 int		 win32_job_output_eof(struct win32_job *);
 void		 win32_job_drain(struct win32_job *);
+void		 win32_job_set_reading(struct win32_job *, int);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
 int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);

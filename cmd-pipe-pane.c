@@ -40,10 +40,15 @@ static enum cmd_retval	cmd_pipe_pane_exec(struct cmd *, struct cmdq_item *);
 #ifdef TMUX_WIN32
 struct cmd_pipe_pane_data {
 	u_int	wp_id;
+	struct job *job;
+	struct event retry;
 	int	in;
 };
 
 static void cmd_pipe_pane_job_update(struct job *);
+static int cmd_pipe_pane_job_update1(struct job *, int);
+static void cmd_pipe_pane_job_retry(__unused evutil_socket_t,
+	     __unused short, void *);
 static void cmd_pipe_pane_job_complete(struct job *);
 static void cmd_pipe_pane_job_free(void *);
 #else
@@ -142,6 +147,8 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 		cmd_pipe_pane_job_free(cdata);
 		return (CMD_RETURN_ERROR);
 	}
+	cdata->job = job;
+	evtimer_set(&cdata->retry, cmd_pipe_pane_job_retry, cdata);
 
 	wp->pipe_job = job;
 	job_get_pid(job, &wp->pipe_pid);
@@ -288,7 +295,17 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 
 #ifdef TMUX_WIN32
 static void
-cmd_pipe_pane_job_update(struct job *job)
+cmd_pipe_pane_job_schedule_retry(struct cmd_pipe_pane_data *cdata)
+{
+	struct timeval	tv = { .tv_usec = 10000 };
+
+	if (!evtimer_initialized(&cdata->retry))
+		return;
+	evtimer_add(&cdata->retry, &tv);
+}
+
+static int
+cmd_pipe_pane_job_update1(struct job *job, int allow_pause)
 {
 	struct cmd_pipe_pane_data	*cdata = job_get_data(job);
 	struct window_pane		*wp;
@@ -300,17 +317,44 @@ cmd_pipe_pane_job_update(struct job *job)
 	if (wp == NULL || wp->pipe_job != job || !cdata->in) {
 		if (available != 0)
 			evbuffer_drain(evb, available);
-		return;
+		return (0);
 	}
 
 	log_debug("%%%u pipe job read %zu", wp->id, available);
 	if (available != 0) {
-		win32_pane_write(wp, EVBUFFER_DATA(evb), available);
+		if (!win32_pane_input_ready(wp) ||
+		    win32_pane_write(wp, EVBUFFER_DATA(evb), available) != 0) {
+			log_debug("%%%u pipe job input backpressure", wp->id);
+			if (allow_pause) {
+				job_set_reading(job, 0);
+				cmd_pipe_pane_job_schedule_retry(cdata);
+			}
+			return (-1);
+		}
 		evbuffer_drain(evb, available);
 	}
+	job_set_reading(job, 1);
 
 	if (window_pane_destroy_ready(wp))
 		server_destroy_pane(wp, 1);
+	return (0);
+}
+
+static void
+cmd_pipe_pane_job_update(struct job *job)
+{
+	(void)cmd_pipe_pane_job_update1(job, 1);
+}
+
+static void
+cmd_pipe_pane_job_retry(__unused evutil_socket_t fd, __unused short events,
+    void *arg)
+{
+	struct cmd_pipe_pane_data	*cdata = arg;
+
+	if (cdata->job == NULL)
+		return;
+	cmd_pipe_pane_job_update(cdata->job);
 }
 
 static void
@@ -319,7 +363,8 @@ cmd_pipe_pane_job_complete(struct job *job)
 	struct cmd_pipe_pane_data	*cdata = job_get_data(job);
 	struct window_pane		*wp;
 
-	cmd_pipe_pane_job_update(job);
+	if (cmd_pipe_pane_job_update1(job, 0) != 0)
+		log_debug("pipe job completed with undelivered pane input");
 
 	wp = window_pane_find_by_id(cdata->wp_id);
 	if (wp == NULL || wp->pipe_job != job)
@@ -335,6 +380,10 @@ cmd_pipe_pane_job_complete(struct job *job)
 static void
 cmd_pipe_pane_job_free(void *data)
 {
+	struct cmd_pipe_pane_data	*cdata = data;
+
+	if (evtimer_initialized(&cdata->retry))
+		evtimer_del(&cdata->retry);
 	free(data);
 }
 #else

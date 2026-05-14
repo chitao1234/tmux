@@ -736,3 +736,28 @@ This is a defensive backpressure step, not full retry semantics for every pane
 input producer. Direct callers that ignore `win32_pane_write()` failures can
 still drop input under sustained overload, but they no longer grow server
 memory indefinitely.
+
+## Pipe Pane Input Backpressure Slice
+
+Win32 `pipe-pane -I` now treats pane stdin backpressure as a retryable edge
+instead of draining helper-job output after a failed pane write:
+
+- `job_set_reading()` lets callers pause and resume job stdout reads through
+  the normal job abstraction;
+- Win32 jobs implement that pause through `win32_job_set_reading()`, which
+  controls the service reader attached to the job output endpoint;
+- `pipe-pane -I` checks pane input readiness before moving helper-job output
+  into pane stdin;
+- when pane input is saturated, the pipe job output reader is paused and a
+  short tmux-thread retry timer is armed;
+- the retry path attempts to deliver already buffered helper-job output before
+  resuming new job reads, so the service does not keep pulling from the helper
+  while pane stdin remains backpressured;
+- pipe job completion makes one final no-pause delivery attempt and logs if
+  pane input is still saturated.
+
+This gives live `pipe-pane -I` streams bounded read-side behavior while
+preserving the existing job lifetime model. It does not keep a completed helper
+job alive indefinitely solely to wait for future pane stdin capacity; the final
+completion edge still drops undelivered helper output if the pane remains
+saturated after the job has exited.

@@ -2654,6 +2654,7 @@ int		 job_get_status(struct job *);
 void		*job_get_data(struct job *);
 struct bufferevent *job_get_event(struct job *);
 int		 job_write(struct job *, const void *, size_t);
+void		 job_set_reading(struct job *, int);
 void		 job_close_stdin(struct job *);
 void		 job_kill_all(void);
 int		 job_still_running(void);

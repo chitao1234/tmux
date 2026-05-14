@@ -578,6 +578,22 @@ job_write(struct job *job, const void *data, size_t size)
 	return (bufferevent_write(job->event, data, size));
 }
 
+/* Enable or disable job stdout reads. */
+void
+job_set_reading(struct job *job, int enabled)
+{
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_set_reading(job->win32, enabled);
+		return;
+	}
+#endif
+	if (enabled)
+		bufferevent_enable(job->event, EV_READ);
+	else
+		bufferevent_disable(job->event, EV_READ);
+}
+
 /* Close job stdin. */
 void
 job_close_stdin(struct job *job)

@@ -1783,6 +1783,14 @@ win32_job_drain(struct win32_job *wj)
 	win32_io_reader_drain_bev(wj->output_event, wj->event);
 }
 
+void
+win32_job_set_reading(struct win32_job *wj, int enabled)
+{
+	if (wj == NULL || wj->output_event == NULL)
+		return;
+	win32_io_reader_set_reading(wj->output_event, enabled);
+}
+
 int
 win32_job_get_pid(struct win32_job *wj, pid_t *pid)
 {
