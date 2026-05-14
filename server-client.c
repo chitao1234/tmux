@@ -2388,6 +2388,10 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		if (file_write_ready(&c->files, imsg) != 0)
 			goto bad;
 		break;
+	case MSG_WRITE_ACK:
+		if (file_write_ack(&c->files, imsg) != 0)
+			goto bad;
+		break;
 	case MSG_READ:
 		if (file_read_data(&c->files, imsg) != 0)
 			goto bad;

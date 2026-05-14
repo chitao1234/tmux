@@ -38,6 +38,13 @@
 
 static int	file_next_stream = 3;
 
+#define FILE_WRITE_WINDOW (1024 * 1024)
+
+static void	file_push_close(struct client_file *);
+static void	file_write_record(struct client_file *, size_t);
+static void	file_write_flush_ack(struct client_file *, size_t, int);
+static void	file_write_acknowledge(struct client_file *, size_t, int);
+
 RB_GENERATE(client_files, client_file, entry, file_cmp);
 
 /* Get path for file, either as given or from working directory. */
@@ -145,6 +152,11 @@ file_free(struct client_file *cf)
 
 	evbuffer_free(cf->buffer);
 	free(cf->path);
+
+#ifdef TMUX_WIN32
+	if (cf->win32_writer != NULL)
+		win32_handle_writer_free(cf->win32_writer);
+#endif
 
 	if (cf->tree != NULL)
 		RB_REMOVE(client_files, cf->tree, cf);
@@ -459,6 +471,20 @@ file_cancel(struct client_file *cf)
 
 /* Push event, fired if there is more writing to be done. */
 static void
+file_push_close(struct client_file *cf)
+{
+	struct msg_write_close	close;
+
+	if (cf->stream <= 2 || EVBUFFER_LENGTH(cf->buffer) != 0 ||
+	    cf->write_inflight != 0)
+		return;
+	close.stream = cf->stream;
+	proc_send(cf->peer, MSG_WRITE_CLOSE, -1, &close, sizeof close);
+	file_fire_done(cf);
+}
+
+/* Push event, fired if there is more writing to be done. */
+static void
 file_push_cb(__unused tmux_event_fd fd, __unused short events, void *arg)
 {
 	struct client_file	*cf = arg;
@@ -473,13 +499,15 @@ void
 file_push(struct client_file *cf)
 {
 	struct msg_write_data	*msg;
-	size_t			 msglen, sent, left;
-	struct msg_write_close	 close;
+	size_t			 available, msglen, sent, left, window;
 
 	msg = xmalloc(sizeof *msg);
 	left = EVBUFFER_LENGTH(cf->buffer);
-	while (left != 0) {
+	while (left != 0 && cf->write_inflight < FILE_WRITE_WINDOW) {
 		sent = left;
+		window = FILE_WRITE_WINDOW - cf->write_inflight;
+		if (sent > window)
+			sent = window;
 		if (sent > MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg)
 			sent = MAX_IMSGSIZE - IMSG_HEADER_SIZE - sizeof *msg;
 
@@ -490,18 +518,18 @@ file_push(struct client_file *cf)
 		if (proc_send(cf->peer, MSG_WRITE, -1, msg, msglen) != 0)
 			break;
 		evbuffer_drain(cf->buffer, sent);
+		cf->write_inflight += sent;
 
 		left = EVBUFFER_LENGTH(cf->buffer);
-		log_debug("file %d sent %zu, left %zu", cf->stream, sent, left);
+		log_debug("file %d sent %zu, left %zu, inflight %zu",
+		    cf->stream, sent, left, cf->write_inflight);
 	}
-	if (left != 0) {
+	available = EVBUFFER_LENGTH(cf->buffer);
+	if (available != 0 && cf->write_inflight < FILE_WRITE_WINDOW) {
 		cf->references++;
 		event_once(-1, EV_TIMEOUT, file_push_cb, cf, NULL);
-	} else if (cf->stream > 2) {
-		close.stream = cf->stream;
-		proc_send(cf->peer, MSG_WRITE_CLOSE, -1, &close, sizeof close);
-		file_fire_done(cf);
-	}
+	} else
+		file_push_close(cf);
 	free(msg);
 }
 
@@ -514,6 +542,16 @@ file_write_left(struct client_files *files)
 	int			 waiting = 0;
 
 	RB_FOREACH(cf, client_files, files) {
+		if (cf->write_inflight != 0) {
+			waiting++;
+			log_debug("file %u %zu bytes in flight", cf->stream,
+			    cf->write_inflight);
+		}
+		if (cf->write_pending != 0) {
+			waiting++;
+			log_debug("file %u %zu bytes pending ack", cf->stream,
+			    cf->write_pending);
+		}
 		if (cf->event == NULL)
 			continue;
 		left = EVBUFFER_LENGTH(cf->event->output);
@@ -535,6 +573,8 @@ file_write_error_callback(__unused struct bufferevent *bev, __unused short what,
 
 	log_debug("write error file %d", cf->stream);
 
+	file_write_acknowledge(cf, cf->write_pending, EIO);
+
 	bufferevent_free(cf->event);
 	cf->event = NULL;
 
@@ -550,8 +590,15 @@ static void
 file_write_callback(__unused struct bufferevent *bev, void *arg)
 {
 	struct client_file	*cf = arg;
+	size_t			 left, written;
 
 	log_debug("write check file %d", cf->stream);
+
+	left = EVBUFFER_LENGTH(cf->event->output);
+	if (cf->write_pending >= left) {
+		written = cf->write_pending - left;
+		file_write_acknowledge(cf, written, 0);
+	}
 
 	if (cf->cb != NULL)
 		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
@@ -566,7 +613,97 @@ file_write_callback(__unused struct bufferevent *bev, void *arg)
 }
 #endif
 
+static void
+file_write_record(struct client_file *cf, size_t size)
+{
+	cf->write_pending += size;
+}
+
+static void
+file_write_flush_ack(struct client_file *cf, size_t size, int error)
+{
+	struct msg_write_ack	msg;
+	size_t			left, nsend;
+
+	if (cf->peer == NULL || size == 0)
+		return;
+	msg.stream = cf->stream;
+	msg.error = error;
+	left = size;
+	do {
+		nsend = left;
+		if (nsend > UINT32_MAX)
+			nsend = UINT32_MAX;
+		msg.size = (uint32_t)nsend;
+		proc_send(cf->peer, MSG_WRITE_ACK, -1, &msg, sizeof msg);
+		left -= nsend;
+	} while (left != 0);
+}
+
+static void
+file_write_acknowledge(struct client_file *cf, size_t size, int error)
+{
+	size_t	acknowledged;
+
+	if (size > cf->write_pending)
+		size = cf->write_pending;
+	acknowledged = size;
+	cf->write_pending -= acknowledged;
+	file_write_flush_ack(cf, acknowledged, error);
+}
+
 #ifdef TMUX_WIN32
+static void
+file_write_win32_close(struct client_file *cf)
+{
+	if (cf->win32_writer != NULL) {
+		win32_handle_writer_free(cf->win32_writer);
+		cf->win32_writer = NULL;
+	}
+	if (cf->fd != -1)
+		close(cf->fd);
+	cf->fd = -1;
+}
+
+static void
+file_write_win32_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+	size_t			 size;
+
+	size = cf->write_pending;
+	if (size == 0) {
+		if (cf->closed &&
+		    win32_handle_writer_buffered(cf->win32_writer) == 0) {
+			file_write_win32_close(cf);
+			file_free(cf);
+		}
+		return;
+	}
+	file_write_acknowledge(cf, size, 0);
+	if (cf->cb != NULL)
+		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+	if (cf->closed && win32_handle_writer_buffered(cf->win32_writer) == 0) {
+		file_write_win32_close(cf);
+		file_free(cf);
+	}
+}
+
+static void
+file_write_win32_error_callback(void *arg)
+{
+	struct client_file	*cf = arg;
+	size_t			 size;
+
+	if (cf->fd == -1 && cf->win32_writer == NULL)
+		return;
+	size = cf->write_pending;
+	file_write_acknowledge(cf, size, EIO);
+	if (cf->cb != NULL)
+		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+	file_write_win32_close(cf);
+}
+
 static void
 file_read_sync(struct client_file *cf)
 {
@@ -627,6 +764,7 @@ file_write_sync(struct client_file *cf, const void *data, size_t size)
 			cf->fd = -1;
 			if (cf->cb != NULL)
 				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+			file_write_flush_ack(cf, size, errno);
 			return;
 		}
 		if (n == 0) {
@@ -636,8 +774,10 @@ file_write_sync(struct client_file *cf, const void *data, size_t size)
 			cf->fd = -1;
 			if (cf->cb != NULL)
 				cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
+			file_write_flush_ack(cf, size, EIO);
 			return;
 		}
+		file_write_flush_ack(cf, n, 0);
 		ptr += n;
 		size -= n;
 	}
@@ -657,6 +797,7 @@ file_write_sync_console_text(struct client_file *cf, const char *data,
 	const char	*ptr, *start, *end;
 	int		 error;
 
+	errno = 0;
 	osfhandle = _get_osfhandle(cf->fd);
 	handle = (HANDLE)osfhandle;
 	if (handle == INVALID_HANDLE_VALUE || !GetConsoleMode(handle, &mode))
@@ -684,24 +825,24 @@ file_write_sync_console_text(struct client_file *cf, const char *data,
 		evbuffer_add(buffer, start, ptr - start);
 
 	error = 0;
-	if (EVBUFFER_LENGTH(buffer) != 0 &&
-	    win32_handle_write(handle, EVBUFFER_DATA(buffer),
-	    EVBUFFER_LENGTH(buffer)) == -1)
-		error = errno;
+	if (EVBUFFER_LENGTH(buffer) != 0) {
+		if (cf->win32_writer != NULL) {
+			if (win32_handle_writer_write(cf->win32_writer,
+			    EVBUFFER_DATA(buffer), EVBUFFER_LENGTH(buffer)) == -1)
+				error = errno;
+		} else if (win32_handle_write(handle, EVBUFFER_DATA(buffer),
+		    EVBUFFER_LENGTH(buffer)) == -1)
+			error = errno;
+	}
 	evbuffer_free(buffer);
 
 	if (error != 0) {
 		log_debug("write error file %d: %s", cf->stream,
 		    strerror(error));
-		close(cf->fd);
-		cf->fd = -1;
-		if (cf->cb != NULL)
-			cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
-		return (1);
+		errno = error;
+		return (-1);
 	}
 
-	if (cf->cb != NULL)
-		cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
 	return (1);
 }
 #endif
@@ -718,6 +859,11 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 	struct msg_write_ready	 reply;
 	struct client_file	 find, *cf;
 	const int		 flags = O_NONBLOCK|O_WRONLY|O_CREAT;
+#ifdef TMUX_WIN32
+	intptr_t		 osfhandle;
+	HANDLE			 handle;
+	DWORD			 mode;
+#endif
 	int			 error = 0;
 
 	if (msglen < sizeof *msg)
@@ -761,6 +907,20 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		if (msg->stream == STDOUT_FILENO || msg->stream == STDERR_FILENO)
 			cf->flags |= CLIENT_FILE_TEXT;
 	}
+	if (cf->flags & CLIENT_FILE_TEXT) {
+		osfhandle = _get_osfhandle(cf->fd);
+		handle = (HANDLE)osfhandle;
+		if (handle != INVALID_HANDLE_VALUE &&
+		    GetConsoleMode(handle, &mode)) {
+			cf->win32_writer = win32_handle_writer_new_borrowed(
+			    &handle, file_write_win32_callback,
+			    file_write_win32_error_callback, cf);
+			if (cf->win32_writer == NULL) {
+				error = EIO;
+				goto reply;
+			}
+		}
+	}
 #endif
 
 #ifndef TMUX_WIN32
@@ -797,17 +957,33 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 #ifdef TMUX_WIN32
 	if (cf->event == NULL) {
 		if (cf->fd != -1) {
+			if (cf->win32_writer != NULL) {
+				file_write_record(cf, size);
+				if ((cf->flags & CLIENT_FILE_TEXT) &&
+				    file_write_sync_console_text(cf,
+				    (const char *)(msg + 1), size))
+					return;
+				file_write_win32_error_callback(cf);
+				return;
+			}
 			if ((cf->flags & CLIENT_FILE_TEXT) &&
 			    file_write_sync_console_text(cf, (const char *)(msg + 1),
-			    size))
+			    size)) {
+				if (errno == 0)
+					file_write_flush_ack(cf, size, 0);
+				else
+					file_write_flush_ack(cf, size, errno);
 				return;
+			}
 			file_write_sync(cf, msg + 1, size);
 		}
 		return;
 	}
 #endif
-	if (cf->event != NULL)
+	if (cf->event != NULL) {
+		file_write_record(cf, size);
 		bufferevent_write(cf->event, msg + 1, size);
+	}
 }
 
 /* Handle a file write close message (client). */
@@ -825,6 +1001,16 @@ file_write_close(struct client_files *files, struct imsg *imsg)
 		fatalx("unknown stream number");
 	log_debug("close file %d", cf->stream);
 
+#ifdef TMUX_WIN32
+	if (cf->win32_writer != NULL) {
+		if (cf->write_pending == 0) {
+			file_write_win32_close(cf);
+			file_free(cf);
+		} else
+			cf->closed = 1;
+		return;
+	}
+#endif
 	if (cf->event == NULL || EVBUFFER_LENGTH(cf->event->output) == 0) {
 		if (cf->event != NULL)
 			bufferevent_free(cf->event);
@@ -995,6 +1181,35 @@ file_write_ready(struct client_files *files, struct imsg *imsg)
 		file_fire_done(cf);
 	} else
 		file_push(cf);
+	return (0);
+}
+
+/* Handle a write ack message (server). */
+int
+file_write_ack(struct client_files *files, struct imsg *imsg)
+{
+	struct msg_write_ack	*msg = imsg->data;
+	size_t			 msglen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	struct client_file	 find, *cf;
+
+	if (msglen != sizeof *msg)
+		return (-1);
+	find.stream = msg->stream;
+	if ((cf = RB_FIND(client_files, files, &find)) == NULL)
+		return (0);
+	if (msg->size > cf->write_inflight)
+		return (-1);
+
+	cf->write_inflight -= msg->size;
+	log_debug("file %d ack %u, inflight %zu", cf->stream, msg->size,
+	    cf->write_inflight);
+	if (msg->error != 0) {
+		cf->error = msg->error;
+		file_fire_done(cf);
+	} else if (EVBUFFER_LENGTH(cf->buffer) != 0)
+		file_push(cf);
+	else
+		file_push_close(cf);
 	return (0);
 }
 

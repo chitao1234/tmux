@@ -247,3 +247,25 @@ inside the client process:
 - the writer chunk matches the 256 KiB server-side Win32 tty pending cap,
   avoiding new UTF-8 split points beyond the existing relay message boundary
   while that backpressure limit is respected.
+
+## File Write ACK Slice
+
+The client file-write protocol now has explicit completion ACKs:
+
+- `MSG_WRITE_ACK` reports stream, byte count, and write error from the client
+  back to the server;
+- server-side file writes keep an in-flight byte count and stop sending once
+  the 1 MiB file-write window is full;
+- `MSG_WRITE_CLOSE` for non-stdio streams is deferred until both the local
+  server buffer and client in-flight bytes are drained;
+- client shutdown now treats both unflushed bufferevent output and unacknowledged
+  file writes as pending work;
+- Win32 client console text writes use the shared service writer when the
+  destination stream is an actual console handle, preserving CRLF text
+  translation while sending ACKs only after the writer drains;
+- the old synchronous Win32 console file-write path remains only as a fallback
+  when the destination is not an actual console handle or the async writer
+  cannot be created.
+
+This slice gives file-transfer output the protocol backpressure needed before
+removing the remaining synchronous fallback paths.

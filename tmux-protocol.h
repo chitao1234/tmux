@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 11
+#define PROTOCOL_VERSION 12
 
 /* Message types. */
 enum msgtype {
@@ -74,7 +74,8 @@ enum msgtype {
 	MSG_WRITE,
 	MSG_WRITE_READY,
 	MSG_WRITE_CLOSE,
-	MSG_READ_CANCEL
+	MSG_READ_CANCEL,
+	MSG_WRITE_ACK
 };
 
 /*
@@ -129,6 +130,12 @@ struct msg_write_open {
 struct msg_write_data {
 	int	stream;
 }; /* followed by data */
+
+struct msg_write_ack {
+	int	stream;
+	uint32_t size;
+	int	error;
+};
 
 struct msg_write_ready {
 	int	stream;

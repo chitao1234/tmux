@@ -1986,6 +1986,11 @@ struct client_file {
 	char				*path;
 	struct evbuffer			*buffer;
 	struct bufferevent		*event;
+	size_t				 write_inflight;
+	size_t				 write_pending;
+#ifdef TMUX_WIN32
+	struct win32_handle_writer	*win32_writer;
+#endif
 
 	int				 flags;
 #define CLIENT_FILE_TEXT 0x1
@@ -3040,6 +3045,7 @@ void	 file_write_open(struct client_files *, struct tmuxpeer *,
 	     struct imsg *, int, int, client_file_cb, void *);
 void	 file_write_data(struct client_files *, struct imsg *);
 void	 file_write_close(struct client_files *, struct imsg *);
+int	 file_write_ack(struct client_files *, struct imsg *);
 void	 file_read_open(struct client_files *, struct tmuxpeer *, struct imsg *,
 	     int, int, client_file_cb, void *);
 int	 file_write_ready(struct client_files *, struct imsg *);
