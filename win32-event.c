@@ -680,12 +680,6 @@ win32_handle_event_free(struct win32_handle_event *whe)
 	free(whe);
 }
 
-struct evbuffer *
-win32_handle_event_input(struct win32_handle_event *whe)
-{
-	return (whe->input);
-}
-
 void
 win32_handle_event_drain(struct win32_handle_event *whe, struct evbuffer *dst)
 {

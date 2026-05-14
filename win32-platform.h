@@ -48,7 +48,6 @@ void		 win32_io_service_fini(void);
 struct win32_handle_event *win32_handle_event_new(HANDLE, void (*)(void *),
 		     void (*)(void *), void *);
 void		 win32_handle_event_free(struct win32_handle_event *);
-struct evbuffer *win32_handle_event_input(struct win32_handle_event *);
 void		 win32_handle_event_drain(struct win32_handle_event *,
 		     struct evbuffer *);
 void		 win32_handle_event_drain_bev(struct win32_handle_event *,
