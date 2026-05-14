@@ -503,18 +503,6 @@ job_win32_exit_callback(void *data)
 	}
 }
 
-/* Check for jobs whose Windows process has exited. */
-void
-job_check_died(void)
-{
-	struct job	*job, *job1;
-
-	LIST_FOREACH_SAFE(job, &all_jobs, entry, job1) {
-		if (job->win32 == NULL)
-			continue;
-		job_win32_exit_callback(job);
-	}
-}
 #else
 /* Job died (waitpid() returned its pid). */
 void

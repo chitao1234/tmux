@@ -146,12 +146,24 @@ bridge:
 - pane destruction remains gated on status ready, output EOF, empty output
   buffer, and the pane output error path;
 - job completion remains gated on process exit plus output completion;
-- the old child polling pass remains as a temporary fallback while the migration
-  continues.
+- the old child polling pass was kept as a temporary fallback while the
+  migration continued.
 
-The next cleanup should remove the fallback polling once process events have
-enough runtime coverage, then move the pipe read/write backends from blocking
-worker threads to overlapped I/O/IOCP where the handle type allows it.
+## Polling Fallback Removal Slice
+
+The legacy Win32 child polling pass has been removed:
+
+- `server_loop()` no longer calls `win32_check_children()`;
+- the 100 ms `server_ev_win32_children` timer has been deleted;
+- pane status readiness is delivered by `win32_process_event_*`;
+- pane final destruction is retried by the two real lifecycle edges: process
+  exit and output EOF/error;
+- Win32 jobs complete through their process-event callback plus output EOF/error
+  callback, so the Win32 `job_check_died()` scan is gone;
+- the Unix `job_check_died(pid, status)` path remains unchanged.
+
+The next cleanup should move the pipe read/write backends from blocking worker
+threads to overlapped I/O/IOCP where the handle type allows it.
 
 ## Terminal Handle Output Slice
 
