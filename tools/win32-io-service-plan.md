@@ -585,3 +585,31 @@ This is the first real backend replacement slice. It validates the endpoint
 model against the two output streams most affected by process-exit-versus-EOF
 ordering, while intentionally leaving stdin writers and console/file readers on
 the existing backend until their handle-specific semantics are migrated.
+
+## Overlapped Pipe Writer Backend Slice
+
+Pane and job stdin writers now use an IOCP-backed overlapped write backend:
+
+- the named-pipe helper can create parent-side input write handles with
+  `FILE_FLAG_OVERLAPPED`;
+- ConPTY pane stdin and Win32 job stdin use overlapped parent-side write
+  handles while keeping the child-side read handles synchronous and inheritable;
+- `win32_io_writer_new_overlapped()` associates eligible write handles with the
+  shared IOCP and reports write-drained, write-closed, and error completions
+  through the existing service bridge;
+- the service keeps one overlapped write in flight per writer endpoint, leaving
+  queued bytes in the writer evbuffer until the IOCP completion proves they
+  were written;
+- writer drain and close predicates account for in-flight writes, preserving
+  the existing stdin-close rule that queued input is flushed before the handle
+  is closed;
+- cancellation waits for a pending overlapped write to complete before freeing
+  the endpoint;
+- console, tty, and client file writers remain on the worker-backed writer
+  path because they need console-specific UTF-8/`WriteConsoleW` behavior or are
+  not yet opened as overlapped handles;
+- process waits still use `RegisterWaitForSingleObject`.
+
+This removes the most important remaining synchronous pipe write path from the
+server-side pane and job lifecycle without changing the public tmux stdin
+acceptance contract.

@@ -70,6 +70,8 @@ int		 win32_io_reader_eof(struct win32_io_endpoint *);
 int		 win32_io_reader_error(struct win32_io_endpoint *);
 struct win32_io_endpoint *win32_io_writer_new(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
+struct win32_io_endpoint *win32_io_writer_new_overlapped(HANDLE *,
+		     void (*)(void *, uint32_t), void *);
 struct win32_io_endpoint *win32_io_writer_new_borrowed(HANDLE *,
 		     void (*)(void *, uint32_t), void *);
 int		 win32_io_writer_write(struct win32_io_endpoint *,

@@ -221,6 +221,13 @@ win32_make_output_pipe(HANDLE *readp, HANDLE *writep)
 	    FILE_FLAG_OVERLAPPED, 0));
 }
 
+static int
+win32_make_input_pipe(HANDLE *readp, HANDLE *writep)
+{
+	return (win32_make_pipe_flags(readp, writep, 1, 0, 0,
+	    FILE_FLAG_OVERLAPPED));
+}
+
 static win32_nt_query_information_process
 win32_get_nt_query_information_process(void)
 {
@@ -1061,7 +1068,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	if (size.Y <= 0)
 		size.Y = 24;
 
-	if (win32_make_pipe(&pw->input_read, &pw->input_write, 1, 0) != 0 ||
+	if (win32_make_input_pipe(&pw->input_read, &pw->input_write) != 0 ||
 	    win32_make_output_pipe(&pw->output_read, &pw->output_write) != 0) {
 		xasprintf(cause, "CreatePipe failed: %s",
 		    win32_strerror(GetLastError()));
@@ -1127,7 +1134,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	pw->input_queue = evbuffer_new();
 	if (pw->input_queue == NULL)
 		fatalx("out of memory");
-	pw->input_writer = win32_io_writer_new(&pw->input_write,
+	pw->input_writer = win32_io_writer_new_overlapped(&pw->input_write,
 	    win32_pane_input_event_cb, wp);
 	if (pw->input_writer == NULL) {
 		xasprintf(cause, "couldn't create pane input writer");
@@ -1466,7 +1473,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 
 	wj = xcalloc(1, sizeof *wj);
 	wj->pty = !!(flags & JOB_PTY);
-	if (win32_make_pipe(&wj->stdin_read, &wj->stdin_write, 1, 0) != 0 ||
+	if (win32_make_input_pipe(&wj->stdin_read, &wj->stdin_write) != 0 ||
 	    win32_make_output_pipe(&wj->stdout_read, &wj->stdout_write) != 0) {
 		if (cause != NULL) {
 			xasprintf(cause, "CreatePipe failed: %s",
@@ -1609,7 +1616,7 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	win32_close_handle(&wj->stdin_read);
 	win32_close_handle(&wj->stdout_write);
 	win32_close_handle(&wj->stderr_write);
-	wj->stdin_writer = win32_io_writer_new(&wj->stdin_write,
+	wj->stdin_writer = win32_io_writer_new_overlapped(&wj->stdin_write,
 	    win32_job_write_event_cb, wj);
 	if (wj->stdin_writer == NULL) {
 		if (cause != NULL)
