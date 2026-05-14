@@ -157,32 +157,33 @@ Required direction:
 - Alternatively replace the socketpair notifier with a proper Windows event
   integrated into libevent, if that is reliable in this environment.
 
-### P0: Win32 handle I/O teardown can block the server indefinitely
+### Fixed: Win32 handle I/O teardown can block the server indefinitely
 
 Files:
 
 - [`win32-event.c`](../win32-event.c): `win32_handle_event_free()` waits
-  forever after `CancelSynchronousIo()`.
+  for worker shutdown after `CancelSynchronousIo()`.
 - [`win32-event.c`](../win32-event.c): `win32_handle_writer_free()` does the
   same for writer threads.
 - [`win32-conpty.c`](../win32-conpty.c): pane/job teardown calls these frees
   from server lifecycle paths.
 
-Problem:
+Original problem:
 
 Reader and writer threads use synchronous `ReadFile()` and `WriteFile()`.
 Their free paths signal stop, call `CancelSynchronousIo()`, and then wait
 forever. If cancellation does not complete promptly for a pipe or ConPTY handle,
 the tmux server thread can hang during pane/job teardown.
 
-Required direction:
+Resolution:
 
-- Close or cancel the underlying I/O handle in a defined order that guarantees
-  the blocking call wakes.
-- Use bounded waits and log/mark leaked helper threads instead of blocking the
-  server forever.
-- Do not do blocking teardown from child polling paths.
-- Consider overlapped I/O for pipe/conpty handles in the final design.
+- Worker-backed endpoint frees now use a bounded wait after
+  `CancelSynchronousIo()`.
+- If the worker does not stop, the endpoint is deactivated and intentionally
+  leaked instead of freeing memory still reachable by the worker or blocking
+  the server indefinitely.
+- IOCP-backed pane/job/file endpoints keep their completion barrier; this fix
+  is for the remaining explicit worker fallback backend.
 
 ### Fixed: Terminal output ACK can acknowledge bytes never written
 

@@ -803,3 +803,21 @@ writer chunk boundary could split a multibyte UTF-8 character and produce
 mojibake. The server-side ACK contract is unchanged: bytes are acknowledged only
 after the writer drains them into either `WriteConsoleW` or the bounded
 one-sequence pending state that must be completed by a later chunk.
+
+## Worker Teardown Bound Slice
+
+Worker-backed endpoints no longer wait forever during endpoint free:
+
+- reader and writer worker frees still signal stop and call
+  `CancelSynchronousIo()` for the worker thread;
+- the subsequent thread join is bounded by `WIN32_WORKER_STOP_TIMEOUT`;
+- if the worker does not stop in time, the endpoint is deactivated and the
+  backend object is intentionally left allocated, avoiding a server-thread hang
+  and avoiding use-after-free from a still-running worker thread;
+- successful worker shutdown still frees handles, events, buffers, and endpoint
+  memory normally.
+
+This only applies to the explicit worker fallback backend used for console,
+direct tty, and stdio handles. IOCP-backed endpoints still use their completion
+event as a lifetime barrier, and process waits still use the existing
+`RegisterWaitForSingleObject` backend.

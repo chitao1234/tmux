@@ -223,6 +223,7 @@ static struct win32_io_service win32_io;
 #define WIN32_HANDLE_EVENT_LOW (512 * 1024)
 #define WIN32_HANDLE_WRITER_HIGH (1024 * 1024)
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
+#define WIN32_WORKER_STOP_TIMEOUT 1000
 
 static int	win32_io_service_init(void);
 static int	win32_io_service_init_iocp(void);
@@ -242,6 +243,7 @@ static void	win32_io_service_enqueue_process(struct win32_process_event *,
 static void	win32_io_service_cb(evutil_socket_t, short, void *);
 static void	win32_io_service_dispatch_endpoint(
 		     struct win32_io_endpoint *, uint32_t);
+static int	win32_wait_worker_thread(HANDLE, const char *);
 static void	win32_handle_event_update_ready(
 		     struct win32_handle_event *);
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
@@ -626,6 +628,21 @@ win32_io_endpoint_free(struct win32_io_endpoint *endpoint)
 		win32_process_event_free(endpoint->owner);
 		break;
 	}
+}
+
+static int
+win32_wait_worker_thread(HANDLE thread, const char *name)
+{
+	DWORD	wait;
+
+	if (thread == NULL)
+		return (0);
+	wait = WaitForSingleObject(thread, WIN32_WORKER_STOP_TIMEOUT);
+	if (wait == WAIT_OBJECT_0)
+		return (0);
+	log_debug("%s: worker thread did not stop within %u ms",
+	    name, WIN32_WORKER_STOP_TIMEOUT);
+	return (-1);
 }
 
 static void
@@ -1072,7 +1089,10 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		SetEvent(whe->stop);
 	if (whe->thread != NULL) {
 		CancelSynchronousIo(whe->thread);
-		WaitForSingleObject(whe->thread, INFINITE);
+		if (win32_wait_worker_thread(whe->thread, __func__) != 0) {
+			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			return;
+		}
 	}
 	win32_io_service_deactivate_endpoint(&whe->endpoint);
 	if (whe->input != NULL)
@@ -1519,7 +1539,10 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 		WaitForSingleObject(whw->complete, INFINITE);
 	if (whw->thread != NULL) {
 		CancelSynchronousIo(whw->thread);
-		WaitForSingleObject(whw->thread, INFINITE);
+		if (win32_wait_worker_thread(whw->thread, __func__) != 0) {
+			win32_io_service_deactivate_endpoint(&whw->endpoint);
+			return;
+		}
 	}
 	win32_io_service_deactivate_endpoint(&whw->endpoint);
 	if (whw->handle != NULL && !whw->borrowed)
