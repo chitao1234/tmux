@@ -303,9 +303,10 @@ static void	win32_handle_event_free(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_console_handle(HANDLE);
+static int	win32_handle_write_file(HANDLE, const void *, size_t);
 static int	win32_handle_write_console(HANDLE, const u_char *, size_t);
-static int	win32_handle_write(struct win32_handle_writer *, HANDLE,
-		     const void *, size_t);
+static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
+		     HANDLE, const void *, size_t);
 static enum win32_handle_writer_backend
 		win32_handle_writer_backend_for_handle(HANDLE *);
 
@@ -1361,7 +1362,8 @@ win32_console_writer_run(struct win32_handle_writer *whw)
 		handle = whw->handle;
 		LeaveCriticalSection(&whw->lock);
 
-		written = win32_handle_write(whw, handle, buf, size);
+		written = win32_handle_write_console_utf8(whw, handle, buf,
+		    size);
 		if (written == -1 || written == 0) {
 			EnterCriticalSection(&whw->lock);
 			whw->state = WIN32_HANDLE_WRITER_ERROR;
@@ -1737,7 +1739,7 @@ win32_handle_writer_thread(void *arg)
 			handle = whw->handle;
 			LeaveCriticalSection(&whw->lock);
 
-			written = win32_handle_write(whw, handle, buf, size);
+			written = win32_handle_write_file(handle, buf, size);
 			if (written == -1 || written == 0) {
 				EnterCriticalSection(&whw->lock);
 				whw->state = WIN32_HANDLE_WRITER_ERROR;
@@ -1765,22 +1767,6 @@ win32_handle_writer_thread(void *arg)
 	}
 
 stop:
-	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE &&
-	    whw->state != WIN32_HANDLE_WRITER_ERROR && whw->handle != NULL &&
-	    whw->utf8_partial_len != 0) {
-		handle = whw->handle;
-		size = whw->utf8_partial_len;
-		memcpy(buf, whw->utf8_partial, size);
-		LeaveCriticalSection(&whw->lock);
-		written = win32_handle_write_console(handle, (u_char *)buf,
-		    size);
-		EnterCriticalSection(&whw->lock);
-		if (written != (int)size) {
-			whw->state = WIN32_HANDLE_WRITER_ERROR;
-			whw->utf8_partial_len = 0;
-		} else
-			whw->utf8_partial_len = 0;
-	}
 	evbuffer_drain(whw->output, EVBUFFER_LENGTH(whw->output));
 	handle = whw->handle;
 	whw->handle = NULL;
@@ -2411,7 +2397,7 @@ win32_handle_write_console(HANDLE handle, const u_char *data, size_t size)
 }
 
 static int
-win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
+win32_handle_write_console_utf8(struct win32_handle_writer *whw, HANDLE handle,
     const void *data, size_t size)
 {
 	u_char		*buf;
@@ -2424,44 +2410,37 @@ win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
 	if (size == 0)
 		return (0);
 
-	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE) {
-		total = whw->utf8_partial_len + size;
-		buf = xmalloc(total);
-		if (whw->utf8_partial_len != 0) {
-			memcpy(buf, whw->utf8_partial,
-			    whw->utf8_partial_len);
-		}
-		memcpy(buf + whw->utf8_partial_len, input, size);
+	total = whw->utf8_partial_len + size;
+	buf = xmalloc(total);
+	if (whw->utf8_partial_len != 0)
+		memcpy(buf, whw->utf8_partial, whw->utf8_partial_len);
+	memcpy(buf + whw->utf8_partial_len, input, size);
 
-		complete = win32_utf8_complete_len(buf, total);
-		keep = total - complete;
-		if (keep > sizeof whw->utf8_partial) {
-			complete = total;
-			keep = 0;
-		}
-		written = 0;
-		if (complete != 0) {
-			written = win32_handle_write_console(handle, buf,
-			    complete);
-			if (written == -1) {
-				free(buf);
-				return (-1);
-			}
-			if ((size_t)written != complete) {
-				free(buf);
-				errno = EIO;
-				return (-1);
-			}
-		}
-		if (keep != 0)
-			memcpy(whw->utf8_partial, buf + complete, keep);
-		whw->utf8_partial_len = keep;
-		len = size;
-		free(buf);
-		return ((int)len);
+	complete = win32_utf8_complete_len(buf, total);
+	keep = total - complete;
+	if (keep > sizeof whw->utf8_partial) {
+		complete = total;
+		keep = 0;
 	}
-
-	return (win32_handle_write_file(handle, data, size));
+	written = 0;
+	if (complete != 0) {
+		written = win32_handle_write_console(handle, buf, complete);
+		if (written == -1) {
+			free(buf);
+			return (-1);
+		}
+		if ((size_t)written != complete) {
+			free(buf);
+			errno = EIO;
+			return (-1);
+		}
+	}
+	if (keep != 0)
+		memcpy(whw->utf8_partial, buf + complete, keep);
+	whw->utf8_partial_len = keep;
+	len = size;
+	free(buf);
+	return ((int)len);
 }
 
 static enum win32_handle_writer_backend
