@@ -81,8 +81,8 @@ int		 win32_handle_writer_drained(struct win32_handle_writer *);
 int		 win32_handle_writer_writable(struct win32_handle_writer *);
 int		 win32_handle_writer_closed(struct win32_handle_writer *);
 int		 win32_handle_writer_error(struct win32_handle_writer *);
-struct win32_process_event *win32_process_event_new(HANDLE,
-		     void (*)(void *), void *);
+struct win32_process_event *win32_process_event_new_events(HANDLE,
+		     void (*)(void *, uint32_t), void *);
 void		 win32_process_event_free(struct win32_process_event *);
 void		 win32_process_event_notify(struct win32_process_event *);
 void		 win32_log_handle(const char *, HANDLE);

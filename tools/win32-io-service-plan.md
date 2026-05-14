@@ -488,3 +488,17 @@ The old split write/error writer constructors have been removed:
   of separate write, error, and event callbacks;
 - writer dispatch now always delivers an explicit reason mask, matching all
   remaining writer consumers.
+
+## Explicit Process Event API Slice
+
+Process wait completions now use the explicit event callback vocabulary:
+
+- `win32_process_event_new_events()` replaces the single-purpose process exit
+  callback constructor;
+- pane and job process waits receive `WIN32_IO_EVENT_PROCESS_EXIT` from the
+  shared service queue before running their existing process-exit handling;
+- `win32_process_event_notify()` still replays a process-exit event for delayed
+  job exit callbacks, preserving the existing job callback registration
+  behavior;
+- the backend is still `RegisterWaitForSingleObject`, so this is an API and
+  dispatch cleanup, not an IOCP/process backend replacement.

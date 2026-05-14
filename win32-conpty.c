@@ -944,6 +944,13 @@ win32_pane_exit_cb(void *arg)
 		server_destroy_pane(wp, 1);
 }
 
+static void
+win32_pane_process_event_cb(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_PROCESS_EXIT)
+		win32_pane_exit_cb(arg);
+}
+
 int
 win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
     struct environ *env, const char *cwd, char **cause)
@@ -1047,8 +1054,8 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 		xasprintf(cause, "couldn't create pane output event");
 		goto fail;
 	}
-	pw->process_event = win32_process_event_new(pw->process,
-	    win32_pane_exit_cb, wp);
+	pw->process_event = win32_process_event_new_events(pw->process,
+	    win32_pane_process_event_cb, wp);
 	if (pw->process_event == NULL) {
 		xasprintf(cause, "couldn't create pane process event");
 		goto fail;
@@ -1344,6 +1351,13 @@ win32_job_exit_cb(void *arg)
 		wj->exit_pending = 1;
 }
 
+static void
+win32_job_process_event_cb(void *arg, uint32_t events)
+{
+	if (events & WIN32_IO_EVENT_PROCESS_EXIT)
+		win32_job_exit_cb(arg);
+}
+
 struct win32_job *
 win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
     struct environ *env, __unused struct session *s, const char *cwd,
@@ -1525,8 +1539,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 			xasprintf(cause, "couldn't create job output event");
 		goto fail;
 	}
-	wj->process_event = win32_process_event_new(wj->process,
-	    win32_job_exit_cb, wj);
+	wj->process_event = win32_process_event_new_events(wj->process,
+	    win32_job_process_event_cb, wj);
 	if (wj->process_event == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't create job process event");

@@ -168,7 +168,7 @@ struct win32_handle_writer {
 struct win32_process_event {
 	struct win32_io_completion completion;
 	HANDLE		 wait;
-	void		(*exitcb)(void *);
+	void		(*eventcb)(void *, uint32_t);
 	void		 *arg;
 };
 
@@ -470,8 +470,8 @@ static void
 win32_io_service_dispatch_process(struct win32_process_event *wpe,
     uint32_t events)
 {
-	if ((events & WIN32_IO_EVENT_PROCESS_EXIT) && wpe->exitcb != NULL)
-		wpe->exitcb(wpe->arg);
+	if (events & WIN32_IO_EVENT_PROCESS_EXIT)
+		wpe->eventcb(wpe->arg, events);
 }
 
 static void
@@ -535,17 +535,20 @@ win32_process_event_wait_cb(PVOID arg, __unused BOOLEAN timed_out)
 }
 
 struct win32_process_event *
-win32_process_event_new(HANDLE process, void (*exitcb)(void *), void *arg)
+win32_process_event_new_events(HANDLE process,
+    void (*eventcb)(void *, uint32_t), void *arg)
 {
 	struct win32_process_event	*wpe;
 
 	if (process == NULL || process == INVALID_HANDLE_VALUE)
 		return (NULL);
+	if (eventcb == NULL)
+		return (NULL);
 	if (win32_io_service_init() != 0)
 		return (NULL);
 
 	wpe = xcalloc(1, sizeof *wpe);
-	wpe->exitcb = exitcb;
+	wpe->eventcb = eventcb;
 	wpe->arg = arg;
 	win32_io_completion_init(&wpe->completion, WIN32_IO_COMPLETION_PROCESS,
 	    wpe);
