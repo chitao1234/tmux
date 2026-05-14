@@ -326,7 +326,7 @@ static void	win32_handle_event_free(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_console_handle(HANDLE);
-static int	win32_handle_write_file(HANDLE, const void *, size_t);
+static int	win32_handle_write_file(HANDLE, const void *, size_t, DWORD *);
 static int	win32_handle_write_console(HANDLE, const u_char *, size_t);
 static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
 		     HANDLE, const void *, size_t);
@@ -1958,6 +1958,8 @@ win32_handle_writer_thread(void *arg)
 	size_t				 size;
 	int				 written;
 	int				 notify;
+	int				 stopped;
+	DWORD				 error;
 	uint32_t			 events;
 
 	buf = xmalloc(WIN32_HANDLE_WRITER_CHUNK);
@@ -1985,18 +1987,35 @@ win32_handle_writer_thread(void *arg)
 			handle = whw->handle;
 			LeaveCriticalSection(&whw->lock);
 
-			written = win32_handle_write_file(handle, buf, size);
+			error = ERROR_SUCCESS;
+			written = win32_handle_write_file(handle, buf, size,
+			    &error);
 			if (written == -1 || written == 0) {
 				EnterCriticalSection(&whw->lock);
-				whw->state = WIN32_HANDLE_WRITER_ERROR;
+				stopped = whw->stop;
+				if (stopped)
+					whw->state = WIN32_HANDLE_WRITER_CLOSED;
+				else
+					whw->state = WIN32_HANDLE_WRITER_ERROR;
 				evbuffer_drain(whw->output,
 				    EVBUFFER_LENGTH(whw->output));
 				handle = whw->handle;
 				whw->handle = NULL;
 				LeaveCriticalSection(&whw->lock);
+				if (!stopped) {
+					if (written == -1) {
+						log_debug("%s: WriteFile failed: "
+						    "%s", __func__,
+						    win32_strerror(error));
+					} else {
+						log_debug("%s: WriteFile wrote "
+						    "zero bytes", __func__);
+					}
+				}
 				if (handle != NULL && !whw->borrowed)
 					CloseHandle(handle);
 				win32_io_service_enqueue_writer(whw,
+				    stopped ? WIN32_IO_EVENT_WRITE_CLOSED :
 				    WIN32_IO_EVENT_ERROR);
 				free(buf);
 				return (0);
@@ -2519,16 +2538,19 @@ win32_io_writer_writable(struct win32_io_endpoint *endpoint)
 }
 
 static int
-win32_handle_write_file(HANDLE handle, const void *data, size_t size)
+win32_handle_write_file(HANDLE handle, const void *data, size_t size,
+    DWORD *error)
 {
 	DWORD	written, nwrite;
 
+	if (error != NULL)
+		*error = ERROR_SUCCESS;
 	nwrite = size > INT_MAX ? INT_MAX : (DWORD)size;
 	if (nwrite == 0)
 		return (0);
 	if (!WriteFile(handle, data, nwrite, &written, NULL)) {
-		log_debug("%s: WriteFile failed: %s", __func__,
-		    win32_strerror(GetLastError()));
+		if (error != NULL)
+			*error = GetLastError();
 		errno = EIO;
 		return (-1);
 	}
