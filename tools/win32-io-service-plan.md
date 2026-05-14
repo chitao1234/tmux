@@ -613,3 +613,19 @@ Pane and job stdin writers now use an IOCP-backed overlapped write backend:
 This removes the most important remaining synchronous pipe write path from the
 server-side pane and job lifecycle without changing the public tmux stdin
 acceptance contract.
+
+## IOCP Endpoint Teardown Hardening Slice
+
+IOCP-backed endpoints now use their completion event as a stronger lifetime
+barrier:
+
+- starting an overlapped read or write resets the endpoint completion event;
+- completion handlers only signal the event when no replacement operation was
+  chained;
+- endpoint free marks the endpoint as stopping, cancels any pending operation,
+  and waits for the completion event before deleting endpoint state;
+- this covers both a pending kernel operation and an IOCP completion handler
+  that has already dequeued the completion but has not yet returned.
+
+This prevents teardown from freeing reader or writer endpoint memory while the
+IOCP thread can still reference it.

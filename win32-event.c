@@ -746,6 +746,7 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 		return (0);
 
 	memset(&whe->overlapped, 0, sizeof whe->overlapped);
+	ResetEvent(whe->complete);
 	whe->pending = 1;
 	if (ReadFile(whe->handle, whe->iocp_buf, sizeof whe->iocp_buf, &nread,
 	    &whe->overlapped))
@@ -763,6 +764,7 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 		events = WIN32_IO_EVENT_ERROR;
 	}
 	whe->error = error;
+	SetEvent(whe->complete);
 	return (events);
 }
 
@@ -772,6 +774,7 @@ win32_handle_event_iocp_complete(struct win32_handle_event *whe, DWORD error,
 {
 	enum win32_handle_event_state	 state;
 	uint32_t			 events = 0;
+	int				 complete = 0;
 
 	EnterCriticalSection(&whe->lock);
 	if (whe->pending)
@@ -814,8 +817,11 @@ out:
 		events |= win32_handle_event_iocp_start(whe);
 	if (events != 0)
 		win32_io_service_enqueue_endpoint(&whe->endpoint, events);
+	if (!whe->pending)
+		complete = 1;
+	if (complete)
+		SetEvent(whe->complete);
 	LeaveCriticalSection(&whe->lock);
-	SetEvent(whe->complete);
 }
 
 static int
@@ -981,20 +987,15 @@ win32_io_reader_new_overlapped(HANDLE handle,
 static void
 win32_handle_event_free(struct win32_handle_event *whe)
 {
-	int	wait = 0;
-
 	if (whe == NULL)
 		return;
 	if (whe->backend == WIN32_HANDLE_EVENT_IOCP) {
 		EnterCriticalSection(&whe->lock);
 		whe->stopping = 1;
-		if (whe->pending) {
-			wait = 1;
-			ResetEvent(whe->complete);
+		if (whe->pending)
 			CancelIoEx(whe->handle, &whe->overlapped);
-		}
 		LeaveCriticalSection(&whe->lock);
-		if (wait && whe->complete != NULL)
+		if (whe->complete != NULL)
 			WaitForSingleObject(whe->complete, INFINITE);
 	} else if (whe->stop != NULL)
 		SetEvent(whe->stop);
@@ -1219,6 +1220,7 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 	memcpy(whw->iocp_buf, EVBUFFER_DATA(whw->output), size);
 
 	memset(&whw->overlapped, 0, sizeof whw->overlapped);
+	ResetEvent(whw->complete);
 	whw->iocp_size = size;
 	whw->pending = 1;
 	if (WriteFile(whw->handle, whw->iocp_buf, size, NULL, &whw->overlapped))
@@ -1234,6 +1236,7 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 	if (!whw->borrowed)
 		CloseHandle(whw->handle);
 	whw->handle = NULL;
+	SetEvent(whw->complete);
 	return (WIN32_IO_EVENT_ERROR);
 }
 
@@ -1242,6 +1245,7 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
     DWORD error, DWORD nwritten)
 {
 	uint32_t	events = 0;
+	int		complete = 0;
 
 	EnterCriticalSection(&whw->lock);
 	if (whw->pending)
@@ -1271,8 +1275,11 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
 out:
 	if (events != 0)
 		win32_io_service_enqueue_endpoint(&whw->endpoint, events);
+	if (!whw->pending)
+		complete = 1;
+	if (complete)
+		SetEvent(whw->complete);
 	LeaveCriticalSection(&whw->lock);
-	SetEvent(whw->complete);
 }
 
 static struct win32_handle_writer *
@@ -1411,22 +1418,17 @@ win32_io_writer_new_borrowed(HANDLE *handle,
 static void
 win32_handle_writer_free(struct win32_handle_writer *whw)
 {
-	int	wait = 0;
-
 	if (whw == NULL)
 		return;
 	EnterCriticalSection(&whw->lock);
 	whw->stop = 1;
 	if (whw->backend == WIN32_HANDLE_WRITER_IOCP) {
-		if (whw->pending) {
-			wait = 1;
-			ResetEvent(whw->complete);
+		if (whw->pending)
 			CancelIoEx(whw->handle, &whw->overlapped);
-		}
 	} else
 		SetEvent(whw->ready);
 	LeaveCriticalSection(&whw->lock);
-	if (wait && whw->complete != NULL)
+	if (whw->backend == WIN32_HANDLE_WRITER_IOCP && whw->complete != NULL)
 		WaitForSingleObject(whw->complete, INFINITE);
 	if (whw->thread != NULL) {
 		CancelSynchronousIo(whw->thread);
