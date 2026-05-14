@@ -83,6 +83,8 @@ The removal decision is data-driven:
 - `tty.c` treats EOF on a server-owned direct input handle as an input
   half-close. This lets pipe-backed clients finish output and normal session
   teardown instead of being destroyed immediately when stdin closes.
+- `tty.c` preserves the direct client's current size if the server cannot
+  query a console screen buffer from the handed handles later.
 
 ## Attachment Model
 
@@ -258,6 +260,8 @@ This means:
 - direct-handle sessions should preserve an initial size supplied by the
   client when the server cannot query a Win32 console size for non-console
   handles;
+- direct-handle sessions should not be reset to 80x24 just because later size
+  queries fail;
 - the client-side console mode shim should remain compatibility-only;
 - resize propagation must stay correct when the direct-handle path is active.
 
@@ -332,6 +336,7 @@ There are two possible outcomes:
 
 - Use server-side size helpers for direct-handle clients.
 - Preserve the client-supplied initial size with `MSG_IDENTIFY_WIN32_SIZE`.
+- Keep the current direct size if later size queries fail.
 - Keep `MSG_WIN32_TTY_RESIZE` relay-only.
 - Remove assumptions that a Win32 terminal client implies
   `c->win32_console`.

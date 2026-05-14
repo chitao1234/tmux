@@ -178,6 +178,13 @@ tty_resize(struct tty *tty)
 		tty_invalidate(tty);
 		return;
 	}
+	if (c->win32_stdin != NULL && c->win32_stdout != NULL &&
+	    !c->win32_console && tty->sx != 0 && tty->sy != 0) {
+		log_debug("%s: %s keeping %ux%u (%ux%u)", __func__, c->name,
+		    tty->sx, tty->sy, tty->xpixel, tty->ypixel);
+		tty_invalidate(tty);
+		return;
+	}
 	sx = 80;
 	sy = 24;
 	xpixel = 0;
