@@ -61,6 +61,8 @@ static int	server_client_win32_tty_output_ack(struct client *,
 		    struct imsg *);
 static int	server_client_win32_resize(struct client *, struct imsg *);
 static int	server_client_win32_tty_input(struct client *, struct imsg *);
+static int	server_client_win32_identify_handle(struct client *,
+		    struct imsg *, int);
 #endif
 
 /* Compare client windows. */
@@ -2617,6 +2619,64 @@ server_client_win32_resize(struct client *c, struct imsg *imsg)
 		notify_client("client-resized", c);
 	return (0);
 }
+
+static int
+server_client_win32_identify_handle(struct client *c, struct imsg *imsg,
+    int input)
+{
+	struct msg_win32_handle	 msg;
+	HANDLE			 handle = NULL;
+	DWORD			 access, type;
+	ssize_t			 datalen;
+	char			*cause = NULL;
+	const char		*name;
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen != sizeof msg)
+		return (-1);
+	memcpy(&msg, imsg->data, sizeof msg);
+
+	name = input ? "IDENTIFY_WIN32_STDIN" : "IDENTIFY_WIN32_STDOUT";
+	if (c->win32_console) {
+		log_debug("client %p %s rejected: mixed relay/direct state",
+		    c, name);
+		return (-1);
+	}
+	if (c->pid <= 0 || msg.pid != (uint32_t)c->pid) {
+		log_debug("client %p %s rejected: bad pid %u != %ld",
+		    c, name, msg.pid, (long)c->pid);
+		return (-1);
+	}
+	if ((input && c->win32_stdin != NULL) ||
+	    (!input && c->win32_stdout != NULL)) {
+		log_debug("client %p %s rejected: duplicate handle", c, name);
+		return (-1);
+	}
+
+	access = input ? GENERIC_READ : GENERIC_WRITE;
+	if (win32_ipc_duplicate_client_handle(c->pid, msg.handle, access,
+	    &handle, &cause) != 0) {
+		log_debug("client %p %s rejected: %s", c, name,
+		    cause != NULL ? cause : strerror(errno));
+		free(cause);
+		return (-1);
+	}
+
+	type = GetFileType(handle);
+	if (type != FILE_TYPE_CHAR && type != FILE_TYPE_PIPE) {
+		log_debug("client %p %s rejected: unsupported handle type %#x",
+		    c, name, (u_int)type);
+		CloseHandle(handle);
+		return (-1);
+	}
+
+	if (input)
+		c->win32_stdin = handle;
+	else
+		c->win32_stdout = handle;
+	log_debug("client %p %s duplicated handle %p", c, name, handle);
+	return (0);
+}
 #endif
 
 /* Handle identify message. */
@@ -2705,22 +2765,21 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		break;
 #ifdef TMUX_WIN32
 	case MSG_IDENTIFY_WIN32_STDIN:
-		if (datalen != sizeof(struct msg_win32_handle))
+		if (server_client_win32_identify_handle(c, imsg, 1) != 0)
 			return (-1);
-		/*
-		 * Disabled until handle transfer carries its own authenticated
-		 * duplication flow instead of relying on peer PID discovery.
-		 */
-		log_debug("client %p IDENTIFY_WIN32_STDIN rejected", c);
-		return (-1);
+		break;
 	case MSG_IDENTIFY_WIN32_STDOUT:
-		if (datalen != sizeof(struct msg_win32_handle))
+		if (server_client_win32_identify_handle(c, imsg, 0) != 0)
 			return (-1);
-		log_debug("client %p IDENTIFY_WIN32_STDOUT rejected", c);
-		return (-1);
+		break;
 	case MSG_IDENTIFY_WIN32_TERMINAL:
 		if (datalen != sizeof size)
 			return (-1);
+		if (c->win32_stdin != NULL || c->win32_stdout != NULL) {
+			log_debug("client %p IDENTIFY_WIN32_TERMINAL rejected: "
+			    "mixed relay/direct state", c);
+			return (-1);
+		}
 		memcpy(&size, data, sizeof size);
 		if (size.sx == 0 || size.sy == 0)
 			return (-1);

@@ -1716,9 +1716,11 @@ win32_io_reader_new_terminal(HANDLE handle,
 {
 	/*
 	 * Direct terminal handles are supplied by the client and are not owned
-	 * or opened here, so the worker fallback is the final non-console
-	 * backend. Actual console input must use win32_io_reader_new_console().
+	 * or opened here. Actual console input still needs the console reader;
+	 * pipes and redirected terminal input use the worker fallback.
 	 */
+	if (win32_console_handle(handle))
+		return (win32_io_reader_new_console(handle, eventcb, arg));
 	return (win32_io_reader_new_worker(handle, WIN32_HANDLE_EVENT_TERMINAL,
 	    eventcb, arg));
 }

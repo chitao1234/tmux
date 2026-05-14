@@ -104,6 +104,8 @@ int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);
 int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
+int		 win32_ipc_duplicate_client_handle(pid_t, uint64_t, DWORD,
+		     HANDLE *, char **);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
 int		 win32_terminal_prepare_terminfo(void);

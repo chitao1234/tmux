@@ -466,6 +466,106 @@ win32_ipc_cache_current_identity(void)
 	return (0);
 }
 
+int
+win32_ipc_duplicate_client_handle(pid_t pid, uint64_t value, DWORD access,
+    HANDLE *out, char **cause)
+{
+	HANDLE	process = NULL, token = NULL, probe = NULL, duplicate = NULL;
+	char	*user_sid = NULL;
+	DWORD	 error;
+	int	 retval = -1;
+
+	*out = NULL;
+	if (pid <= 0 || value == 0 ||
+	    value == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid client handle claim");
+		errno = EINVAL;
+		return (-1);
+	}
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_user_sid_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine server identity");
+		errno = EACCES;
+		return (-1);
+	}
+
+	process = OpenProcess(PROCESS_DUP_HANDLE|
+	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+	if (process == NULL) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't open client process: %s",
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		return (-1);
+	}
+
+	if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't open client process token: %s",
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (win32_ipc_capture_token_identity(token, &user_sid, cause) != 0) {
+		errno = EACCES;
+		goto out;
+	}
+	if (strcmp(user_sid, win32_ipc_current_user_sid_value) != 0) {
+		if (cause != NULL)
+			xasprintf(cause, "client process user SID mismatch");
+		errno = EACCES;
+		goto out;
+	}
+
+	if (access != 0 && !DuplicateHandle(process, (HANDLE)(uintptr_t)value,
+	    GetCurrentProcess(), &probe, access, FALSE, 0)) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "client handle lacks requested access: %s",
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (probe != NULL) {
+		CloseHandle(probe);
+		probe = NULL;
+	}
+
+	if (!DuplicateHandle(process, (HANDLE)(uintptr_t)value,
+	    GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't duplicate client handle: %s",
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+
+	*out = duplicate;
+	duplicate = NULL;
+	retval = 0;
+
+out:
+	if (duplicate != NULL)
+		CloseHandle(duplicate);
+	if (probe != NULL)
+		CloseHandle(probe);
+	if (token != NULL)
+		CloseHandle(token);
+	if (process != NULL)
+		CloseHandle(process);
+	free(user_sid);
+	return (retval);
+}
+
 static int
 win32_ipc_make_managed_root(char **path, char **cause)
 {

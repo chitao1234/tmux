@@ -256,6 +256,7 @@ There are two possible outcomes:
   messages.
 - Add the minimal server-side handle duplication helper.
 - Accept `MSG_IDENTIFY_WIN32_STDOUT` for a client process handle claim.
+- Use `TMUX_WIN32_HANDLE_TTY=1` as the initial native testing opt-in.
 - Use this only for targeted output smoke coverage, not as a normal
   interactive attach mode.
 - Do not combine direct stdout with relay stdin as a product path.

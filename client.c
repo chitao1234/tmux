@@ -40,6 +40,7 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
+static int		 client_win32_handle_tty;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
@@ -94,6 +95,8 @@ static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
+static int		 client_win32_handle_tty_enabled(void);
+static int		 client_win32_handle_tty_available(void);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -354,6 +357,34 @@ client_exit(void)
 }
 
 #ifdef TMUX_WIN32
+static int
+client_win32_valid_handle(HANDLE handle)
+{
+	return (handle != NULL && handle != INVALID_HANDLE_VALUE);
+}
+
+static int
+client_win32_handle_tty_enabled(void)
+{
+	const char	*value;
+
+	value = getenv("TMUX_WIN32_HANDLE_TTY");
+	if (value == NULL || *value == '\0' || strcmp(value, "0") == 0)
+		return (0);
+	return (1);
+}
+
+static int
+client_win32_handle_tty_available(void)
+{
+	HANDLE	hin, hout;
+
+	hin = GetStdHandle(STD_INPUT_HANDLE);
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	return (client_win32_valid_handle(hin) &&
+	    client_win32_valid_handle(hout));
+}
+
 static void
 client_win32_resize_timer_callback(__unused tmux_event_fd fd,
     __unused short events, __unused void *arg)
@@ -397,7 +428,8 @@ client_win32_resize_timer_start(void)
 
 	if (client_win32_resize_timer_set)
 		return;
-	if (!client_is_console || (client_flags & CLIENT_CONTROL))
+	if (client_win32_handle_tty || !client_is_console ||
+	    (client_flags & CLIENT_CONTROL))
 		return;
 
 	if (win32_terminal_get_size(NULL, &sx, &sy, &xpixel, &ypixel) == 0) {
@@ -522,7 +554,8 @@ client_win32_input_start(void)
 
 	if (client_win32_input != NULL)
 		return;
-	if (!client_is_console || (client_flags & CLIENT_CONTROL))
+	if (client_win32_handle_tty || !client_is_console ||
+	    (client_flags & CLIENT_CONTROL))
 		return;
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
@@ -769,6 +802,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #ifdef TMUX_WIN32
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
+	client_win32_handle_tty = client_win32_handle_tty_enabled();
+	if ((client_flags & CLIENT_CONTROL) ||
+	    !client_win32_handle_tty_available())
+		client_win32_handle_tty = 0;
+	if (client_win32_handle_tty)
+		log_debug("using direct Win32 terminal handles");
 	if (client_is_console &&
 	    (*termname == '\0' || strcmp(termname, "dumb") == 0))
 		termname = "xterm-256color";
@@ -962,7 +1001,9 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	char	**ss;
 	size_t	  sslen;
 #ifdef TMUX_WIN32
+	struct msg_win32_handle handle;
 	struct msg_win32_terminal_size size;
+	HANDLE	  hin, hout;
 #else
 	int	  fd;
 #endif
@@ -987,8 +1028,23 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		    caps[i], strlen(caps[i]) + 1);
 	}
 
+	pid = getpid();
+	proc_send(client_peer, MSG_IDENTIFY_CLIENTPID, -1, &pid, sizeof pid);
+
 #ifdef TMUX_WIN32
-	if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
+	if (client_win32_handle_tty && !(client_flags & CLIENT_CONTROL)) {
+		handle.pid = (uint32_t)pid;
+
+		hout = GetStdHandle(STD_OUTPUT_HANDLE);
+		handle.handle = (uint64_t)(uintptr_t)hout;
+		proc_send(client_peer, MSG_IDENTIFY_WIN32_STDOUT, -1,
+		    &handle, sizeof handle);
+
+		hin = GetStdHandle(STD_INPUT_HANDLE);
+		handle.handle = (uint64_t)(uintptr_t)hin;
+		proc_send(client_peer, MSG_IDENTIFY_WIN32_STDIN, -1,
+		    &handle, sizeof handle);
+	} else if (client_is_console && !(client_flags & CLIENT_CONTROL)) {
 		if (win32_terminal_get_size(NULL, &size.sx, &size.sy,
 		    &size.xpixel, &size.ypixel) != 0) {
 			size.sx = 80;
@@ -1007,9 +1063,6 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		fatal("dup failed");
 	proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0);
 #endif
-
-	pid = getpid();
-	proc_send(client_peer, MSG_IDENTIFY_CLIENTPID, -1, &pid, sizeof pid);
 
 	for (ss = environ; *ss != NULL; ss++) {
 		sslen = strlen(*ss) + 1;
