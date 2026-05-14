@@ -1147,6 +1147,24 @@ the most fragile part of console input shutdown by avoiding a permanent
 blocking console read while keeping the external endpoint and protocol
 semantics unchanged.
 
+## Console Writer Partial Flush Slice
+
+Console output now flushes any retained UTF-8 partial sequence during writer
+teardown:
+
+- the console writer already kept at most one trailing incomplete UTF-8
+  sequence so `WriteConsoleW()` was not asked to decode split code points;
+- when the writer is closed or freed without a hard writer error, that retained
+  sequence is now written through the same `WriteConsoleW()` conversion path
+  before the backend reports `WRITE_CLOSED`;
+- if the final partial cannot be written, the backend reports
+  `WIN32_IO_EVENT_ERROR` instead of silently treating the retained bytes as
+  drained.
+
+This preserves the existing active console relay ACK model while closing a
+small gap where bytes could be accepted into the console writer but remain only
+in the backend's partial UTF-8 buffer at teardown.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup

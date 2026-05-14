@@ -280,6 +280,7 @@ static void	win32_handle_event_free(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_console_handle(HANDLE);
+static int	win32_handle_write_console(HANDLE, const u_char *, size_t);
 static int	win32_handle_write(struct win32_handle_writer *, HANDLE,
 		     const void *, size_t);
 static enum win32_handle_writer_backend
@@ -1510,6 +1511,22 @@ win32_handle_writer_thread(void *arg)
 	}
 
 stop:
+	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE &&
+	    whw->state != WIN32_HANDLE_WRITER_ERROR && whw->handle != NULL &&
+	    whw->utf8_partial_len != 0) {
+		handle = whw->handle;
+		size = whw->utf8_partial_len;
+		memcpy(buf, whw->utf8_partial, size);
+		LeaveCriticalSection(&whw->lock);
+		written = win32_handle_write_console(handle, (u_char *)buf,
+		    size);
+		EnterCriticalSection(&whw->lock);
+		if (written != (int)size) {
+			whw->state = WIN32_HANDLE_WRITER_ERROR;
+			whw->utf8_partial_len = 0;
+		} else
+			whw->utf8_partial_len = 0;
+	}
 	evbuffer_drain(whw->output, EVBUFFER_LENGTH(whw->output));
 	handle = whw->handle;
 	whw->handle = NULL;
