@@ -325,3 +325,21 @@ The Win32 I/O service now uses one typed completion queue internally:
   still uses the legacy `win32_handle_event_*`, `win32_handle_writer_*`, and
   `win32_process_event_*` objects, but the backend shape now matches the final
   ordered completion queue more closely.
+
+## Completion Event Reason Slice
+
+Typed completions now carry explicit event reasons:
+
+- the internal completion record has an event-reason mask for read data, read
+  EOF, write drained, write closed, process exit, error, and canceled;
+- enqueue sites publish why they woke the tmux thread instead of making
+  dispatch infer every edge from endpoint state alone;
+- reasons coalesce while a completion is already pending, preserving the
+  existing pending-suppression behavior while retaining event meaning;
+- writer dispatch now calls write callbacks only for write-drained/write-closed
+  reasons and error callbacks only for writer error state;
+- reader and process dispatch use the event reasons while still preserving
+  compatibility state checks;
+- this is still internal metadata, not the final public endpoint API, but it is
+  the bridge from kind-based completions to the planned `WIN32_IO_*` event
+  vocabulary.
