@@ -1197,9 +1197,16 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 	if (!ReadFile(whe->handle, buf, sizeof buf, &nread, NULL)) {
 		DWORD error = GetLastError();
 
-		log_debug("%s: ReadFile failed: %s", __func__,
-		    win32_strerror(error));
 		EnterCriticalSection(&whe->lock);
+		if (whe->stopping) {
+			if (win32_handle_event_error_is_eof(error))
+				whe->state = WIN32_HANDLE_EVENT_EOF;
+			else
+				whe->state = WIN32_HANDLE_EVENT_ERROR;
+			whe->error = error;
+			LeaveCriticalSection(&whe->lock);
+			return (-1);
+		}
 		if (win32_handle_event_error_is_eof(error))
 			whe->state = WIN32_HANDLE_EVENT_EOF;
 		else
@@ -1207,6 +1214,8 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 		whe->error = error;
 		win32_handle_event_update_ready(whe);
 		LeaveCriticalSection(&whe->lock);
+		log_debug("%s: ReadFile failed: %s", __func__,
+		    win32_strerror(error));
 		win32_io_service_enqueue_reader(whe);
 		return (-1);
 	}
@@ -1819,8 +1828,12 @@ win32_handle_event_free(struct win32_handle_event *whe)
 			win32_io_service_deactivate_endpoint(&whe->endpoint);
 			return;
 		}
-	} else if (whe->stop != NULL)
+	} else if (whe->stop != NULL) {
+		EnterCriticalSection(&whe->lock);
+		whe->stopping = 1;
 		SetEvent(whe->stop);
+		LeaveCriticalSection(&whe->lock);
+	}
 	if (whe->thread != NULL) {
 		CancelSynchronousIo(whe->thread);
 		if (win32_wait_worker_thread(whe->thread, __func__) != 0) {

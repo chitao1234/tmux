@@ -388,6 +388,17 @@ There are two possible outcomes:
 All runtime checks should run natively from PowerShell with `.\tmux.exe`, not
 under MSYS2.
 
+The tracked non-console direct-handle smoke entry point is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\win32-direct-handle-smoke.ps1
+```
+
+This script creates isolated temporary log directories, runs native `tmux.exe`
+clients, disables the console relay with `TMUX_WIN32_CONSOLE_RELAY=0`, and
+asserts that the server receives direct stdin/stdout handles and direct size
+messages without using `MSG_IDENTIFY_WIN32_TERMINAL`.
+
 ### Baseline Regression
 
 - Start a normal Win32 session with the existing console relay path.
