@@ -1074,6 +1074,26 @@ Win32 shutdown prompt-history saving now uses the I/O service path:
 - empty history still truncates the configured file through the same path;
 - the Unix save path remains synchronous and unchanged in backend policy.
 
+## Console Writer Backend Slice
+
+Console output has been split out of the generic worker writer backend:
+
+- console writers now use an explicit `WIN32_HANDLE_WRITER_CONSOLE` backend
+  instead of probing `GetConsoleMode()` on every write through the generic
+  worker path;
+- `win32_io_writer_new_console_borrowed()` now requires an actual console
+  handle, making active console relay output fail early if the handle is not a
+  console;
+- inherited stdio and direct terminal writers still accept non-console handles,
+  but choose the console backend when the borrowed handle is an actual console;
+- UTF-8 partial-sequence preservation and `WriteConsoleW()` conversion remain
+  unchanged, preserving the existing ACK-after-drain contract for active
+  console relay output and stdio console file writes.
+
+This is not the final console proactor. It creates a dedicated replacement
+point for console output so a later slice can change console write scheduling
+without touching file, pipe, or generic stdio handle behavior.
+
 ## Current Closure Audit
 
 The production pane, job, client file-transfer, server-local file, startup
@@ -1081,10 +1101,13 @@ configuration, popup editor file, and prompt-history paths now use the Win32
 I/O service or an explicitly documented service fallback. The remaining direct
 or worker-backed paths are intentionally classified rather than hidden:
 
-- console input/output and direct terminal handles still use the
-  purpose-specific console or terminal worker-fallback constructors, because
-  console handles need the UTF-8/`WriteConsoleW` worker backend until a
+- console input still uses the purpose-specific console worker-fallback
+  constructor, and console output still uses a worker thread, but console
+  output is now isolated in a dedicated UTF-8/`WriteConsoleW` backend until a
   dedicated console proactor exists;
+- direct terminal handles still use the purpose-specific terminal
+  worker-fallback constructors, choosing the console backend only when the
+  borrowed output handle is an actual console;
 - inherited stdio streams for client file transfer still use the worker
   fallback, because they are borrowed process handles and are not always
   overlapped-capable regular files;

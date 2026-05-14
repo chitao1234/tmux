@@ -46,6 +46,7 @@ enum win32_handle_event_backend {
 
 enum win32_handle_writer_backend {
 	WIN32_HANDLE_WRITER_WORKER,
+	WIN32_HANDLE_WRITER_CONSOLE,
 	WIN32_HANDLE_WRITER_IOCP
 };
 
@@ -266,6 +267,8 @@ static void	win32_handle_writer_free(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_handle_write(struct win32_handle_writer *, HANDLE,
 		     const void *, size_t);
+static enum win32_handle_writer_backend
+		win32_handle_writer_backend_for_handle(HANDLE *);
 
 static int
 win32_socketpair(SOCKET pair[2])
@@ -1468,8 +1471,9 @@ out:
 }
 
 static struct win32_handle_writer *
-win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
-    void *arg, int borrowed)
+win32_handle_writer_new1(HANDLE *handle,
+    enum win32_handle_writer_backend backend,
+    void (*eventcb)(void *, uint32_t), void *arg, int borrowed)
 {
 	struct win32_handle_writer	*whw;
 
@@ -1483,6 +1487,7 @@ win32_handle_writer_new1(HANDLE *handle, void (*eventcb)(void *, uint32_t),
 	whw = xcalloc(1, sizeof *whw);
 	whw->handle = *handle;
 	whw->borrowed = borrowed;
+	whw->backend = backend;
 	whw->output = evbuffer_new();
 	if (whw->output == NULL) {
 		free(whw);
@@ -1597,11 +1602,12 @@ win32_io_writer_new_file_borrowed(HANDLE *handle, uint64_t offset, int append,
 
 static struct win32_io_endpoint *
 win32_io_writer_new_worker_borrowed(HANDLE *handle,
-    void (*eventcb)(void *, uint32_t), void *arg)
+    enum win32_handle_writer_backend backend, void (*eventcb)(void *, uint32_t),
+    void *arg)
 {
 	struct win32_handle_writer	*whw;
 
-	whw = win32_handle_writer_new1(handle, eventcb, arg, 1);
+	whw = win32_handle_writer_new1(handle, backend, eventcb, arg, 1);
 	if (whw == NULL)
 		return (NULL);
 	return (&whw->endpoint);
@@ -1611,21 +1617,32 @@ struct win32_io_endpoint *
 win32_io_writer_new_console_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
+	DWORD	mode;
+
+	if (handle == NULL || *handle == NULL || *handle == INVALID_HANDLE_VALUE)
+		return (NULL);
+	if (!GetConsoleMode(*handle, &mode)) {
+		errno = ENOTTY;
+		return (NULL);
+	}
+	return (win32_io_writer_new_worker_borrowed(handle,
+	    WIN32_HANDLE_WRITER_CONSOLE, eventcb, arg));
 }
 
 struct win32_io_endpoint *
 win32_io_writer_new_stdio_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
+	return (win32_io_writer_new_worker_borrowed(handle,
+	    win32_handle_writer_backend_for_handle(handle), eventcb, arg));
 }
 
 struct win32_io_endpoint *
 win32_io_writer_new_terminal_borrowed(HANDLE *handle,
     void (*eventcb)(void *, uint32_t), void *arg)
 {
-	return (win32_io_writer_new_worker_borrowed(handle, eventcb, arg));
+	return (win32_io_writer_new_worker_borrowed(handle,
+	    win32_handle_writer_backend_for_handle(handle), eventcb, arg));
 }
 
 static void
@@ -1920,7 +1937,6 @@ static int
 win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
     const void *data, size_t size)
 {
-	DWORD		 mode;
 	u_char		*buf;
 	const u_char	*input = data;
 	size_t		 total, complete, keep, len;
@@ -1931,7 +1947,7 @@ win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
 	if (size == 0)
 		return (0);
 
-	if (GetConsoleMode(handle, &mode)) {
+	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE) {
 		total = whw->utf8_partial_len + size;
 		buf = xmalloc(total);
 		if (whw->utf8_partial_len != 0) {
@@ -1969,6 +1985,17 @@ win32_handle_write(struct win32_handle_writer *whw, HANDLE handle,
 	}
 
 	return (win32_handle_write_file(handle, data, size));
+}
+
+static enum win32_handle_writer_backend
+win32_handle_writer_backend_for_handle(HANDLE *handle)
+{
+	DWORD	mode;
+
+	if (handle != NULL && *handle != NULL && *handle != INVALID_HANDLE_VALUE &&
+	    GetConsoleMode(*handle, &mode))
+		return (WIN32_HANDLE_WRITER_CONSOLE);
+	return (WIN32_HANDLE_WRITER_WORKER);
 }
 
 void
