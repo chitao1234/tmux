@@ -1,586 +1,709 @@
 # Win32 Port Findings
 
-Date: 2026-05-13
+Date: 2026-05-14
 
 Scope: codebase-wide Win32 implementation review of IPC/auth, terminal
-relay, ConPTY/jobs, and filesystem/path compatibility. This document combines
-parallel subsystem reviews with a local cross-cutting pass. No source changes
-are implied by this document.
+relay, ConPTY/jobs, command execution, and filesystem/path compatibility. This
+document combines parallel subsystem reviews with local source verification.
+It is a findings document only; it does not imply source changes.
+
+Review method:
+
+- Four parallel agents reviewed IPC/auth/startup, terminal/client/console,
+  ConPTY/job/lifecycle, and filesystem/path/environment areas.
+- Every finding below was checked against the current tree before this
+  document was updated.
+- Stale findings from earlier audits are moved to "Retired Findings" rather
+  than left in the active priority list.
 
 ## Executive Summary
 
-The current Win32 port has made good progress on AF_UNIX transport, ConPTY pane
-execution, non-PTY jobs, and basic terminal relay. The highest remaining risks
-are not isolated bugs; they are boundary and lifecycle problems where Unix
-tmux assumptions were copied into native Windows semantics.
+The Win32 port has moved past the first-order I/O service problems: ConPTY
+pane/job I/O, regular-file I/O, terminal output chunking, UTF-8 continuation,
+bounded worker teardown, and notify coalescing all have real implementations
+now. The remaining risks are mostly at boundaries where tmux still exposes a
+Unix-shaped contract while the underlying object is native Windows:
 
-The most important areas to fix next are:
+1. IPC authorization still has no authenticated Win32 peer identity. Socket
+   reachability is effectively the auth boundary.
+2. Server startup has a normal-path lock, but foreground startup, path aliases,
+   slash-root paths, and unconditional socket unlink still leave race and
+   confusion windows.
+3. Console terminal relay still needs protocol-level flow control and abort
+   semantics, not just better handle I/O.
+4. Pane/job lifecycle still conflates process exit, output EOF, dead-pane
+   state, passive cleanup, and forced termination.
+5. Native path, quoting, long-path, and Unicode environment support remains
+   uneven outside the already-migrated file I/O service paths.
 
-1. IPC startup and authorization:
-   add a single-owner server startup lock, fail closed when the managed socket
-   root cannot be built, secure custom socket paths, and define a real Windows
-   client authorization model.
+## Active Priority Findings
 
-2. Win32 handle event/writer reliability:
-   avoid lost notifications, avoid unbounded server-thread waits during
-   teardown, and move blocking cancellation/join work out of hot polling paths.
-
-3. Terminal relay correctness:
-   fix output ACK accounting, support incremental UTF-8 decoding across IPC
-   message boundaries, and avoid input loss on `proc_send()` failure.
-
-4. `pipe-pane` lifecycle:
-   make Win32 pipe jobs owned, killable, and fully detached or fully reaped
-   when a pipe is toggled off or a pane is destroyed.
-
-5. Unicode and native path support:
-   replace narrow CRT path APIs, import the Unicode environment, fix path-list
-   parsing for drive letters, and pin down slash-rooted path semantics.
-
-## Priority Findings
-
-### P0: Concurrent Win32 client startup can spawn multiple servers
+### P0: Win32 client authorization is not real yet
 
 Files:
 
-- [`client.c`](../client.c): `client_connect()` spawns a server directly after
-  a failed connect.
-- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_server_create()` unconditionally
-  unlinks the socket path before binding.
+- [`proc.c`](../proc.c): `proc_add_peer()` sets Win32 peer UID to
+  `(uid_t)-1`.
+- [`server-acl.c`](../server-acl.c): `server_acl_join()` accepts every Win32
+  client.
+- [`server.c`](../server.c): accepted clients rely on `server_acl_join()`.
+- [`cmd-server-access.c`](../cmd-server-access.c): mutating `server-access`
+  is disabled on Win32.
 
 Problem:
 
-The Unix path has a `.lock` file around startup. The Win32 path does not. Two
-clients racing to autostart the same socket can both spawn servers. Each server
-then tries to remove and bind the same socket pathname. This can produce
-split-brain behavior or make a later server replace the path of an already
-running server.
+Once a Win32 client connects to the AF_UNIX socket, the server trusts it. There
+is no peer credential equivalent plumbed into `struct tmuxpeer`, and the ACL
+join path is compiled to unconditional success.
+
+Why it matters:
+
+On Unix, socket path permissions and peer credentials are separate layers. On
+Win32, the second layer is missing. Any local process that can connect to the
+socket can act as a full tmux client, including command execution and terminal
+identify messages. This also means `server-access` semantics are not
+enforceable on Win32.
 
 Required direction:
 
-- Add a named mutex or lock-file equivalent keyed by the normalized socket path.
-- Hold it across connect, spawn, and reconnect polling.
-- Do stale-socket validation before unlinking.
-- Do not let a second server unlink a live server's endpoint.
+- Add a Win32 authenticated client identity before admitting the client.
+- Preserve the desired product model: multiple logon sessions of the same
+  Windows user should be attachable, including later SSH logons.
+- Prefer a same-user SID based model with an authenticated server secret or
+  challenge/response carried over AF_UNIX.
+- Do not rely on untrusted client identify messages as the proof of identity.
 
-### P0: Win32 client authorization is too weak
+### P0: Custom `-S` and `$TMUX` socket paths are not hardened
 
 Files:
 
-- [`proc.c`](../proc.c): Win32 peers get `uid = (uid_t)-1`.
-- [`server-acl.c`](../server-acl.c): `server_acl_join()` accepts all clients on
-  Win32.
-- [`cmd-server-access.c`](../cmd-server-access.c): server-access is mostly
-  disabled on Win32.
+- [`tmux.c`](../tmux.c): default `-L` labels go through `make_label()`, but
+  explicit `-S` and `$TMUX` paths bypass that flow.
+- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_server_create()` only ensures
+  the parent directory exists.
+- [`server.c`](../server.c): `server_create_socket()` does not distinguish
+  default managed sockets from explicit custom paths on Win32.
 
 Problem:
 
-Once a client connects to the socket, the server effectively trusts it. That is
-only safe if socket path security is perfect. It is not perfect, especially for
-custom `-S` paths.
+The managed default socket directory gets a Win32 DACL and integrity policy via
+`win32_ipc_ensure_socket_dir()`. Explicit `-S` paths and inherited `$TMUX`
+paths do not get equivalent hardening. The server create path only creates the
+parent directory and then binds the AF_UNIX endpoint.
+
+Why it matters:
+
+Because client authorization is currently missing, the socket path is the
+practical trust boundary. A socket placed in a weak or shared directory gives
+any process with directory/socket access a trusted tmux connection.
 
 Required direction:
 
-- Treat filesystem ACLs as one layer, not the entire auth model.
-- Add a Windows peer authorization step based on user SID and logon-session
-  policy, or use an authenticated challenge/response token over the AF_UNIX
-  connection.
-- Keep the selected model compatible with the desired behavior: multiple logon
-  sessions of the same user should be attachable.
+- Either reject arbitrary `-S` paths outside the managed root on Win32, or
+  explicitly harden and validate the parent and socket endpoint.
+- Fail closed if the parent is world-writable, owned by another user, or has a
+  lower-integrity access path.
+- Decide a policy for reparse points and junctions before treating an existing
+  directory as trusted.
 
-### P0: Custom `-S` socket paths are not secured
+### P0: Lost console output can deadlock client exit
 
 Files:
 
-- [`tmux.c`](../tmux.c): `make_label()` hardens the managed default directory.
-- [`win32-ipc.c`](../win32-ipc.c): custom server paths only ensure parent
-  existence before bind.
-- [`server.c`](../server.c): Win32 `server_create_socket()` ignores default vs
-  explicit socket flags.
+- [`client.c`](../client.c): `client_win32_output_error_callback()` clears the
+  client pending counter and sends only `MSG_EXITING`.
+- [`tty.c`](../tty.c): `tty_close_graceful()` waits while
+  `c->win32_tty_out_pending` is nonzero.
+- [`server-client.c`](../server-client.c):
+  `server_client_win32_tty_output_ack()` is the only path that decrements the
+  server pending counter.
 
 Problem:
 
-Default `-L` sockets go through the managed socket directory flow. Explicit
-`-S` paths do not get equivalent ACL hardening. If a user places a socket in a
-shared or weakly protected directory, unintended clients can connect. Combined
-with the ACL bypass above, this is a direct security problem.
+If the client console output writer fails while bytes are in flight, the client
+sets `client_win32_output_pending` to zero and sends `MSG_EXITING`, but it does
+not tell the server how many already-sent bytes were dropped. The server then
+tries graceful close, sees `c->win32_tty_out_pending != 0`, and waits for an
+ACK that cannot arrive.
+
+Why it matters:
+
+Console loss, terminal close, or output handle failure can strand a client in
+the detach/exit handshake. This is a protocol bug: the I/O service can report
+failure, but the tmux client/server protocol has no "abort these pending
+terminal bytes" message.
 
 Required direction:
 
-- Apply security to custom socket parents and, where possible, the socket
+- Add an explicit Win32 terminal-output abort/drop message carrying the number
+  of bytes or a generation ID to invalidate outstanding output.
+- Alternatively, make server-side `MSG_EXITING` from a lost Win32 TTY discard
+  pending console output and complete close.
+- Keep normal ACK-on-drain behavior for successful output.
+
+### P1: Win32 startup locking still has bypasses and aliasing
+
+Files:
+
+- [`client.c`](../client.c): `CLIENT_NOFORK` returns `server_start()` before
+  taking `win32_ipc_startup_lock()`.
+- [`win32-ipc.c`](../win32-ipc.c): the startup mutex is keyed from
+  `win32_ipc_path_hash(path)`, which only folds slash direction and ASCII
+  case.
+- [`win32-ipc.c`](../win32-ipc.c): server creation still unconditionally
+  `unlink()`s the normalized socket path before `bind()`.
+
+Problem:
+
+The normal autostart path now has a named mutex, but not every server creation
+path goes through it. `tmux -D` / `CLIENT_NOFORK` bypasses the lock entirely.
+The lock name is based on a raw path spelling rather than a canonical object
+path. Equivalent paths with `.`/`..`, different drive casing, junctions, or UNC
+aliases can get distinct mutexes. Server create still removes the socket path
+before binding.
+
+Why it matters:
+
+Two foreground starts or two differently spelled paths can still race into
+server creation for the same endpoint. The unconditional unlink means the loser
+can remove an endpoint that another process expects to own.
+
+Required direction:
+
+- Centralize all Win32 server creation behind one locked helper, including
+  `CLIENT_NOFORK`.
+- Canonicalize socket paths before hashing, connecting, or creating. At
+  minimum use `GetFullPathNameW()`; consider stronger final-object resolution
+  if reparse-point aliases matter.
+- Do stale-socket validation before unlinking and never remove a live server's
   endpoint.
-- Reject unsafe existing parent directories unless explicitly allowed.
-- Detect and reject reparse points/junctions in the parent chain unless a clear
-  policy says otherwise.
+- Bound `WaitForSingleObject(..., INFINITE)` or make waits observable in logs
+  and diagnostics.
 
-### P0: Managed socket root failure falls back to `C:/Temp`
+### P1: Win32 client input relay still lacks IPC backpressure
 
-File:
+Files:
 
-- [`win32-ipc.c`](../win32-ipc.c): `win32_default_socket_dir()` returns
-  `C:/Temp` if managed root creation fails.
+- [`client.c`](../client.c): `client_win32_input_update_reading()` pauses only
+  while `client_win32_input_pending` is nonempty.
+- [`client.c`](../client.c): `client_win32_input_flush_pending()` drains that
+  buffer into `proc_send()` messages.
+- [`proc.c`](../proc.c): `proc_send()` queues into the peer `imsgbuf`; it does
+  not provide a credit/window signal.
 
 Problem:
 
-This is unsafe and operationally surprising. If `LOCALAPPDATA` or token
-identity lookup fails, the default socket should not silently move to a shared
-global temp directory. The current fallback can also try to rewrite ACLs on an
-existing broad temp directory rather than a tmux-owned leaf.
+The client now avoids silently dropping input on `proc_send()` hard failure,
+but the backpressure point is still the wrong one. Once bytes are moved from
+`client_win32_input_pending` into the imsg output queue, local pending length
+returns to zero and console reading resumes. There is no limit on input bytes
+in flight through the IPC queue.
+
+Why it matters:
+
+A long paste or fast input stream can keep feeding the imsg queue while the
+server is busy or slow to read. Memory can grow without a tmux-level input
+credit policy.
 
 Required direction:
 
-- Fail closed if the managed root cannot be built.
-- If a fallback is necessary, use `GetTempPathW()` plus a private
-  user/integrity-specific leaf directory and secure only that leaf.
+- Add explicit flow control for `MSG_WIN32_TTY_INPUT`, similar in spirit to
+  terminal output accounting.
+- Pause the Win32 console reader based on total input in flight, not only on
+  client-local staging bytes.
+- Define what happens on server shutdown, hard peer failure, and partial
+  delivery.
 
-### Fixed: ConPTY/job output notifications can be lost
-
-Files:
-
-- [`win32-event.c`](../win32-event.c): service completions wake libevent through
-  the shared nonblocking AF_UNIX notify socket.
-
-Original problem:
-
-The notify socketpair is nonblocking. If the notify socket fills, `send()` can
-fail with `WSAEWOULDBLOCK`. Data remains buffered in `whe->input`, but no
-libevent readiness is guaranteed. If the producer goes quiet, output can remain
-stranded forever.
-
-Resolution:
-
-- The service now tracks `notify_pending` under the service lock.
-- One outstanding wake byte represents "there are endpoint completions to
-  drain"; further completions only update endpoint event masks until the tmux
-  thread drains the wakeup.
-- `WSAEWOULDBLOCK` is treated as already-notified because a full notify socket
-  is readable.
-- The service callback drains the socket and clears `notify_pending` before
-  dispatching queued completions.
-
-### Fixed: Win32 handle I/O teardown can block the server indefinitely
+### P1: Shell command construction for `cmd.exe` is unsafe
 
 Files:
 
-- [`win32-event.c`](../win32-event.c): `win32_handle_event_free()` waits
-  for worker shutdown after `CancelSynchronousIo()`.
-- [`win32-event.c`](../win32-event.c): `win32_handle_writer_free()` does the
-  same for writer threads.
-- [`win32-conpty.c`](../win32-conpty.c): pane/job teardown calls these frees
-  from server lifecycle paths.
+- [`win32-conpty.c`](../win32-conpty.c): `win32_build_shell_command()` embeds
+  raw command text inside `cmd.exe /d /s /c "..."`
+- [`popup.c`](../popup.c): `popup_editor_open()` builds `editor path` with
+  `"%s %s"` and no quoting.
 
-Original problem:
+Problem:
 
-Reader and writer threads use synchronous `ReadFile()` and `WriteFile()`.
-Their free paths signal stop, call `CancelSynchronousIo()`, and then wait
-forever. If cancellation does not complete promptly for a pipe or ConPTY handle,
-the tmux server thread can hang during pane/job teardown.
+The `cmd.exe` path interpolates arbitrary command strings into a quoted
+command line without implementing `cmd.exe` escaping rules. Popup editor
+launch builds a shell command by concatenating the editor string and temp path.
 
-Resolution:
+Why it matters:
 
-- Worker-backed endpoint frees now use a bounded wait after
-  `CancelSynchronousIo()`.
-- If the worker does not stop, the endpoint is deactivated and intentionally
-  leaked instead of freeing memory still reachable by the worker or blocking
-  the server indefinitely.
-- IOCP-backed pane/job/file endpoints keep their completion barrier; this fix
-  is for the remaining explicit worker fallback backend.
+Common commands with embedded quotes, `&`, `|`, `^`, parentheses, or paths
+under `C:\Program Files` can fail or execute with different structure than tmux
+intended. Popup editing is especially fragile when the editor path contains
+spaces or arguments.
 
-### Fixed: Terminal output ACK can acknowledge bytes never written
+Required direction:
 
-Files:
+- Avoid shell interpolation for structured launches where argv is known.
+- For actual shell commands, implement a deliberate `cmd.exe` quoting/escaping
+  policy or route through a documented shell-specific builder.
+- Treat popup editor invocation as an argv problem, not as a raw command string
+  problem.
 
-- [`client.c`](../client.c): `client_win32_tty_output()` now queues output to
-  the service writer and ACKs from the writer drain callback.
-- [`win32-event.c`](../win32-event.c): console worker writes are all-or-error
-  for the accepted chunk; short `WriteConsoleW` calls are retried until the
-  full converted prefix is written.
-- [`server-client.c`](../server-client.c): ACK decrements
-  `c->win32_tty_out_pending`.
-
-Original problem:
-
-The client ACKs the full IPC message size regardless of how many bytes reached
-the console. If `win32_handle_write()` writes fewer bytes or falls back to a
-partial `WriteFile()`, the server believes output has been delivered and drains
-its pending accounting. This can permanently drop output.
-
-Resolution:
-
-- `MSG_WIN32_TTY_OUTPUT_ACK` is sent only after the client-side output writer
-  reports drain.
-- The server now defers `MSG_EXITED` while the active console relay has
-  unacknowledged output, so terminal reset bytes queued during close are not
-  bypassed by client shutdown.
-- Console output no longer falls back to raw `WriteFile()` for UTF-8 decode
-  failures.
-- Complete decoded prefixes are written through `WriteConsoleW`; partial
-  trailing UTF-8 state is retained in the writer until a continuation arrives.
-
-### Fixed: Terminal UTF-8 decoding is not incremental
+### P1: Pane/job teardown still conflates passive cleanup and forced kill
 
 Files:
 
-- [`tty.c`](../tty.c): Win32 console output is chunked into
-  `MSG_WIN32_TTY_OUTPUT` messages.
-- [`client.c`](../client.c): chunks are queued to the client-side service
-  writer.
-- [`win32-event.c`](../win32-event.c): `win32_handle_write()` now keeps a
-  bounded partial UTF-8 sequence in `struct win32_handle_writer`.
+- [`server-fn.c`](../server-fn.c): `server_destroy_pane()` calls
+  `win32_pane_close()` before `remain-on-exit` handling.
+- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_close()` always calls
+  `win32_child_kill()`.
+- [`win32-conpty.c`](../win32-conpty.c): `win32_child_kill()` uses
+  `TerminateJobObject()` or `TerminateProcess()`.
+- [`spawn.c`](../spawn.c): respawn uses the same close path.
 
-Original problem:
+Problem:
 
-An IPC chunk can split a multibyte UTF-8 sequence. The client then decodes an
-incomplete sequence, fails, and falls back to raw `WriteFile()` to the console
-handle. That produces mojibake or broken rendering even though the original
-stream was valid UTF-8.
+The Win32 "close pane" primitive is also a hard-kill primitive. Natural pane
+destruction, dead-pane transition, remain-on-exit cleanup, and explicit
+kill/respawn teardown all route through termination of the pane job/process.
 
-Resolution:
+Why it matters:
 
-- Complete UTF-8 prefixes are decoded and written with `WriteConsoleW`.
-- Incomplete trailing UTF-8 bytes are carried across service write chunks.
-- Invalid complete byte sequences use Windows' replacement conversion rather
-  than raw console `WriteFile()` fallback.
-- Verification so far is build plus native noninteractive regression smoke;
-  an interactive console-boundary test is still recommended.
+This is stricter than tmux's normal lifecycle semantics. A pane whose root
+process has exited can still have descendants in the job object; passive
+cleanup should not automatically mean "terminate the whole tree" unless the
+operation is explicitly a kill or a timed fallback.
 
-## Other High-Value Findings
+Required direction:
 
-### Fixed: Win32 input forwarding can drop data
+- Split Win32 pane teardown into passive disconnect/handle-close and forced
+  termination paths.
+- Use hard termination for explicit kill, failed cleanup, or timed fallback,
+  not as the default bookkeeping close.
+- Document how background descendants should behave after the root ConPTY
+  process exits.
 
-File:
-
-- [`client.c`](../client.c): `client_win32_input_callback()` now appends
-  drained console input to `client_win32_input_pending` before sending
-  `MSG_WIN32_TTY_INPUT` messages.
-
-Original impact:
-
-Pasted input, escape sequences, and key bursts can be silently lost when the
-IPC peer is backpressured or shutting down.
-
-Resolution:
-
-- Bytes are removed from the pending buffer only after `proc_send()` accepts
-  each input message.
-- If the peer cannot accept a message, the client records a lost-server exit
-  instead of freeing a temporary buffer and silently dropping the remainder.
-- The Win32 input reader is paused while pending input remains owned by the
-  client, so the service reader does not continue pulling console input after
-  IPC delivery fails.
-- The current `proc_send()` API exposes queueing success or hard failure, not a
-  transient writable edge, so this fix makes failure explicit rather than adding
-  a fake retry loop.
-
-### Fixed: Win32 terminal write path uses synchronous recursion
-
-File:
-
-- [`tty.c`](../tty.c): Win32 terminal output continuation now goes through
-  `tty_write_schedule()` and `tty->event_out`.
-
-Original impact:
-
-Large redraws can build stack depth and monopolize the event loop. This is a
-fragile replacement for libevent write scheduling.
-
-Resolution:
-
-- `tty->event_out` is initialized for the active Win32 console relay path and
-  the direct Win32 output-handle path.
-- Remaining buffered output is resumed with a zero-timeout event instead of a
-  direct recursive `tty_write_callback()` call.
-- Console relay ACKs and direct writer drain events still control when more
-  bytes may be scheduled, preserving existing backpressure accounting.
-- Unix fd output scheduling is unchanged.
-
-### Fixed: Win32 `pipe-pane` teardown loses helper job ownership
+### P1: Win32 `pipe-pane` helper jobs are not part of destroy-readiness
 
 Files:
 
-- [`window.c`](../window.c): `window_pane_close_pipe()` now owns both Unix
-  pipe-fd cleanup and Win32 helper-job teardown.
-- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 toggle-off now uses the shared
-  pipe close helper instead of only closing helper stdin.
+- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 `pipe-pane` uses
+  `wp->pipe_job`.
+- [`window.c`](../window.c): `window_pane_destroy_ready()` checks ConPTY
+  output and `PANE_EXITED`, but not `wp->pipe_job`.
+- [`window.c`](../window.c): `window_pane_close_pipe()` frees `wp->pipe_job`
+  during pane destruction.
 
-Original impact:
+Problem:
 
-`pipe-pane -I` and bidirectional pipe jobs can outlive the pane indefinitely.
-After `wp->pipe_job` is cleared, later callbacks are no longer associated with
-the pane, so tmux loses the control path for that logical pipe.
+The Win32 pipe helper ownership leak was fixed, but destroy-readiness still
+does not wait for the helper job. A pane that is otherwise ready to destroy can
+call `window_pane_close_pipe()`, which frees the helper job and terminates its
+Win32 process tree.
 
-Resolution:
+Why it matters:
 
-- Win32 now chooses kill-on-detach semantics for pipe helpers.
-- Toggle-off and pane destruction clear pane ownership and then `job_free()`
-  the helper, so the Win32 job object tears down the helper process tree.
-- Native lifecycle smoke verified both toggle-off and pane destruction terminate
-  long-running `pipe-pane -I` helper processes.
+`pipe-pane -O` output may be truncated, and `pipe-pane -I` or bidirectional
+helpers may be killed as a side effect of pane teardown rather than completing
+their own lifecycle. Unix has pipe fd drain checks before destruction; the
+Win32 job-backed equivalent is incomplete.
 
-### Fixed: `pipe-pane -I` ignores pane write failure
+Required direction:
 
-File:
+- Add a Win32 destroy-readiness gate for `wp->pipe_job`.
+- Decide whether normal pane destruction should wait for helper completion,
+  drain queued helper output, or explicitly mark the helper as abandoned.
+- Keep forced pane close able to kill the helper intentionally.
 
-- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 `pipe-pane -I` now checks pane
-  input readiness and the `win32_pane_write()` result.
-
-Original impact:
-
-If the target pane is closed or the writer rejects input, data is discarded even
-though it was never queued.
-
-Resolution:
-
-- Helper-job output is not drained when pane input is saturated.
-- The job output reader is paused and retried from a tmux-thread timer.
-- Completion makes a final no-pause delivery attempt and logs if pane input is
-  still saturated.
-
-### Child exit polling does heavy synchronous teardown
+### P2: Pane process exit and output EOF need separate tmux-visible state
 
 Files:
 
-- [`win32-proc.c`](../win32-proc.c): `win32_check_children()` scans panes/jobs.
-- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_exited()` and
-  `win32_job_exited()` disconnect handles immediately.
+- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_exit_cb()` sets
+  `PANE_STATUSREADY` but not `PANE_EXITED`.
+- [`window.c`](../window.c): `window_pane_error_callback()` sets
+  `PANE_EXITED` when the output side reaches EOF/error.
+- [`window.c`](../window.c): `window_pane_exited()` reports liveness from
+  `PANE_EXITED`.
+- [`spawn.c`](../spawn.c): respawn rejects a pane while `PANE_EXITED` is not
+  set unless forced.
 
-Impact:
+Problem:
 
-The child polling timer can block on handle writer/reader cleanup, causing
-head-of-line stalls across all Win32 process lifecycle handling.
+The current Win32 implementation deliberately delays `PANE_EXITED` until
+ConPTY output EOF to avoid losing tail output. That avoids the earlier bug
+where process exit could close output too early, but it overloads
+`PANE_EXITED` with "root process exited and output is fully drained."
 
-Fix direction:
+Why it matters:
 
-- Polling should mark state and schedule cleanup.
-- Cleanup should be bounded and preferably asynchronous.
+Commands that ask whether the process is gone still see the pane as active
+until output EOF. `respawn-pane` can report "still active" even after the root
+process has exited, because the output reader has not yet proven EOF. Simply
+setting `PANE_EXITED` on process exit is not enough because current respawn
+code would then be allowed to close the Win32 pane and could reintroduce tail
+output loss.
 
-## Filesystem, Environment, and Path Compatibility
+Required direction:
 
-### Partially fixed: Narrow CRT path APIs remain in file operations
+- Add separate Win32-visible state for root process exit and output-drained EOF.
+- Teach respawn/destroy paths which state they require.
+- Preserve the invariant that ConPTY output is not closed before the reader has
+  reached EOF or an explicit forced close is requested.
+
+### P2: Terminal output ACK is drain-only and too coarse
 
 Files:
 
-- [`file.c`](../file.c): `fopen()` and `open()` are still used with `char *`
-  paths for several read/write flows.
+- [`client.c`](../client.c): `client_win32_output_callback()` ACKs the whole
+  client pending counter only on writer drain.
+- [`win32-event.c`](../win32-event.c): writer callbacks expose
+  `WIN32_IO_EVENT_WRITE_DRAINED` only when the internal buffer is empty.
+- [`server-client.c`](../server-client.c): redraw is deferred while any Win32
+  output bytes are pending.
+- [`tty.c`](../tty.c): the send side uses a bounded pending byte limit.
 
-Original impact:
+Problem:
 
-Native Windows narrow CRT paths are codepage-based, not UTF-8. Config files,
-buffer files, and source paths under non-ASCII directories can fail even though
-other parts of the port use wide APIs.
+The correctness issue where ACKs could cover bytes never written is fixed, but
+the protocol is now stop-and-wait at full drain granularity. The client ACKs a
+lump only when everything queued to its writer has drained.
 
-Progress:
+Why it matters:
 
-- Win32 server-local path-backed `file_read()` and `file_write()` now open
-  regular files with `CreateFileW` and drive reads/writes through the I/O
-  service regular-file endpoints.
-- This covers local `load-buffer`, `save-buffer`, and `source-file` style
-  operations that previously used synchronous CRT `fread()`/`fwrite()` in the
-  server.
-- The client file-transfer path was already using wide path opens for
-  path-backed regular files.
-- Win32 client-side reads from inherited stdin now use the I/O service worker
-  reader fallback instead of the Unix fd bufferevent path.
+Heavy output can defer redraw, status updates, and close progress until the
+entire current output window empties. This is a responsiveness problem, not an
+I/O service correctness bug.
 
-Remaining fix direction:
+Required direction:
 
-- Add UTF-8 to wide wrappers for `open`, `fopen`, and related path operations.
-- Use `_wopen`, `_wfopen`, or Win32 `CreateFileW` as appropriate.
-- Keep POSIX-like semantics at the tmux layer, but make the Windows boundary
-  Unicode-first.
+- ACK completed writes incrementally, not only full drain events.
+- Gate redraw on thresholds or credits rather than "any pending byte."
+- Keep final close semantics strict enough to avoid losing terminal reset
+  output.
 
-### Startup environment import is ANSI
+### P2: Win32 terminal handle relay is still disabled
+
+Files:
+
+- [`client.c`](../client.c): the client sends
+  `MSG_IDENTIFY_WIN32_TERMINAL` only for detected console clients.
+- [`server-client.c`](../server-client.c): `MSG_IDENTIFY_WIN32_STDIN` and
+  `MSG_IDENTIFY_WIN32_STDOUT` are rejected.
+- [`server-client.c`](../server-client.c): `server_client_open()` requires a
+  console flag or both relayed handles before setting `CLIENT_TERMINAL`.
+
+Problem:
+
+The handle-based terminal path exists structurally, but the identify messages
+for real stdin/stdout handles are intentionally rejected until authenticated
+handle duplication exists.
+
+Why it matters:
+
+Non-console Win32 frontends cannot become interactive tmux terminals. Future
+native relay or ConPTY frontend paths remain blocked on authenticated handle
+transfer.
+
+Required direction:
+
+- Implement authenticated handle duplication/transfer end-to-end.
+- Accept `MSG_IDENTIFY_WIN32_STDIN` and `MSG_IDENTIFY_WIN32_STDOUT` only after
+  tying the handles to the authenticated peer model.
+- Keep the current rejection until the auth/duplication design is complete.
+
+### P2: Slash-rooted and backslash-rooted path semantics are inconsistent
+
+Files:
+
+- [`tmux.c`](../tmux.c): `path_is_absolute()` accepts `/foo`, drive-rooted
+  paths, and UNC paths, but not single-leading-backslash paths.
+- [`win32-ipc.c`](../win32-ipc.c): socket paths translate `/` to `\` before
+  calling AF_UNIX.
+- [`win32-error.c`](../win32-error.c): `win32_resolve_cwd()` rejects `/foo` as
+  an invalid Win32 working directory.
+- [`file.c`](../file.c), [`cfg.c`](../cfg.c), [`status.c`](../status.c):
+  home expansion recognizes `~/` but not `~\`.
+
+Problem:
+
+Win32 path handling has multiple policies. `/tmp/x` is absolute to
+`path_is_absolute()` and accepted by socket path handling, but rejected as a
+working directory. `/tmp/sock` becomes `\tmp\sock`, which is current-drive
+rooted rather than a stable drive-qualified path. `\tmp\x` and `~\x` are common
+Windows forms but are treated as relative or unexpanded by several callers.
+
+Why it matters:
+
+Socket locking, reconnection, cwd validation, config lookup, file paths, and
+history paths can disagree about what path the user requested. This is a
+source of both correctness bugs and security mistakes around socket paths.
+
+Required direction:
+
+- Pick a Win32 policy for `/foo`: reject consistently or translate in one
+  documented way at process startup boundaries.
+- Treat single-leading-backslash paths and `~\` deliberately.
+- Canonicalize socket paths before hashing and before AF_UNIX bind/connect.
+
+### P2: Long-path and cwd handling are still capped by `MAX_PATH`
+
+Files:
+
+- [`compat/win32-compat.h`](../compat/win32-compat.h): `PATH_MAX` is defined
+  as `MAX_PATH`.
+- [`tmux.c`](../tmux.c): `find_cwd()` uses `static char cwd[PATH_MAX]` and
+  `getcwd()`.
+- [`win32-proc.c`](../win32-proc.c): server respawn uses
+  `wchar_t exe[MAX_PATH]` with `GetModuleFileNameW()`.
+- [`win32-error.c`](../win32-error.c): bundled terminfo discovery uses the same
+  fixed module path pattern.
+
+Problem:
+
+Several startup and path discovery flows still use fixed `MAX_PATH` buffers or
+narrow CRT `getcwd()`.
+
+Why it matters:
+
+Long-path-enabled Windows installs can still fail to start the detached server,
+fail to discover bundled terminfo, or silently fall back from the real current
+directory to a home/default directory. Relative paths and `PWD` then resolve
+incorrectly.
+
+Required direction:
+
+- Replace fixed module path buffers with growable `GetModuleFileNameW()` loops.
+- Replace `find_cwd()` on Win32 with dynamic `GetCurrentDirectoryW()` plus
+  UTF-8 conversion.
+- Stop treating `PATH_MAX == MAX_PATH` as a general limit for tmux path logic.
+
+### P2: Startup environment import is still ANSI
 
 Files:
 
 - [`win32-error.c`](../win32-error.c): `win32_refresh_environ()` assigns
   `environ = _environ`.
-- [`tmux.c`](../tmux.c): startup copies that environment into tmux globals.
+- [`tmux.c`](../tmux.c): startup copies that environment into
+  `global_environ`.
 
-Impact:
+Problem:
+
+The initial environment is read from the CRT narrow environment instead of the
+Unicode environment block.
+
+Why it matters:
 
 Non-ASCII values in `HOME`, `USERPROFILE`, `PATH`, `SHELL`, `PWD`, and user
-variables can be corrupted before tmux sees them.
+variables can be corrupted before tmux stores them. This affects path lookup,
+shell choice, config expansion, and child process environments.
 
-Fix direction:
+Required direction:
 
-- Import the process environment from the Unicode environment block.
+- Import the process environment from `GetEnvironmentStringsW()`.
 - Convert names and values to UTF-8 before populating tmux's environment.
-- Keep case-insensitive environment lookup on Win32.
+- Keep variable-name lookup case-insensitive on Win32.
 
-### Path-list splitting conflicts with drive letters
-
-Files:
-
-- [`tmux.c`](../tmux.c): `expand_paths()` splits lists on `:`.
-- [`Makefile.am`](../Makefile.am): default config paths are Unix-shaped.
-
-Impact:
-
-`C:\...` and `C:/...` conflict with colon-separated path lists. This can break
-config search paths and future list-style options on Win32.
-
-Fix direction:
-
-- Use `;` as the native Win32 path-list separator.
-- Keep compatibility for built-in Unix-style defaults only where intentional.
-- Add tests for drive-letter paths in config search.
-
-### Slash-rooted absolute path semantics are inconsistent
+### P2: Native command/path helpers still have Windows parsing gaps
 
 Files:
 
-- [`tmux.c`](../tmux.c): `path_is_absolute()` accepts `/foo`.
-- [`win32-error.c`](../win32-error.c): `win32_resolve_cwd()` rejects `/foo`.
-- [`win32-error.c`](../win32-error.c): `win32_sanitize_cwd()` rejects
-  slash-rooted cwd values.
+- [`tmux.c`](../tmux.c): `areshell()` strips only `/`, so
+  `C:\path\tmux.exe` is not compared by basename.
+- [`tmux.c`](../tmux.c): `expand_paths()` splits path lists on `:`, which
+  conflicts with drive letters.
+- [`file.c`](../file.c): non-regular path fallback still uses narrow CRT
+  `open()` after `CreateFileW()` determines the handle is not a regular file.
+- [`cfg.c`](../cfg.c), [`log.c`](../log.c), [`tty.c`](../tty.c): some local
+  file paths still use CRT `fopen()`/`open()` outside the migrated file service
+  flows.
 
-Impact:
+Problem:
 
-Different Win32 code paths disagree on whether `/tmp/x` is a valid absolute
-path. This affects `-S`, `-f`, cwd handling, and paths inherited from
-MSYS/Cygwin-like environments.
+The main local file service paths now use `CreateFileW`, but not every path
+boundary has been normalized. Shell validation, path-list parsing, logs, tty
+logs, and non-regular file fallbacks still use Unix assumptions.
 
-Fix direction:
+Why it matters:
 
-- Pick a native policy:
-  either reject slash-rooted paths consistently, or translate them in a defined
-  way.
-- Do not let generic `path_is_absolute()` contradict Win32 cwd resolution.
+Backslash shell paths can bypass tmux-recursion checks. Drive-letter paths can
+be split as lists. Non-ASCII or special Windows paths can still fail outside
+the migrated buffer/source/history file paths.
 
-### Glob and fnmatch are incomplete for Win32
+Required direction:
+
+- Use basename logic that understands both `/` and `\`.
+- Use `;` as the native path-list separator on Win32, while preserving any
+  intentional Unix-shaped built-in defaults.
+- Continue replacing narrow CRT path APIs at Win32 boundaries with wide helper
+  wrappers or `CreateFileW`.
+
+### P3: Win32 glob and case folding remain incomplete
 
 Files:
 
-- [`win32-glob.c`](../win32-glob.c): `glob()` detects POSIX metacharacters but
-  delegates matching to `FindFirstFileW`.
-- [`win32-glob.c`](../win32-glob.c): `fnmatch()` is byte-oriented and ASCII
-  case-folded.
-- [`cmd-source-file.c`](../cmd-source-file.c): source-file uses `glob()`.
+- [`win32-glob.c`](../win32-glob.c): `fnmatch()` uses byte-wise `tolower()`
+  for `FNM_CASEFOLD`.
+- [`win32-glob.c`](../win32-glob.c): globbing delegates much of the matching
+  shape to `FindFirstFileW`.
+- [`cmd-source-file.c`](../cmd-source-file.c): `source-file` consumes globbed
+  paths.
 
-Impact:
+Problem:
 
-POSIX glob semantics diverge on Win32, especially bracket expressions like
-`foo[ab].conf`. Unicode-aware case folding is also not implemented.
+Case folding is ASCII-only over bytes. POSIX glob semantics, especially
+bracket expressions, escapes, Unicode names, UNC paths, and slash/backslash
+normalization, are not fully implemented.
 
-Fix direction:
+Why it matters:
+
+`source-file` and other globbed path consumers can behave differently on Win32
+than on Unix, especially with non-ASCII filenames and bracket patterns.
+
+Required direction:
 
 - Enumerate directory entries with `FindFirstFileW`.
-- Apply tmux/POSIX glob matching to returned names in UTF-8 or wide form.
-- Add tests for `*`, `?`, bracket expressions, escapes, UNC paths, and
-  slash/backslash inputs.
+- Apply tmux/POSIX matching deliberately in UTF-8 or wide-character form.
+- Add tests for `*`, `?`, bracket expressions, escapes, drive paths, UNC paths,
+  and mixed slash/backslash input.
 
-### Long-path support is not native
+### P3: ConPTY resize failures are ignored
 
 Files:
 
-- [`compat/win32-compat.h`](../compat/win32-compat.h): `PATH_MAX` maps to
-  `MAX_PATH`.
-- [`win32-error.c`](../win32-error.c): fixed `MAX_PATH` buffers are used for
-  executable path discovery.
-- [`win32-proc.c`](../win32-proc.c): server spawn uses `MAX_PATH` for module
-  filename.
+- [`window.c`](../window.c): `window_pane_send_resize()` calls
+  `win32_pane_resize()`.
+- [`job.c`](../job.c): `job_resize()` calls `win32_job_resize()`.
+- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_resize()` and
+  `win32_job_resize()` ignore the `ResizePseudoConsole()` `HRESULT`.
 
-Impact:
+Problem:
 
-Modern Windows long paths fail in arbitrary places. Failures may surface as
-server spawn failure, terminfo discovery failure, cwd truncation, or file open
-failure.
+tmux updates pane/job size state and calls `ResizePseudoConsole()`, but the
+result is not checked or logged.
 
-Fix direction:
+Why it matters:
 
-- Replace fixed `MAX_PATH` module filename buffers with dynamic
-  `GetModuleFileNameW()` loops.
-- Avoid exposing `PATH_MAX == MAX_PATH` as a general truth.
-- Decide whether to add `\\?\` normalization internally or rely on long-path
-  policy support.
+If the ConPTY is tearing down or rejects the resize, tmux and the child process
+can silently diverge on size. That makes lifecycle-edge rendering bugs hard to
+diagnose.
 
-## Acceptable or Improving Areas
+Required direction:
 
-- The AF_UNIX wrapper maps many Winsock errors to `errno` and sets accepted
-  sockets nonblocking in a centralized path.
-- The port correctly rejects unimplemented Win32 handle-transfer identify
-  messages instead of pretending descriptor transfer works.
-- Environment comparison is at least case-insensitive on Win32, which matches
-  Windows variable-name behavior.
-- Recent ConPTY output lifetime fixes improved pane/job tail-output handling by
-  separating process exit from output EOF.
-- Recent wide WinAPI cleanup removed ANSI WinAPI calls from IPC path security
-  and directory creation.
+- Check the `HRESULT` and log failures with pane/job identity.
+- Suppress, retry, or mark dead according to a clear policy when resize fails
+  during teardown.
+
+## Retired Findings
+
+The following earlier findings were verified as fixed or superseded by the
+current implementation:
+
+- Managed socket root failure no longer falls back to `C:/Temp`.
+  `win32_default_socket_dir()` now returns `NULL` if the managed root cannot be
+  built. The remaining `C:/Temp` reference is the generic `_PATH_TMP` compat
+  definition, not the default socket path.
+- Normal Win32 autostart has a startup mutex. The active findings are the
+  `CLIENT_NOFORK` bypass, noncanonical lock key, infinite wait, and stale
+  unlink behavior.
+- The old 100 ms child polling path was removed. Process exit now comes from
+  Win32 process events and job checks.
+- Win32 I/O service notifications are coalesced with `notify_pending`; a full
+  notify socket no longer loses the readiness edge.
+- Worker-backed handle event/writer frees use bounded waits and leak inactive
+  endpoints rather than blocking the server indefinitely.
+- Terminal output ACKs now happen after client-side writer drain, not when the
+  IPC message is merely received.
+- Terminal UTF-8 output decoding is incremental across client writer chunks.
+- Win32 console input is staged in `client_win32_input_pending` and is not
+  silently discarded on `proc_send()` hard failure.
+- Win32 terminal output scheduling no longer recurses synchronously through
+  `tty_write_callback()`.
+- Win32 `pipe-pane` helper ownership is no longer leaked on toggle-off or pane
+  destruction; the active problem is now destroy-readiness/drain semantics.
+- `pipe-pane -I` now checks pane write readiness and retries instead of
+  blindly discarding input on saturation.
+- Recent IPC path work removed ANSI WinAPI calls from the socket root security
+  and directory creation path.
 
 ## Missing Tests
 
 High-priority native PowerShell tests:
 
-1. IPC startup race:
-   start two or more clients concurrently against the same empty socket path and
-   verify only one server survives and the socket path is not replaced.
+1. Auth admission:
+   same Windows user across multiple logon sessions can attach; different user
+   and lower-integrity clients are rejected.
 
-2. Default IPC root failure:
-   simulate missing or invalid `LOCALAPPDATA` or token identity failure and
-   verify tmux fails closed rather than using `C:/Temp`.
+2. Custom socket security:
+   `-S` under weak/shared directories is rejected or hardened according to the
+   chosen policy.
 
-3. Custom `-S` security:
-   create sockets under weak/shared directories and verify the server rejects or
-   secures them according to policy.
+3. Startup races:
+   concurrent normal clients, concurrent `tmux -D` clients, and aliased socket
+   paths produce only one server and never unlink a live endpoint.
 
-4. ConPTY notify stress:
-   produce bursty pane/job output large enough to fill the notify socket and
-   verify no output remains stranded.
+4. Slash/root path policy:
+   verify `/tmp/sock`, `\tmp\sock`, drive-qualified paths, UNC paths, and
+   `~\...` expansion behave consistently.
 
-5. Teardown hang:
-   kill panes/jobs while reader or writer threads are blocked and verify server
-   teardown is bounded.
+5. Lost console output:
+   close or invalidate the client console while output bytes are pending and
+   verify the server completes exit instead of waiting forever.
 
-6. Terminal UTF-8 chunking:
-   force `MSG_WIN32_TTY_OUTPUT` boundaries through multibyte UTF-8 characters
-   and verify rendered output is correct.
+6. Input backpressure:
+   paste large data while the server is busy and verify bounded in-flight input
+   accounting.
 
-7. Terminal ACK accounting:
-   simulate or force partial writes and verify the server only ACKs delivered
-   bytes or retries the rest.
+7. Output responsiveness:
+   produce sustained redraw-heavy output and verify incremental ACK/credit
+   behavior once implemented.
 
-8. Input backpressure:
-   force `proc_send()` failure or backpressure during a large paste and verify
-   unsent bytes are preserved or the client fails explicitly.
+8. Handle relay:
+   attach from a non-console Win32 frontend only after authenticated handle
+   transfer is implemented.
 
-9. `pipe-pane` lifecycle:
-   toggle `pipe-pane -I` and `pipe-pane -IO` off, destroy the pane, and verify
-   helper jobs do not leak.
+9. Pane lifecycle:
+   root process exits with delayed ConPTY tail output; verify tail output is
+   preserved, dead-pane state is correct, and respawn behavior matches policy.
 
-10. Unicode filesystem:
-    source configs, save/load buffers, and open files under non-ASCII paths.
+10. `pipe-pane` lifecycle:
+    destroy panes while `pipe-pane -O`, `-I`, and `-IO` helpers still have
+    pending data; verify no unintended truncation or helper leak.
 
-11. Unicode environment:
-    launch tmux with non-ASCII `HOME`, `USERPROFILE`, and custom variables and
-    verify values survive as UTF-8 inside tmux.
+11. Passive vs forced teardown:
+    verify natural pane exit, remain-on-exit, kill-pane, and respawn use the
+    intended Win32 close/kill mode.
 
-12. Win32 glob semantics:
-    test `*`, `?`, `[abc]`, escapes, relative paths, absolute drive paths, and
-    UNC paths for `source-file`.
+12. Command quoting:
+    run popup editors and shell commands with spaces, quotes, `&`, `|`, `^`,
+    and parentheses under `cmd.exe`.
+
+13. Long paths:
+    start tmux from a long cwd and long executable path; verify server spawn,
+    terminfo discovery, `PWD`, and relative paths.
+
+14. Unicode environment and filesystem:
+    launch with non-ASCII environment values and access configs, buffers,
+    logs, and history files under non-ASCII paths.
+
+15. Glob semantics:
+    test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names, and
+    mixed slash/backslash input for `source-file`.
 
 ## Recommended Implementation Order
 
-1. IPC/auth hardening:
-   startup lock, fail-closed managed root, custom path security, stale socket
-   validation, and explicit peer authorization.
+1. IPC/auth and socket boundary hardening:
+   authenticated same-user peer model, custom path policy, canonical socket
+   paths, startup-lock bypasses, bounded lock wait, and stale unlink defense.
 
-2. Win32 event helper reliability:
-   notification coalescing/level-triggering, bounded teardown, and cleanup
-   outside polling paths.
+2. Terminal relay protocol:
+   lost-output abort semantics, input credits, incremental output ACKs, redraw
+   thresholds, and authenticated terminal handle transfer.
 
-3. Terminal relay correctness:
-   exact ACK semantics, incremental UTF-8 decoding, persistent input queue, and
-   nonrecursive output scheduling.
+3. Pane/job lifecycle:
+   split process-exited vs output-drained state, split passive cleanup from
+   forced kill, add `pipe-pane` destroy-readiness, and log resize failures.
 
-4. `pipe-pane` lifecycle:
-   owned helper job cleanup, correct detach semantics, and partial-write/error
-   handling.
+4. Native command/path/Unicode cleanup:
+   `cmd.exe` quoting or argv-based launches, Unicode environment import,
+   dynamic cwd/module paths, path-list separators, home/backslash expansion,
+   and remaining wide path wrappers.
 
-5. Unicode filesystem/environment:
-   wide file wrappers, Unicode environment import, long-path-safe module path
-   helpers.
-
-6. Path semantics and glob:
-   Win32 path-list separator, consistent slash-root policy, case/normalization
-   rules, and POSIX-compatible glob behavior over wide directory enumeration.
+5. Test coverage:
+   add native PowerShell regression tests for the behavior above. Do not rely
+   on running tmux under MSYS2 for these runtime checks.
