@@ -122,6 +122,7 @@ FILE *win32_fopen_utf8(const char *, const char *);
 int win32_access_utf8(const char *, int);
 char *win32_getcwd_utf8(void);
 int win32_unlink_utf8(const char *);
+char *win32_get_module_path_utf8(void);
 
 #ifndef TTY_NAME_MAX
 #define TTY_NAME_MAX 128

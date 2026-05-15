@@ -21,22 +21,15 @@
 int
 win32_server_spawn(const char *path, uint64_t flags, char **cause)
 {
-	wchar_t		 exe[MAX_PATH], *cmd;
+	wchar_t		*wexe = NULL, *cmd;
 	STARTUPINFOW	 si;
 	PROCESS_INFORMATION pi;
-	DWORD		 n;
 	BOOL		 ok;
 	char		*exe_utf8, **argv;
 	int		 argc, i, log_level;
 	u_int		 j, cfg_args;
 
-	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-	if (n == 0 || n == MAX_PATH) {
-		xasprintf(cause, "GetModuleFileName failed: %s",
-		    win32_strerror(GetLastError()));
-		return (-1);
-	}
-	exe_utf8 = win32_wide_to_utf8(exe);
+	exe_utf8 = win32_get_module_path_utf8();
 	if (exe_utf8 == NULL) {
 		xasprintf(cause, "couldn't convert executable path");
 		return (-1);
@@ -67,12 +60,19 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 		xasprintf(cause, "couldn't build server command line");
 		return (-1);
 	}
+	wexe = win32_utf8_to_wide(exe_utf8);
+	if (wexe == NULL) {
+		free(cmd);
+		xasprintf(cause, "couldn't convert executable path");
+		return (-1);
+	}
 
 	memset(&si, 0, sizeof si);
 	memset(&pi, 0, sizeof pi);
 	si.cb = sizeof si;
-	ok = CreateProcessW(exe, cmd, NULL, NULL, FALSE,
+	ok = CreateProcessW(wexe, cmd, NULL, NULL, FALSE,
 	    CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS, NULL, NULL, &si, &pi);
+	free(wexe);
 	free(cmd);
 	if (!ok) {
 		xasprintf(cause, "CreateProcess server failed: %s",

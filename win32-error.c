@@ -402,6 +402,33 @@ win32_unlink_utf8(const char *path)
 	return (0);
 }
 
+char *
+win32_get_module_path_utf8(void)
+{
+	wchar_t	*wbuf;
+	char	*path;
+	DWORD	 n, size;
+
+	size = MAX_PATH;
+	for (;;) {
+		wbuf = xcalloc(size, sizeof *wbuf);
+		n = GetModuleFileNameW(NULL, wbuf, size);
+		if (n == 0) {
+			free(wbuf);
+			return (NULL);
+		}
+		if (n < size - 1)
+			break;
+		free(wbuf);
+		if (size > ((DWORD)-1) / 2)
+			return (NULL);
+		size *= 2;
+	}
+	path = win32_wide_to_utf8(wbuf);
+	free(wbuf);
+	return (path);
+}
+
 int
 win32_path_is_dir(const char *path)
 {
@@ -546,8 +573,6 @@ win32_terminal_prepare_terminfo(void)
 		"C:\\msys64\\ucrt64\\share\\terminfo",
 		NULL
 	};
-	wchar_t		 exe[MAX_PATH];
-	DWORD		 n;
 	char		*exe_utf8, *dir, *candidate;
 	size_t		 i;
 
@@ -557,10 +582,7 @@ win32_terminal_prepare_terminfo(void)
 	    (terminfo_dirs != NULL && *terminfo_dirs != '\0'))
 		return (0);
 
-	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
-	if (n == 0 || n == MAX_PATH)
-		return (-1);
-	exe_utf8 = win32_wide_to_utf8(exe);
+	exe_utf8 = win32_get_module_path_utf8();
 	if (exe_utf8 == NULL)
 		return (-1);
 	dir = xstrdup(exe_utf8);
