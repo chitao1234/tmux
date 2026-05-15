@@ -277,7 +277,11 @@ load_cfg(const char *path, struct client *c, struct cmdq_item *item,
 		*new_item = NULL;
 
 	log_debug("loading %s", path);
+#ifdef TMUX_WIN32
+	if ((f = win32_fopen_utf8(path, "rb")) == NULL) {
+#else
 	if ((f = fopen(path, "rb")) == NULL) {
+#endif
 		if (errno == ENOENT && (flags & CMD_PARSE_QUIET))
 			return (0);
 		cfg_add_cause("%s: %s", path, strerror(errno));

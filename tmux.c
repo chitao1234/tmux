@@ -137,8 +137,13 @@ checkshell(const char *shell)
 		return (0);
 	if (areshell(shell))
 		return (0);
+#ifdef TMUX_WIN32
+	if (win32_access_utf8(shell, X_OK) != 0)
+		return (0);
+#else
 	if (access(shell, X_OK) != 0)
 		return (0);
+#endif
 	return (1);
 }
 
@@ -443,14 +448,25 @@ sig2name(int signo)
 const char *
 find_cwd(void)
 {
+#ifdef TMUX_WIN32
+	static char	*cwd;
+#else
 	static char	 cwd[PATH_MAX];
+#endif
 	const char	*pwd;
 #ifndef TMUX_WIN32
 	char		 resolved1[PATH_MAX], resolved2[PATH_MAX];
 #endif
 
+#ifdef TMUX_WIN32
+	free(cwd);
+	cwd = win32_getcwd_utf8();
+	if (cwd == NULL)
+		return (NULL);
+#else
 	if (getcwd(cwd, sizeof cwd) == NULL)
 		return (NULL);
+#endif
 	if ((pwd = getenv("PWD")) == NULL || *pwd == '\0')
 		return (cwd);
 
@@ -475,16 +491,34 @@ const char *
 find_home(void)
 {
 	struct passwd		*pw;
+#ifdef TMUX_WIN32
+	static char		*home;
+	const char		*value;
+#else
 	static const char	*home;
+#endif
 
 	if (home != NULL)
 		return (home);
 
+#ifdef TMUX_WIN32
+	value = getenv("HOME");
+	if (value != NULL && *value != '\0') {
+		home = xstrdup(value);
+		return (home);
+	}
+#else
 	home = getenv("HOME");
+#endif
 	if (home == NULL || *home == '\0') {
 		pw = getpwuid(getuid());
-		if (pw != NULL)
+		if (pw != NULL) {
+#ifdef TMUX_WIN32
+			home = xstrdup(pw->pw_dir);
+#else
 			home = pw->pw_dir;
+#endif
+		}
 		else
 			home = NULL;
 	}
@@ -502,7 +536,10 @@ int
 main(int argc, char **argv)
 {
 	char					*path = NULL, *label = NULL;
-	char					*cause, **var;
+	char					*cause;
+#ifndef TMUX_WIN32
+	char					**var;
+#endif
 	const char				*s, *cwd;
 	int					 opt, keys, feat = 0, fflag = 0;
 	uint64_t				 flags = 0;
@@ -531,8 +568,12 @@ main(int argc, char **argv)
 		flags = CLIENT_LOGIN;
 
 	global_environ = environ_create();
+#ifdef TMUX_WIN32
+	win32_copy_environ(global_environ);
+#else
 	for (var = environ; *var != NULL; var++)
 		environ_put(global_environ, *var, 0);
+#endif
 	if ((cwd = find_cwd()) != NULL)
 		environ_set(global_environ, "PWD", 0, "%s", cwd);
 	expand_paths(TMUX_CONF, &cfg_files, &cfg_nfiles, 1);

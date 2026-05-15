@@ -26,14 +26,14 @@
 int
 setenv(const char *name, const char *value, __unused int overwrite)
 {
-	char	*newval;
 	int	 ret;
 
-	xasprintf(&newval, "%s=%s", name, value);
 #ifdef TMUX_WIN32
-	ret = _putenv(newval);
-	win32_refresh_environ();
+	ret = win32_setenv_utf8(name, value, overwrite);
 #else
+	char	*newval;
+
+	xasprintf(&newval, "%s=%s", name, value);
 	ret = putenv(newval);
 #endif
 	return (ret);
@@ -43,13 +43,9 @@ int
 unsetenv(const char *name)
 {
 #ifdef TMUX_WIN32
-	char	*newval;
 	int	 ret;
 
-	xasprintf(&newval, "%s=", name);
-	ret = _putenv(newval);
-	free(newval);
-	win32_refresh_environ();
+	ret = win32_unsetenv_utf8(name);
 	return (ret);
 #else
 	char  **envptr;

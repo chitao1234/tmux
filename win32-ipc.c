@@ -828,7 +828,7 @@ win32_ipc_server_create(const char *path, char **cause)
 	}
 	free(parent);
 
-	(void)unlink(normalized);
+	(void)win32_unlink_utf8(normalized);
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd == INVALID_SOCKET) {
@@ -977,7 +977,7 @@ win32_ipc_close(int fd)
 
 	retval = closesocket(entry->socket);
 	if (entry->cleanup_path != NULL) {
-		(void)unlink(entry->cleanup_path);
+		(void)win32_unlink_utf8(entry->cleanup_path);
 		free(entry->cleanup_path);
 	}
 	TAILQ_REMOVE(&win32_ipc_sockets, entry, entry);

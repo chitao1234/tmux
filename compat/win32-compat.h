@@ -34,6 +34,8 @@
 #undef environ
 #endif
 
+struct environ;
+
 #ifndef TMUX_WIN32_UID_T_DEFINED
 #define TMUX_WIN32_UID_T_DEFINED
 typedef unsigned int uid_t;
@@ -76,6 +78,12 @@ struct winsize {
 #ifndef O_NONBLOCK
 #define O_NONBLOCK 0
 #endif
+#ifndef F_OK
+#define F_OK 0
+#endif
+#ifndef X_OK
+#define X_OK 1
+#endif
 
 #ifndef FNM_NOMATCH
 #define FNM_NOMATCH 1
@@ -105,7 +113,15 @@ ssize_t readv(int, const struct iovec *, int);
 char *ttyname(int);
 int wcwidth(wchar_t);
 ssize_t writev(int, const struct iovec *, int);
+char *getenv(const char *);
+void win32_copy_environ(struct environ *);
+int win32_setenv_utf8(const char *, const char *, int);
+int win32_unsetenv_utf8(const char *);
 void win32_refresh_environ(void);
+FILE *win32_fopen_utf8(const char *, const char *);
+int win32_access_utf8(const char *, int);
+char *win32_getcwd_utf8(void);
+int win32_unlink_utf8(const char *);
 
 #ifndef TTY_NAME_MAX
 #define TTY_NAME_MAX 128

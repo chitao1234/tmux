@@ -810,11 +810,8 @@ file_write_win32_open_path(struct client_file *cf, const char *path, int flags)
 	file_win32_close_handle(&handle);
 	if (regular == -1)
 		return (-1);
-
-	cf->fd = open(path, flags, 0644);
-	if (cf->fd == -1)
-		return (-1);
-	return (0);
+	errno = EINVAL;
+	return (-1);
 }
 
 static int
@@ -847,11 +844,8 @@ file_read_win32_open_path(struct client_file *cf, const char *path, int flags)
 	file_win32_close_handle(&handle);
 	if (regular == -1)
 		return (-1);
-
-	cf->fd = open(path, flags);
-	if (cf->fd == -1)
-		return (-1);
-	return (0);
+	errno = EINVAL;
+	return (-1);
 }
 
 static void

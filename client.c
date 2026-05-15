@@ -136,6 +136,7 @@ static void		 client_dispatch(struct imsg *, void *);
 static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
 static const char	*client_exit_message(void);
+static void		 client_send_environ(void);
 
 #ifndef TMUX_WIN32
 /*
@@ -1092,6 +1093,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	struct msg_command	*data;
 	int			 fd, i;
 	const char		*ttynam, *termname, *cwd;
+#ifdef TMUX_WIN32
+	char			*termname_owned = NULL;
+#endif
 #ifndef TMUX_WIN32
 	pid_t			 ppid;
 	enum msgtype		 msg;
@@ -1178,6 +1182,8 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	if ((termname = getenv("TERM")) == NULL)
 		termname = "";
 #ifdef TMUX_WIN32
+	termname_owned = xstrdup(termname);
+	termname = termname_owned;
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
 	client_win32_handle_tty = client_win32_handle_tty_enabled();
@@ -1393,6 +1399,9 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		}
 	} else if (client_exitreason != CLIENT_EXIT_NONE)
 		fprintf(stderr, "%s\n", client_exit_message());
+#ifdef TMUX_WIN32
+	free(termname_owned);
+#endif
 	log_close();
 	return (client_exitval);
 }
@@ -1402,8 +1411,6 @@ static void
 client_send_identify(const char *ttynam, const char *termname, char **caps,
     u_int ncaps, const char *cwd, int feat)
 {
-	char	**ss;
-	size_t	  sslen;
 #ifdef TMUX_WIN32
 	struct msg_win32_handle handle;
 	struct msg_win32_terminal_size size;
@@ -1468,14 +1475,26 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0);
 #endif
 
+	client_send_environ();
+
+	proc_send(client_peer, MSG_IDENTIFY_DONE, -1, NULL, 0);
+}
+
+static void
+client_send_environ(void)
+{
+	char	**ss;
+	size_t	  sslen;
+
+#ifdef TMUX_WIN32
+	win32_refresh_environ();
+#endif
 	for (ss = environ; *ss != NULL; ss++) {
 		sslen = strlen(*ss) + 1;
 		if (sslen > MAX_IMSGSIZE - IMSG_HEADER_SIZE)
 			continue;
 		proc_send(client_peer, MSG_IDENTIFY_ENVIRON, -1, *ss, sslen);
 	}
-
-	proc_send(client_peer, MSG_IDENTIFY_DONE, -1, NULL, 0);
 }
 
 /* Run command in shell; used for -c. */
