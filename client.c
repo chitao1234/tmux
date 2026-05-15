@@ -48,6 +48,9 @@ static int		 client_win32_direct_console;
 static int		 client_win32_handle_tty_input;
 static int		 client_win32_relay_test_output_loss;
 static int		 client_win32_relay_test_output_loss_fired;
+static int		 client_win32_relay_test_transport_lost;
+static int		 client_win32_relay_test_transport_lost_fired;
+static int		 client_win32_transport_lost_flag;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
@@ -102,6 +105,9 @@ static void		 client_win32_input_stop(void);
 static void		 client_win32_output_callback(void *);
 static void		 client_win32_output_progress(size_t);
 static void		 client_win32_output_abort(size_t);
+static void		 client_win32_transport_lost(
+			     enum msg_win32_tty_transport_lost_reason,
+			     const char *);
 static void		 client_win32_output_error_callback(void *);
 static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
@@ -109,6 +115,7 @@ static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_console_relay_enabled(void);
 static int		 client_win32_console_relay_test_output_loss_enabled(void);
+static int		 client_win32_console_relay_test_transport_lost_enabled(void);
 static int		 client_win32_handle_tty_enabled(void);
 static int		 client_win32_handle_tty_forced(void);
 static int		 client_win32_handle_tty_output_available(void);
@@ -367,7 +374,8 @@ static void
 client_exit(void)
 {
 #ifdef TMUX_WIN32
-	if (client_win32_output_pending != 0)
+	if (client_win32_output_pending != 0 &&
+	    !client_win32_transport_lost_flag)
 		return;
 #endif
 	if (!file_write_left(&client_files))
@@ -406,6 +414,22 @@ client_win32_console_relay_test_output_loss_enabled(void)
 	else
 		client_win32_relay_test_output_loss = -1;
 	return (client_win32_relay_test_output_loss > 0);
+}
+
+static int
+client_win32_console_relay_test_transport_lost_enabled(void)
+{
+	const char	*value;
+
+	if (client_win32_relay_test_transport_lost != 0)
+		return (client_win32_relay_test_transport_lost > 0);
+
+	value = getenv("TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST");
+	if (value != NULL && strcmp(value, "0") != 0)
+		client_win32_relay_test_transport_lost = 1;
+	else
+		client_win32_relay_test_transport_lost = -1;
+	return (client_win32_relay_test_transport_lost > 0);
 }
 
 static int
@@ -574,6 +598,11 @@ client_win32_input_dispatch_credit(char *data, ssize_t datalen)
 	if (datalen != sizeof credit)
 		fatalx("bad MSG_WIN32_TTY_INPUT_CREDIT size");
 	memcpy(&credit, data, sizeof credit);
+	if (client_win32_transport_lost_flag) {
+		log_debug("%s: ignoring %u bytes of credit after transport "
+		    "loss", __func__, credit.size);
+		return;
+	}
 	client_win32_input_add_credit(credit.size);
 }
 
@@ -603,7 +632,8 @@ client_win32_input_update_reading(void)
 	else
 		size = EVBUFFER_LENGTH(client_win32_input_pending);
 	win32_io_reader_set_reading(client_win32_input,
-	    !client_exitflag && client_win32_input_credit != 0 && size == 0);
+	    !client_exitflag && !client_win32_transport_lost_flag &&
+	    client_win32_input_credit != 0 && size == 0);
 }
 
 static int
@@ -694,11 +724,9 @@ client_win32_input_event_callback(void *arg, uint32_t events)
 	    WIN32_IO_EVENT_CANCELED))
 		return;
 	log_debug("%s: console input closed", __func__);
-	if (client_attached && client_peer != NULL) {
-		client_exitreason = CLIENT_EXIT_LOST_TTY;
-		client_exitval = 1;
-		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
-	}
+	if (client_attached)
+		client_win32_transport_lost(WIN32_TTY_TRANSPORT_INPUT_CLOSED,
+		    "console input closed");
 }
 
 static void
@@ -752,6 +780,13 @@ client_win32_output_progress(size_t size)
 	if (size > client_win32_output_pending)
 		fatalx("Win32 console relay output progress overflow");
 	client_win32_output_pending -= size;
+	if (client_win32_transport_lost_flag) {
+		log_debug("%s: discarded %zu bytes after transport loss, %zu "
+		    "pending", __func__, size, client_win32_output_pending);
+		if (client_exitflag)
+			client_exit();
+		return;
+	}
 	log_debug("%s: progressed %zu bytes, %zu pending", __func__, size,
 	    client_win32_output_pending);
 	ack.size = size;
@@ -789,8 +824,39 @@ client_win32_output_abort(size_t dropped)
 		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ABORT, -1, &abort,
 		    sizeof abort);
 	}
-	if (client_peer != NULL)
+	client_win32_transport_lost(WIN32_TTY_TRANSPORT_OUTPUT_FAILED,
+	    "console output failed");
+}
+
+static void
+client_win32_transport_lost(enum msg_win32_tty_transport_lost_reason reason,
+    const char *what)
+{
+	struct msg_win32_tty_transport_lost	lost;
+
+	client_exitreason = CLIENT_EXIT_LOST_TTY;
+	client_exitval = 1;
+
+	if (client_win32_transport_lost_flag) {
+		log_debug("%s: Win32 console relay transport already lost (%s)",
+		    __func__, what);
+		if (client_exitflag)
+			client_exit();
+		return;
+	}
+
+	client_win32_transport_lost_flag = 1;
+	client_win32_input_stop();
+	client_win32_resize_timer_stop();
+	log_debug("%s: Win32 console relay transport lost (%s)", __func__,
+	    what);
+
+	if (client_peer != NULL) {
+		lost.reason = reason;
+		proc_send(client_peer, MSG_WIN32_TTY_TRANSPORT_LOST, -1, &lost,
+		    sizeof lost);
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+	}
 	if (client_exitflag)
 		client_exit();
 }
@@ -852,6 +918,11 @@ client_win32_tty_output(char *data, ssize_t datalen)
 {
 	struct msg_win32_tty_output_ack ack;
 
+	if (client_win32_transport_lost_flag) {
+		log_debug("%s: discarding %zd bytes after transport loss",
+		    __func__, datalen);
+		return;
+	}
 	if (datalen < 0 || datalen > UINT32_MAX) {
 		client_exitreason = CLIENT_EXIT_LOST_TTY;
 		client_exitval = 1;
@@ -887,6 +958,14 @@ client_win32_tty_output(char *data, ssize_t datalen)
 		return;
 	}
 	client_win32_output_pending += datalen;
+	if (client_win32_console_relay_test_transport_lost_enabled() &&
+	    !client_win32_relay_test_transport_lost_fired) {
+		client_win32_relay_test_transport_lost_fired = 1;
+		log_debug("%s: simulating Win32 console relay transport loss",
+		    __func__);
+		client_win32_transport_lost(WIN32_TTY_TRANSPORT_TEST,
+		    "simulated transport loss");
+	}
 }
 
 static void

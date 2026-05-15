@@ -66,6 +66,8 @@ static int	server_client_win32_tty_output_ack(struct client *,
 		    struct imsg *);
 static int	server_client_win32_tty_output_abort(struct client *,
 		    struct imsg *);
+static int	server_client_win32_tty_transport_lost(struct client *,
+		    struct imsg *);
 static int	server_client_win32_resize(struct client *, struct imsg *);
 static int	server_client_win32_tty_input(struct client *, struct imsg *);
 static int	server_client_win32_identify_handle(struct client *,
@@ -2360,6 +2362,10 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		if (server_client_win32_tty_output_abort(c, imsg) != 0)
 			goto bad;
 		break;
+	case MSG_WIN32_TTY_TRANSPORT_LOST:
+		if (server_client_win32_tty_transport_lost(c, imsg) != 0)
+			goto bad;
+		break;
 	case MSG_WIN32_TTY_RESIZE:
 		if (server_client_win32_resize(c, imsg) != 0)
 			goto bad;
@@ -2547,7 +2553,8 @@ server_client_win32_tty_input_credit(struct client *c, size_t size,
 {
 	struct msg_win32_tty_input_credit	credit;
 
-	if (!c->win32_console || !(c->flags & CLIENT_TERMINAL) || size == 0)
+	if (!c->win32_console || !(c->flags & CLIENT_TERMINAL) ||
+	    c->win32_tty_transport_lost || size == 0)
 		return;
 	if (size > UINT32_MAX)
 		fatalx("Win32 console relay input credit too large");
@@ -2573,6 +2580,11 @@ server_client_win32_tty_input(struct client *c, struct imsg *imsg)
 		return (-1);
 	if (!(tty->flags & TTY_OPENED))
 		return (0);
+	if (c->win32_tty_transport_lost) {
+		log_debug("%s: %s ignoring relay input after transport loss",
+		    __func__, c->name);
+		return (0);
+	}
 
 	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	if (datalen == 0)
@@ -2635,6 +2647,11 @@ server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
 	if (datalen != sizeof ack)
 		return (-1);
 	memcpy(&ack, imsg->data, sizeof ack);
+	if (c->win32_tty_transport_lost) {
+		log_debug("%s: %s ignoring relay output progress after "
+		    "transport loss", __func__, c->name);
+		return (0);
+	}
 	size = ack.size;
 	return (server_client_win32_tty_output_update(c, size, "progress", 1));
 }
@@ -2652,8 +2669,56 @@ server_client_win32_tty_output_abort(struct client *c, struct imsg *imsg)
 	if (datalen != sizeof abort)
 		return (-1);
 	memcpy(&abort, imsg->data, sizeof abort);
+	if (c->win32_tty_transport_lost) {
+		log_debug("%s: %s ignoring relay output abort after "
+		    "transport loss", __func__, c->name);
+		return (0);
+	}
 	return (server_client_win32_tty_output_update(c, abort.size, "abort",
 	    0));
+}
+
+static int
+server_client_win32_tty_transport_lost(struct client *c, struct imsg *imsg)
+{
+	struct msg_win32_tty_transport_lost	lost;
+	const char				*why = "unknown";
+	size_t					 dropped;
+	ssize_t					 datalen;
+
+	if (!c->win32_console)
+		return (-1);
+
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen != sizeof lost)
+		return (-1);
+	memcpy(&lost, imsg->data, sizeof lost);
+
+	switch (lost.reason) {
+	case WIN32_TTY_TRANSPORT_INPUT_CLOSED:
+		why = "input closed";
+		break;
+	case WIN32_TTY_TRANSPORT_OUTPUT_FAILED:
+		why = "output failed";
+		break;
+	case WIN32_TTY_TRANSPORT_TEST:
+		why = "test";
+		break;
+	}
+	if (c->win32_tty_transport_lost) {
+		log_debug("%s: %s duplicate relay transport loss (%s)",
+		    __func__, c->name, why);
+		return (0);
+	}
+
+	c->win32_tty_transport_lost = 1;
+	dropped = c->win32_tty_out_pending;
+	log_debug("%s: %s relay transport lost (%s), dropping %zu output "
+	    "bytes and %zu input credit bytes", __func__, c->name, why,
+	    dropped, c->win32_tty_in_pending);
+	c->win32_tty_in_pending = 0;
+	return (server_client_win32_tty_output_update(c, dropped,
+	    "transport-lost", 0));
 }
 
 static int
@@ -2666,6 +2731,11 @@ server_client_win32_resize(struct client *c, struct imsg *imsg)
 	if (!c->win32_console || datalen != sizeof size)
 		return (-1);
 	memcpy(&size, imsg->data, sizeof size);
+	if (c->win32_tty_transport_lost) {
+		log_debug("%s: %s ignoring relay resize after transport loss",
+		    __func__, c->name);
+		return (0);
+	}
 	if (size.sx == 0 || size.sy == 0)
 		return (-1);
 

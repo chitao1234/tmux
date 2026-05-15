@@ -2056,6 +2056,7 @@ struct client {
 	int			 win32_console;
 	size_t			 win32_tty_in_pending;
 	size_t			 win32_tty_out_pending;
+	int			 win32_tty_transport_lost;
 #endif
 	struct event		 event;
 	int			 retval;

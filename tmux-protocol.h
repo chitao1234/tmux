@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 15
+#define PROTOCOL_VERSION 16
 
 /* Message types. */
 enum msgtype {
@@ -68,6 +68,7 @@ enum msgtype {
 	MSG_WIN32_TTY_OUTPUT,
 	MSG_WIN32_TTY_OUTPUT_ACK,
 	MSG_WIN32_TTY_OUTPUT_ABORT,
+	MSG_WIN32_TTY_TRANSPORT_LOST,
 	MSG_WIN32_TTY_RESIZE,
 
 	MSG_READ_OPEN = 300,
@@ -112,6 +113,16 @@ struct msg_win32_tty_output_ack {
 
 struct msg_win32_tty_output_abort {
 	uint32_t	size;
+};
+
+enum msg_win32_tty_transport_lost_reason {
+	WIN32_TTY_TRANSPORT_INPUT_CLOSED = 1,
+	WIN32_TTY_TRANSPORT_OUTPUT_FAILED,
+	WIN32_TTY_TRANSPORT_TEST
+};
+
+struct msg_win32_tty_transport_lost {
+	uint32_t	reason;
 };
 
 struct msg_read_open {

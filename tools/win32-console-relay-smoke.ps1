@@ -2,6 +2,7 @@ param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-console-relay-smoke",
     [switch]$SimulateOutputLoss,
+    [switch]$SimulateTransportLost,
     [switch]$ExerciseOutputProgress,
     [switch]$RemoveLogsOnSuccess
 )
@@ -170,6 +171,7 @@ $savedEnv = @{
     TMUX_WIN32_HANDLE_TTY = $env:TMUX_WIN32_HANDLE_TTY
     TMUX_WIN32_CONSOLE_RELAY = $env:TMUX_WIN32_CONSOLE_RELAY
     TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
+    TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST
 }
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-relay-smoke-" + [Guid]::NewGuid().ToString("N"))
@@ -186,6 +188,11 @@ try {
         $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = "1"
     } else {
         $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $null
+    }
+    if ($SimulateTransportLost) {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = "1"
+    } else {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $null
     }
 
     Push-Location $root
@@ -207,6 +214,42 @@ try {
                 "-t",
                 "relay"
             ) -TimeoutMs 10000
+        } elseif ($SimulateTransportLost) {
+            Write-Host "Relay transport loss is being simulated while output is in flight. Attach should fail automatically."
+            Write-Host "Logs will be checked afterward: $root"
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 15000 -AfterStart {
+                Start-Sleep -Milliseconds 500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    "for /L %i in (1,1,6000) do @echo relay-transport-loss-0123456789abcdefghijklmnopqrstuvwxyz"
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+            }
         } elseif ($ExerciseOutputProgress) {
             Write-Host "Relay output progress exercise is enabled. Output will be generated and the attach client will be detached automatically."
             Write-Host "Logs will be checked afterward: $root"
@@ -291,6 +334,7 @@ try {
     $inputCredit = Test-AnyLogMatch $attachLogs "Win32 input credit"
     $directOutput = Test-AnyLogMatch $attachLogs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
     $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
+    $transportLost = Test-AnyLogMatch $logs "relay transport lost|simulating Win32 console relay transport loss|transport-lost"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
@@ -301,6 +345,9 @@ try {
     Write-Host "  relay terminal identify: $relayIdentify"
     Write-Host "  input credit observed: $inputCredit"
     Write-Host "  direct handle path used: $directOutput"
+    if ($SimulateTransportLost) {
+        Write-Host "  transport lost observed: $transportLost"
+    }
     if ($ExerciseOutputProgress) {
         Write-Host "  output progress events: $outputProgressCount"
     }
@@ -319,6 +366,10 @@ try {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $outputAbort -and
             $failures.Count -eq 0
+    } elseif ($SimulateTransportLost) {
+        $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $transportLost -and
+            $failures.Count -eq 0
     } elseif ($ExerciseOutputProgress) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and
@@ -331,6 +382,8 @@ try {
         Write-Host ""
         if ($SimulateOutputLoss) {
             Write-Host "Native-console relay output-loss smoke passed."
+        } elseif ($SimulateTransportLost) {
+            Write-Host "Native-console relay transport-loss smoke passed."
         } elseif ($ExerciseOutputProgress) {
             Write-Host "Native-console relay output-progress smoke passed."
         } else {
@@ -345,6 +398,8 @@ try {
     Write-Host ""
     if ($SimulateOutputLoss) {
         Write-Host "Native-console relay output-loss smoke failed."
+    } elseif ($SimulateTransportLost) {
+        Write-Host "Native-console relay transport-loss smoke failed."
     } elseif ($ExerciseOutputProgress) {
         Write-Host "Native-console relay output-progress smoke failed."
     } else {
@@ -356,4 +411,5 @@ try {
     $env:TMUX_WIN32_HANDLE_TTY = $savedEnv.TMUX_WIN32_HANDLE_TTY
     $env:TMUX_WIN32_CONSOLE_RELAY = $savedEnv.TMUX_WIN32_CONSOLE_RELAY
     $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
+    $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST
 }

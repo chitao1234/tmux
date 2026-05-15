@@ -29,8 +29,10 @@ Unix-shaped contract while the underlying object is native Windows:
 2. Server startup has a normal-path lock, but foreground startup, path aliases,
    slash-root paths, and unconditional socket unlink still leave race and
    confusion windows.
-3. Console terminal relay now has explicit input flow control and incremental
-   output progress, but it still needs transport-loss semantics.
+3. Console terminal relay now has explicit input flow control, incremental
+   output progress, and transport-loss semantics. Remaining relay work is
+   mostly tuning and broader native coverage rather than missing protocol
+   primitives.
 4. Pane/job lifecycle still conflates process exit, output EOF, dead-pane
    state, passive cleanup, and forced termination.
 5. Native path, quoting, long-path, and Unicode environment support remains
@@ -550,6 +552,12 @@ current implementation:
   `WIN32_IO_EVENT_WRITE_PROGRESS`, relay/direct tty accounting consumes it
   incrementally, redraw deferral uses a threshold, and the tracked smoke entry
   point is `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`.
+- Win32 console relay now has explicit
+  `MSG_WIN32_TTY_TRANSPORT_LOST` handling. Server-side relay close no longer
+  waits on progress after transport loss, late relay messages are ignored once
+  loss is declared, and the Win32 client no longer waits on local relay output
+  progress once transport loss is known. The tracked smoke entry point is
+  `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`.
 - Win32 terminal output scheduling no longer recurses synchronously through
   `tty_write_callback()`.
 - Win32 `pipe-pane` helper ownership is no longer leaked on toggle-off or pane
@@ -590,6 +598,12 @@ through `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`. It
 verifies that sustained output produces multiple incremental relay progress
 events rather than waiting for a full writer drain.
 
+Tracked native-console relay transport-loss smoke is now also available
+through `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`. It
+verifies that a declared relay transport loss while output is already in
+flight causes attach to exit promptly instead of waiting for impossible relay
+completion.
+
 High-priority native PowerShell tests:
 
 1. Auth admission:
@@ -620,35 +634,40 @@ High-priority native PowerShell tests:
    expand the current output-progress smoke to assert redraw-threshold tuning,
    status responsiveness, and detach behavior under sustained backlog.
 
-8. Handle relay:
+8. Native reader failure:
+   reproduce an actual console-input loss without the test knob and verify it
+   follows the explicit transport-lost path already covered by simulated
+   smoke.
+
+9. Handle relay:
    attach from a non-console Win32 frontend only after authenticated handle
    transfer is implemented.
 
-9. Pane lifecycle:
+10. Pane lifecycle:
    root process exits with delayed ConPTY tail output; verify tail output is
    preserved, dead-pane state is correct, and respawn behavior matches policy.
 
-10. `pipe-pane` lifecycle:
+11. `pipe-pane` lifecycle:
     destroy panes while `pipe-pane -O`, `-I`, and `-IO` helpers still have
     pending data; verify no unintended truncation or helper leak.
 
-11. Passive vs forced teardown:
+12. Passive vs forced teardown:
     verify natural pane exit, remain-on-exit, kill-pane, and respawn use the
     intended Win32 close/kill mode.
 
-12. Command quoting:
+13. Command quoting:
     run popup editors and shell commands with spaces, quotes, `&`, `|`, `^`,
     and parentheses under `cmd.exe`.
 
-13. Long paths:
+14. Long paths:
     start tmux from a long cwd and long executable path; verify server spawn,
     terminfo discovery, `PWD`, and relative paths.
 
-14. Unicode environment and filesystem:
+15. Unicode environment and filesystem:
     launch with non-ASCII environment values and access configs, buffers,
     logs, and history files under non-ASCII paths.
 
-15. Glob semantics:
+16. Glob semantics:
     test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names, and
     mixed slash/backslash input for `source-file`.
 
@@ -658,9 +677,9 @@ High-priority native PowerShell tests:
    authenticated same-user peer model, custom path policy, canonical socket
    paths, startup-lock bypasses, bounded lock wait, and stale unlink defense.
 
-2. Terminal relay protocol:
-   transport-lost semantics, redraw/credit tuning, and authenticated terminal
-   handle transfer.
+2. Terminal relay tuning and coverage:
+   redraw/credit tuning, native reader-failure coverage, and authenticated
+   terminal handle transfer.
 
 3. Pane/job lifecycle:
    split process-exited vs output-drained state, split passive cleanup from

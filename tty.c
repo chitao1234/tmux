@@ -890,7 +890,8 @@ tty_close_graceful(struct tty *tty)
 	}
 	if ((tty->flags & TTY_OPENED) && c->win32_console) {
 		tty_stop_tty(tty);
-		if (c->win32_tty_out_pending != 0) {
+		if (!c->win32_tty_transport_lost &&
+		    c->win32_tty_out_pending != 0) {
 			tty->flags |= TTY_CLOSEPENDING;
 			return (1);
 		}

@@ -2,7 +2,7 @@
 
 Date: 2026-05-15
 
-Status: In progress; Stages 2-4 implemented
+Status: In progress; Stages 2-5 implemented
 
 Related docs:
 
@@ -102,10 +102,10 @@ open the option of a future console attach or helper design.
 
 ## Current Relay Problems
 
-Current code and findings now show one remaining protocol-level gap for a
-fully first-class transport. The earlier Stage 2-4 gaps are included here as
-completed hardening work because they define the relay contract that native
-console clients now rely on.
+Current code and findings no longer show an open protocol-level gap for the
+relay path. The earlier Stage 2-5 gaps are included here as completed
+hardening work because they define the relay contract that native console
+clients now rely on. The remaining work is tuning and broader native coverage.
 
 ### 1. Output loss previously deadlocked close
 
@@ -135,18 +135,20 @@ Result:
 - heavy output no longer behaves like stop-and-wait over large windows;
 - responsiveness improves while close accounting still stays explicit.
 
-### 4. Remaining gap: transport-lost semantics
+### 4. Transport-lost semantics are explicit
 
-The remaining relay hardening work is explicit transport-loss handling.
+Stage 5 fixed the remaining relay completion ambiguity with
+`MSG_WIN32_TTY_TRANSPORT_LOST`.
 
-Result today:
+Result:
 
-- output abort is explicit when the client writer fails;
-- input credits bound in-flight input;
-- incremental output progress reduces redraw and close latency;
-- but detach, exit, shutdown, and peer-loss paths still need a single
-  transport-lost contract so neither side waits on progress that can no
-  longer arrive.
+- client-declared terminal transport loss is explicit and logged;
+- the server drops remaining relay output pending state and input credit;
+- graceful close no longer waits for relay progress after transport loss;
+- late relay input, resize, progress, and abort messages are ignored once
+  transport loss has been declared;
+- the Win32 client no longer waits for local relay output progress once the
+  transport is already known lost.
 
 ## Target Relay Model
 
@@ -211,8 +213,9 @@ completed-output progress message.
   Client to server. Reports output bytes dropped due to writer failure or
   console loss.
 - `MSG_WIN32_TTY_TRANSPORT_LOST`
-  Either direction. Terminal transport is no longer usable; detach or exit
-  should stop waiting for further progress.
+  Client to server in the current implementation. Terminal transport is no
+  longer usable; detach or exit should stop waiting for further relay
+  progress.
 
 The names are illustrative. The important part is semantics, not the exact
 enumerator spelling.
@@ -249,6 +252,9 @@ enumerator spelling.
 
 - This is a terminal-transport event, not generic server shutdown.
 - It exists to break ambiguous waits and make loss explicit in logs and state.
+- After transport loss, the server drops remaining relay input credit and
+  output pending state and ignores any late relay progress, abort, resize, or
+  input messages that arrive after the loss declaration.
 
 ## State Machines
 
@@ -409,10 +415,14 @@ Implemented.
 
 ### Stage 5: harden transport loss semantics
 
-- Add explicit transport-lost state transitions.
-- Audit detach, exit, shutdown, and peer-loss paths so none wait on impossible
-  relay completions.
-- Ensure logs explain whether exit was graceful, aborted, or transport-lost.
+Implemented.
+
+- Added explicit `MSG_WIN32_TTY_TRANSPORT_LOST`.
+- Relay loss now clears server-side relay pending state and input credit.
+- Graceful close no longer waits on relay completion after transport loss.
+- Late relay progress, abort, resize, and input messages are ignored once the
+  relay transport is declared lost.
+- Native relay smoke now covers simulated transport loss under output backlog.
 
 ### Stage 6: test and tune
 
@@ -439,6 +449,11 @@ under MSYS2.
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible
   ACK.
+- `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`
+  Relay transport-loss coverage. It simulates relay transport loss after
+  output is already queued, then verifies that attach exits promptly and logs
+  explicit transport-loss handling rather than waiting for impossible relay
+  completion.
 - `tools/win32-direct-handle-smoke.ps1`
   Regression coverage for non-console direct-handle mode.
 
@@ -453,9 +468,9 @@ under MSYS2.
 3. Detach under output backlog:
    detach while output is still in flight and verify close completes with
    either progress or abort.
-4. Reader failure:
-   lose console input while output remains healthy and verify explicit
-   transport-lost handling.
+4. Native reader failure without test knobs:
+   reproduce actual console input loss and verify it follows the explicit
+   transport-lost path now covered by simulated smoke.
 5. Resize during backlog:
    resize during heavy output and verify resize messages are not starved behind
    coarse output waiting.
