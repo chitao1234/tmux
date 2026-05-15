@@ -139,10 +139,12 @@ function Test-ByteSequence {
 }
 
 $script:TmuxPath = [System.IO.Path]::GetFullPath($TmuxPath)
-$root = Join-Path $env:TEMP ($LabelPrefix + "-" + [guid]::NewGuid().ToString("N"))
+$root = Join-Path $env:TEMP ("tmux-u8-" + [guid]::NewGuid().ToString("N"))
 $caseDir = Join-Path $root "工作目录"
 $configPath = Join-Path $root "配置.tmux.conf"
 $label = $LabelPrefix + "-" + [guid]::NewGuid().ToString("N")
+$unicodeLabel = "标签-" + [guid]::NewGuid().ToString("N")
+$tmuxValuePath = Join-Path $caseDir "tmux-value.txt"
 
 New-Item -ItemType Directory -Path $caseDir -Force | Out-Null
 [System.IO.File]::WriteAllText(
@@ -177,10 +179,59 @@ try {
     $showStatusText = $showStatus.Output -join "`n"
     Assert-True ($showStatusText -match "status-left.*边界_OK") ("UTF-8 config path did not apply: " + $showStatusText)
 
+    $captureEnvMap = @{}
+    foreach ($entry in $envMap.GetEnumerator()) {
+        $captureEnvMap[$entry.Key] = $entry.Value
+    }
+    $captureEnvMap["TMUX_CAPTURE"] = $tmuxValuePath
+
+    Invoke-Tmux -Arguments @(
+        "-L",
+        $unicodeLabel,
+        "new-session",
+        "-d",
+        "-s",
+        "unicode",
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        '[System.IO.File]::WriteAllText($env:TMUX_CAPTURE, $env:TMUX, [System.Text.UTF8Encoding]::new($false))'
+    ) -WorkingDirectory $caseDir -Environment $captureEnvMap | Out-Null
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $tmuxValuePath)) {
+        if ([DateTime]::UtcNow -gt $deadline) {
+            throw "timed out waiting for child TMUX capture from unicode-labeled server"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    $showSocket = Invoke-Tmux -Arguments @("-L", $unicodeLabel, "display-message", "-p", "#{socket_path}") -WorkingDirectory $caseDir -Environment $envMap
+    $socketPath = $showSocket.Output | Select-Object -First 1
+    Assert-True ($socketPath -ne $null -and $socketPath.Length -ne 0) "could not read socket path from unicode-labeled server"
+
+    $tmuxValue = [System.IO.File]::ReadAllText(
+        $tmuxValuePath,
+        [System.Text.UTF8Encoding]::new($false)
+    ).Trim()
+    Assert-True ($tmuxValue.Length -ne 0) "captured child TMUX was empty"
+    Assert-True ($tmuxValue.StartsWith($socketPath + ",")) "captured child TMUX did not preserve the unicode socket path"
+
+    $tmuxEnvMap = @{}
+    foreach ($entry in $envMap.GetEnumerator()) {
+        $tmuxEnvMap[$entry.Key] = $entry.Value
+    }
+    $tmuxEnvMap["TMUX"] = $tmuxValue
+
+    $showTmux = Invoke-Tmux -Arguments @("show-environment", "-g", "HOME") -WorkingDirectory $caseDir -Environment $tmuxEnvMap
+    Assert-True ($showTmux.Output -contains "HOME=$caseDir") "Unicode TMUX socket path did not resolve the server"
+
     Write-Output "win32 utf8 boundary smoke passed"
 }
 finally {
     Invoke-Tmux -Arguments @("-L", $label, "kill-server") -WorkingDirectory $caseDir -Environment $envMap -AllowFailure | Out-Null
+    Invoke-Tmux -Arguments @("-L", $unicodeLabel, "kill-server") -WorkingDirectory $caseDir -Environment $envMap -AllowFailure | Out-Null
     if (-not $KeepArtifacts) {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     } else {
