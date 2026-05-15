@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: In Progress
+Status: Complete
 
 Related docs:
 
@@ -56,8 +56,8 @@ The boundary is not:
 
 ## Current Problems To Close
 
-The current tree has the core boundary helpers in place, but a few important
-edges are still incomplete.
+The current tree now has the boundary helpers and the validation coverage
+needed for this plan's scope.
 
 Completed since this plan was drafted:
 
@@ -81,15 +81,25 @@ Completed since this plan was drafted:
 - Console writes in [`win32-event.c`](../win32-event.c) now reject invalid
   UTF-8 instead of silently falling back to permissive conversion.
 - The helper layer no longer relies on fixed `MAX_PATH` module-path buffers.
+- Win32 cwd discovery now comes from `GetCurrentDirectoryW()` through
+  [`win32_getcwd_utf8()`](../win32-error.c), not narrow CRT `getcwd()`.
+- [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1) now
+  covers non-ASCII `HOME`, `USERPROFILE`, `SHELL`/`default-shell`,
+  `VISUAL`, `EDITOR`, config paths, buffer file paths, Unicode child cwd
+  startup, and Unicode `TMUX` reconnect.
+- [`tools/win32-console-relay-smoke.ps1`](win32-console-relay-smoke.ps1) now
+  covers both multibyte console-writer carry across output chunk boundaries
+  and explicit invalid UTF-8 rejection at the native console writer boundary.
 
-Remaining boundary issues:
+Boundary completion notes:
 
-- The shared `fopen()` / `open()` calls still need periodic audit, but the
-  active Win32 paths in [`file.c`](../file.c), [`status.c`](../status.c), and
-  [`popup.c`](../popup.c) already route through Win32 helper-backed file I/O
-  rather than narrow CRT filesystem calls.
-- Validation still needs more console-boundary stress coverage, especially for
-  multibyte output splits and explicit invalid UTF-8 writer behavior.
+- The completion audit did not find a live Win32 environment or filesystem
+  boundary that still depends on `_environ`, `fopen()`, `open()`, `unlink()`,
+  or `access()` for OS-facing state.
+- Remaining Win32 issues such as shell basename handling, path-list separators,
+  slash-root policy, and command quoting are tracked separately in
+  [`tools/win32-port-findings.md`](win32-port-findings.md). They are Windows
+  path-policy problems, not remaining UTF-8 / wide-char boundary leaks.
 
 ## Implementation Stages
 
@@ -107,7 +117,7 @@ Remaining boundary issues:
   path.
 - Done: normalize imported environment entries into tmux's UTF-8 environment
   store.
-- Mostly done: replace direct Win32-facing `getenv()` uses with either
+- Done: replace direct Win32-facing `getenv()` uses with either
   `global_environ` lookups or explicit wide helpers.
 - Done: replace `compat/setenv.c` / `unsetenv()` Win32 behavior with a wide
   boundary helper and keep tmux's UTF-8 environment state synchronized.
@@ -117,22 +127,27 @@ Remaining boundary issues:
 ### Stage 3: Close filesystem and path leaks
 
 - Done: replace narrow config-file loading in `cfg.c` with a wide path helper.
-- Remaining: re-audit `file.c` and remove any narrow fallback where a Windows
-  path has already been normalized to UTF-16.
+- Done: re-audit `file.c`; the active Win32 read/write paths stay on
+  helper-backed or handle-backed file I/O rather than falling back to narrow
+  CRT opens for normalized filesystem paths.
 - Done: convert socket cleanup and managed-root cleanup in `win32-ipc.c` to
   wide path operations.
-- Audit `log.c`, `popup.c`, `status.c`, `server.c`, and `client.c` for any
-  Win32-facing path operation that still relies on narrow CRT behavior.
-- Remove `MAX_PATH`-limited assumptions from the helper layer where possible.
+- Done: audit `log.c`, `popup.c`, `status.c`, `server.c`, and `client.c`;
+  the active Win32-facing file and cleanup paths already use wide helpers,
+  `CreateFileW()`, or the Win32 file service.
+- Done: remove `MAX_PATH`-limited assumptions from the helper layer where they
+  affected Win32 module-path and cwd boundaries.
 
 ### Stage 4: Harden process and shell boundaries
 
-- Make shell validation Windows-aware instead of byte-oriented.
-- Ensure `default-shell` and related path checks are validated in the same
-  encoding used for process creation.
-- Keep `CreateProcessW()` as the only process creation boundary.
-- Ensure child environment building preserves all valid UTF-8 entries and
-  fails in a documented way for invalid data.
+- Done: shell validation is Windows-aware through
+  [`win32_access_utf8()`](../win32-error.c) in [`tmux.c`](../tmux.c).
+- Done: `default-shell` and related path checks are now validated in the same
+  encoding used for process creation, with Unicode `SHELL` coverage in
+  [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1).
+- Done: `CreateProcessW()` remains the only process creation boundary.
+- Done: child environment building preserves valid UTF-8 entries and exports
+  them through the wide helper layer.
 
 ### Stage 5: Make console conversion policy consistent
 
@@ -140,21 +155,26 @@ Remaining boundary issues:
 - Keep the real console writer as the only UTF-16 text sink.
 - Done: invalid UTF-8 at the console boundary is rejected rather than
   sanitized.
+- Done: multibyte output carry across console writer chunk boundaries is
+  validated explicitly.
 - Avoid using console code page changes as part of correctness.
 
 ### Stage 6: Validation
 
 - Add or update tests for:
-  - non-ASCII `HOME`, `USERPROFILE`, `SHELL`, `EDITOR`, `VISUAL`, and `TMUX`;
-  - non-ASCII config paths;
-  - non-ASCII socket and IPC paths;
+  - Done: non-ASCII `HOME`, `USERPROFILE`, `SHELL`, `EDITOR`, `VISUAL`, and
+    `TMUX`.
+  - Done: non-ASCII config paths.
+  - Done: non-ASCII socket and IPC paths through Unicode `TMUX` reconnect.
   - Done: Unicode file read/write paths are covered by
     [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1).
   - Done: child process startup from a Unicode cwd is covered by
     [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1).
-  - console output that crosses multibyte boundaries;
-  - invalid UTF-8 behavior at the console writer boundary.
-- Verify that the Win32 path no longer depends on raw `_environ`,
+  - Done: console output that crosses multibyte boundaries through
+    [`tools/win32-console-relay-smoke.ps1 -ExerciseUtf8Split`](win32-console-relay-smoke.ps1).
+  - Done: invalid UTF-8 behavior at the console writer boundary through
+    [`tools/win32-console-relay-smoke.ps1 -ExerciseInvalidUtf8`](win32-console-relay-smoke.ps1).
+- Done: verify that the Win32 path no longer depends on raw `_environ`,
   `fopen()`, `open()`, `unlink()`, or `access()` for OS-facing state.
 
 ## Priority Order
@@ -187,10 +207,10 @@ This plan is complete when:
 - console output conversion policy is explicit and consistent;
 - tests cover non-ASCII and invalid-input cases at the new boundary.
 
-## Next Concrete Work
+## Follow-Up Work
 
-1. Re-audit [`file.c`](../file.c), [`status.c`](../status.c),
-   [`popup.c`](../popup.c), and [`log.c`](../log.c) to document or eliminate
-   any remaining Win32-facing narrow CRT path use.
-2. Expand smoke coverage toward console-boundary edge cases, especially
-   multibyte output splits and invalid UTF-8 rejection at the writer boundary.
+1. Keep new Win32 environment, filesystem, and process-boundary code aligned
+   with this contract: UTF-8 inside tmux, `wchar_t` only at the Win32 edge.
+2. Track remaining Windows path semantics, quoting, and socket-path policy in
+   [`tools/win32-port-findings.md`](win32-port-findings.md). Those are outside
+   this plan's completed boundary scope.

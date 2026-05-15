@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-15
+Date: 2026-05-16
 
 Scope: codebase-wide Win32 implementation review of IPC/auth, terminal
 relay, ConPTY/jobs, command execution, and filesystem/path compatibility. This
@@ -371,65 +371,7 @@ Required direction:
 - Treat single-leading-backslash paths and `~\` deliberately.
 - Canonicalize socket paths before hashing and before AF_UNIX bind/connect.
 
-### P2: Long-path and cwd handling are still capped by `MAX_PATH`
-
-Files:
-
-- [`compat/win32-compat.h`](../compat/win32-compat.h): `PATH_MAX` is defined
-  as `MAX_PATH`.
-- [`tmux.c`](../tmux.c): `find_cwd()` uses `static char cwd[PATH_MAX]` and
-  `getcwd()`.
-- [`win32-proc.c`](../win32-proc.c): server respawn uses
-  `wchar_t exe[MAX_PATH]` with `GetModuleFileNameW()`.
-- [`win32-error.c`](../win32-error.c): bundled terminfo discovery uses the same
-  fixed module path pattern.
-
-Problem:
-
-Several startup and path discovery flows still use fixed `MAX_PATH` buffers or
-narrow CRT `getcwd()`.
-
-Why it matters:
-
-Long-path-enabled Windows installs can still fail to start the detached server,
-fail to discover bundled terminfo, or silently fall back from the real current
-directory to a home/default directory. Relative paths and `PWD` then resolve
-incorrectly.
-
-Required direction:
-
-- Replace fixed module path buffers with growable `GetModuleFileNameW()` loops.
-- Replace `find_cwd()` on Win32 with dynamic `GetCurrentDirectoryW()` plus
-  UTF-8 conversion.
-- Stop treating `PATH_MAX == MAX_PATH` as a general limit for tmux path logic.
-
-### P2: Startup environment import is still ANSI
-
-Files:
-
-- [`win32-error.c`](../win32-error.c): `win32_refresh_environ()` assigns
-  `environ = _environ`.
-- [`tmux.c`](../tmux.c): startup copies that environment into
-  `global_environ`.
-
-Problem:
-
-The initial environment is read from the CRT narrow environment instead of the
-Unicode environment block.
-
-Why it matters:
-
-Non-ASCII values in `HOME`, `USERPROFILE`, `PATH`, `SHELL`, `PWD`, and user
-variables can be corrupted before tmux stores them. This affects path lookup,
-shell choice, config expansion, and child process environments.
-
-Required direction:
-
-- Import the process environment from `GetEnvironmentStringsW()`.
-- Convert names and values to UTF-8 before populating tmux's environment.
-- Keep variable-name lookup case-insensitive on Win32.
-
-### P2: Native command/path helpers still have Windows parsing gaps
+### P2: Native path semantics still have Windows parsing gaps
 
 Files:
 
@@ -437,31 +379,27 @@ Files:
   `C:\path\tmux.exe` is not compared by basename.
 - [`tmux.c`](../tmux.c): `expand_paths()` splits path lists on `:`, which
   conflicts with drive letters.
-- [`file.c`](../file.c): non-regular path fallback still uses narrow CRT
-  `open()` after `CreateFileW()` determines the handle is not a regular file.
-- [`cfg.c`](../cfg.c), [`log.c`](../log.c), [`tty.c`](../tty.c): some local
-  file paths still use CRT `fopen()`/`open()` outside the migrated file service
-  flows.
 
 Problem:
 
-The main local file service paths now use `CreateFileW`, but not every path
-boundary has been normalized. Shell validation, path-list parsing, logs, tty
-logs, and non-regular file fallbacks still use Unix assumptions.
+The UTF-8 / wide-char boundary is now in place for environment import,
+filesystem access, cwd discovery, module path discovery, and process creation,
+but some higher-level path policy still assumes Unix separators and path-list
+rules.
 
 Why it matters:
 
 Backslash shell paths can bypass tmux-recursion checks. Drive-letter paths can
-be split as lists. Non-ASCII or special Windows paths can still fail outside
-the migrated buffer/source/history file paths.
+be split as lists. These are active Win32 path-policy bugs, even though they
+are no longer evidence of an ANSI or narrow-CRT boundary leak.
 
 Required direction:
 
 - Use basename logic that understands both `/` and `\`.
 - Use `;` as the native path-list separator on Win32, while preserving any
   intentional Unix-shaped built-in defaults.
-- Continue replacing narrow CRT path APIs at Win32 boundaries with wide helper
-  wrappers or `CreateFileW`.
+- Keep future path-policy fixes separate from the already-hardened wide/UTF-8
+  boundary.
 
 ### P3: Win32 glob and case folding remain incomplete
 
@@ -566,6 +504,19 @@ current implementation:
   blindly discarding input on saturation.
 - Recent IPC path work removed ANSI WinAPI calls from the socket root security
   and directory creation path.
+- Startup environment import now comes from `GetEnvironmentStringsW()`, the
+  canonical tmux environment is copied from that wide block, and wide helper
+  updates keep `global_environ` synchronized.
+- Win32 cwd discovery now uses `GetCurrentDirectoryW()`, and module path
+  discovery now uses growable `GetModuleFileNameW()` loops rather than fixed
+  `MAX_PATH` startup buffers.
+- Active Win32 config, history, buffer, popup-temp cleanup, and diagnostic log
+  paths no longer depend on narrow CRT path APIs. The remaining path issues
+  are Windows path-policy and quoting problems, not ANSI boundary leaks.
+- Native-console relay UTF-8 writer coverage now includes multibyte split carry
+  and explicit invalid UTF-8 rejection through
+  `tools/win32-console-relay-smoke.ps1 -ExerciseUtf8Split` and
+  `tools/win32-console-relay-smoke.ps1 -ExerciseInvalidUtf8`.
 
 ## Missing Tests
 
@@ -614,6 +565,18 @@ than the 64 KiB credit window through the real console input buffer, verifies a
 client-side credit pause and resume, checks that the server returns credit
 repeatedly while attach still exits cleanly, and records peak tmux-owned
 reserved plus reader-buffered bytes.
+
+Tracked native-console relay UTF-8 split smoke is now also available through
+`tools/win32-console-relay-smoke.ps1 -ExerciseUtf8Split`. It forces a
+multibyte character to cross relay output chunk boundaries inside the client
+writer, verifies the intact text in the visible console buffer, and checks the
+carried-byte logging that proves incremental UTF-8 decoding.
+
+Tracked native-console relay invalid UTF-8 smoke is now also available through
+`tools/win32-console-relay-smoke.ps1 -ExerciseInvalidUtf8`. It forces invalid
+UTF-8 into the native console writer boundary, verifies explicit conversion
+failure logging, and checks that output abort plus transport-loss handling make
+attach fail promptly instead of hanging.
 
 Tracked native-console relay transport-loss smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`. It
@@ -692,9 +655,12 @@ High-priority native PowerShell tests:
     start tmux from a long cwd and long executable path; verify server spawn,
     terminfo discovery, `PWD`, and relative paths.
 
-14. Unicode environment and filesystem:
-    launch with non-ASCII environment values and access configs, buffers,
-    logs, and history files under non-ASCII paths.
+14. Unicode environment and filesystem edge cases beyond the current boundary
+    smoke: the tracked boundary smoke already covers non-ASCII `HOME`,
+    `USERPROFILE`, `SHELL`, `VISUAL`, `EDITOR`, config paths, buffer
+    save/load paths, Unicode child cwd startup, and Unicode `TMUX` reconnect;
+    remaining gaps are broader launcher/path-shape combinations and any newly
+    added Win32 file sinks.
 
 15. Glob semantics:
     test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names, and

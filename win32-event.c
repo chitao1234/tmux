@@ -209,6 +209,8 @@ struct win32_handle_writer {
 	size_t		 write_progress;
 	u_char		 utf8_partial[4];
 	size_t		 utf8_partial_len;
+	int		 test_utf8_split_fired;
+	int		 test_invalid_utf8_fired;
 };
 
 struct win32_process_event {
@@ -332,6 +334,9 @@ static int	win32_handle_write_file(HANDLE, const void *, size_t, DWORD *);
 static int	win32_handle_write_console(HANDLE, const u_char *, size_t);
 static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
 		     HANDLE, const void *, size_t);
+static int	win32_console_test_env_enabled(const char *);
+static size_t	win32_console_test_utf8_split_at(const u_char *, size_t);
+static u_char	*win32_console_test_invalid_utf8(const u_char *, size_t);
 static enum win32_handle_writer_backend
 		win32_handle_writer_backend_for_handle(HANDLE *);
 static void	win32_handle_writer_record_progress(
@@ -1194,6 +1199,58 @@ out:
 }
 
 static int
+win32_console_test_env_enabled(const char *name)
+{
+	char	*value;
+	int	 enabled;
+
+	value = win32_getenv_utf8(name);
+	enabled = value != NULL && strcmp(value, "0") != 0;
+	free(value);
+	return (enabled);
+}
+
+static size_t
+win32_console_test_utf8_split_at(const u_char *data, size_t size)
+{
+	static const u_char marker[] = {
+		0xe6, 0x96, 0x87,
+		'U', 'T', 'F', '8', '-', 'S', 'P', 'L', 'I', 'T', '-', 'O',
+		'K'
+	};
+	const u_char	*found;
+
+	found = memmem(data, size, marker, sizeof marker);
+	if (found == NULL)
+		return ((size_t)-1);
+	return ((size_t)(found - data) + 1);
+}
+
+static u_char *
+win32_console_test_invalid_utf8(const u_char *data, size_t size)
+{
+	static const u_char marker[] = {
+		'U', 'T', 'F', '8', '-', 'I', 'N', 'V', 'A', 'L', 'I', 'D',
+		'-', 'P', 'R', 'E', 'F', 'I', 'X', '-'
+	};
+	u_char		*copy;
+	const u_char	*found;
+	size_t		 offset;
+
+	found = memmem(data, size, marker, sizeof marker);
+	if (found == NULL)
+		return (NULL);
+	offset = (size_t)(found - data) + sizeof marker;
+	if (offset + 1 >= size)
+		return (NULL);
+	copy = xmalloc(size);
+	memcpy(copy, data, size);
+	copy[offset] = 0xe6;
+	copy[offset + 1] = 0x41;
+	return (copy);
+}
+
+static int
 win32_handle_event_error_is_eof(DWORD error)
 {
 	return (error == ERROR_BROKEN_PIPE || error == ERROR_HANDLE_EOF ||
@@ -1554,8 +1611,10 @@ win32_console_writer_run(struct win32_handle_writer *whw)
 {
 	char		*buf;
 	HANDLE		 handle;
+	u_char		*testbuf;
 	size_t		 size;
-	int		 written, notify;
+	size_t		 split;
+	int		 part, written, notify;
 	uint32_t	 events;
 
 	buf = xmalloc(WIN32_HANDLE_WRITER_CHUNK);
@@ -1579,8 +1638,49 @@ win32_console_writer_run(struct win32_handle_writer *whw)
 		handle = whw->handle;
 		LeaveCriticalSection(&whw->lock);
 
+		testbuf = NULL;
+		if (win32_console_test_env_enabled(
+		    "TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT") &&
+		    !whw->test_utf8_split_fired) {
+			split = win32_console_test_utf8_split_at((u_char *)buf,
+			    size);
+			if (split != (size_t)-1 && split < size) {
+				whw->test_utf8_split_fired = 1;
+				log_debug("%s: forcing console UTF-8 split at "
+				    "%zu bytes", __func__, split);
+				part = win32_handle_write_console_utf8(whw,
+				    handle, buf, split);
+				if (part == (int)split) {
+					part = win32_handle_write_console_utf8(
+					    whw, handle, buf + split,
+					    size - split);
+					if (part == (int)(size - split))
+						written = (int)size;
+					else
+						written = part;
+				} else
+					written = part;
+				goto have_written;
+			}
+		}
+		if (win32_console_test_env_enabled(
+		    "TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8") &&
+		    !whw->test_invalid_utf8_fired) {
+			testbuf = win32_console_test_invalid_utf8(
+			    (u_char *)buf, size);
+			if (testbuf != NULL) {
+				whw->test_invalid_utf8_fired = 1;
+				log_debug("%s: forcing console invalid UTF-8 "
+				    "near marker", __func__);
+				written = win32_handle_write_console_utf8(whw,
+				    handle, testbuf, size);
+				free(testbuf);
+				goto have_written;
+			}
+		}
 		written = win32_handle_write_console_utf8(whw, handle, buf,
 		    size);
+have_written:
 		if (written == -1 || written == 0) {
 			EnterCriticalSection(&whw->lock);
 			whw->state = WIN32_HANDLE_WRITER_ERROR;
@@ -2729,6 +2829,10 @@ win32_handle_write_console_utf8(struct win32_handle_writer *whw, HANDLE handle,
 	if (size == 0)
 		return (0);
 
+	if (whw->utf8_partial_len != 0 && log_get_level() > 1) {
+		log_debug("%s: resuming with %zu carried UTF-8 bytes", __func__,
+		    whw->utf8_partial_len);
+	}
 	total = whw->utf8_partial_len + size;
 	buf = xmalloc(total);
 	if (whw->utf8_partial_len != 0)
@@ -2740,6 +2844,10 @@ win32_handle_write_console_utf8(struct win32_handle_writer *whw, HANDLE handle,
 	if (keep > sizeof whw->utf8_partial) {
 		complete = total;
 		keep = 0;
+	}
+	if (keep != 0 && log_get_level() > 1) {
+		log_debug("%s: preserving %zu trailing UTF-8 bytes", __func__,
+		    keep);
 	}
 	written = 0;
 	if (complete != 0) {

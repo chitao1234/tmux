@@ -163,6 +163,19 @@ function Normalize-ComparablePath {
     return $Path.TrimEnd('\', '/')
 }
 
+function Test-ComparablePathEquals {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    return [string]::Equals(
+        (Normalize-ComparablePath $Left),
+        (Normalize-ComparablePath $Right),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
 $script:TmuxPath = [System.IO.Path]::GetFullPath($TmuxPath)
 $root = Join-Path $env:TEMP ("tmux-u8-" + [guid]::NewGuid().ToString("N"))
 $caseDir = Join-Path $root "工作目录"
@@ -171,14 +184,22 @@ $childOutputPath = Join-Path $childCwdDir "子输出.txt"
 $bufferPath = Join-Path $caseDir "缓冲区-文件.txt"
 $configPath = Join-Path $root "配置.tmux.conf"
 $label = $LabelPrefix + "-" + [guid]::NewGuid().ToString("N")
+$editorLabel = $LabelPrefix + "-editor-" + [guid]::NewGuid().ToString("N")
 $unicodeLabel = "标签-" + [guid]::NewGuid().ToString("N")
 $tmuxValuePath = Join-Path $caseDir "tmux-value.txt"
 $bufferName = "unicode-file"
 $loadedBufferName = "unicode-load"
 $bufferContent = "文件_内容_边界"
+$shellPath = Join-Path $caseDir "壳.exe"
+$shellSource = $env:ComSpec
 
 New-Item -ItemType Directory -Path $caseDir -Force | Out-Null
 New-Item -ItemType Directory -Path $childCwdDir -Force | Out-Null
+if ([string]::IsNullOrEmpty($shellSource) -or
+    -not (Test-Path -LiteralPath $shellSource)) {
+    $shellSource = Join-Path $env:SystemRoot "System32\\cmd.exe"
+}
+Copy-Item -LiteralPath $shellSource -Destination $shellPath -Force
 [System.IO.File]::WriteAllText(
     $configPath,
     "set -g status-left '边界_OK'`n",
@@ -187,6 +208,7 @@ New-Item -ItemType Directory -Path $childCwdDir -Force | Out-Null
 $envMap = @{
     HOME = $caseDir
     USERPROFILE = $caseDir
+    SHELL = $shellPath
     TERM = "xterm-256color"
     VISUAL = "编辑器.exe"
 }
@@ -198,14 +220,38 @@ try {
     $showHome = Invoke-Tmux -Arguments @("-L", $label, "show-environment", "-g", "HOME") -WorkingDirectory $caseDir -Environment $envMap
     Assert-True ($showHome.Output -contains "HOME=$caseDir") "HOME did not round-trip through global environment"
 
+    $showUserProfile = Invoke-Tmux -Arguments @("-L", $label, "show-environment", "-g", "USERPROFILE") -WorkingDirectory $caseDir -Environment $envMap
+    Assert-True ($showUserProfile.Output -contains "USERPROFILE=$caseDir") "USERPROFILE did not round-trip through global environment"
+
     $showTerm = Invoke-Tmux -Arguments @("-L", $label, "show-environment", "-g", "TERM") -WorkingDirectory $caseDir -Environment $envMap
     Assert-True ($showTerm.Output -contains "TERM=xterm-256color") "TERM did not round-trip through global environment"
+
+    $showShell = Invoke-Tmux -Arguments @("-L", $label, "show-options", "-g", "default-shell") -WorkingDirectory $caseDir -Environment $envMap
+    $showShellText = $showShell.Output -join "`n"
+    $showShellValue = ($showShellText -replace '^default-shell ', '').Replace('\\', '\')
+    Assert-True (
+        (Test-ComparablePathEquals -Left $showShellValue -Right $shellPath)
+    ) ("SHELL did not round-trip through default-shell option: " + $showShellText)
 
     $showEditor = Invoke-Tmux -Arguments @("-L", $label, "show-options", "-g", "editor") -WorkingDirectory $caseDir -Environment $envMap
     $showEditorText = $showEditor.Output -join "`n"
     $editorNeedle = Get-Utf8Bytes "editor 编辑器.exe"
     $editorBytes = Get-Utf8Bytes $showEditorText
     Assert-True (Test-ByteSequence -Haystack $editorBytes -Needle $editorNeedle) ("VISUAL did not round-trip through editor option: " + $showEditorText)
+
+    $editorEnvMap = @{
+        HOME = $caseDir
+        USERPROFILE = $caseDir
+        SHELL = $shellPath
+        TERM = "xterm-256color"
+        EDITOR = "编辑器-备用.exe"
+    }
+    Invoke-Tmux -Arguments @("-L", $editorLabel, "new-session", "-d") -WorkingDirectory $caseDir -Environment $editorEnvMap | Out-Null
+    $showEditorFallback = Invoke-Tmux -Arguments @("-L", $editorLabel, "show-options", "-g", "editor") -WorkingDirectory $caseDir -Environment $editorEnvMap
+    $showEditorFallbackText = $showEditorFallback.Output -join "`n"
+    $editorFallbackNeedle = Get-Utf8Bytes "editor 编辑器-备用.exe"
+    $editorFallbackBytes = Get-Utf8Bytes $showEditorFallbackText
+    Assert-True (Test-ByteSequence -Haystack $editorFallbackBytes -Needle $editorFallbackNeedle) ("EDITOR did not round-trip through editor option fallback: " + $showEditorFallbackText)
 
     $showStatus = Invoke-Tmux -Arguments @("-L", $label, "show-options", "-g", "status-left") -WorkingDirectory $caseDir -Environment $envMap
     $showStatusText = $showStatus.Output -join "`n"
@@ -243,7 +289,7 @@ try {
     $showPaneCwd = Invoke-Tmux -Arguments @("-L", $label, "display-message", "-p", "-t", "cwdcheck", "#{pane_current_path}") -WorkingDirectory $caseDir -Environment $envMap
     $paneCwdText = $showPaneCwd.Output | Select-Object -First 1
     Assert-True (
-        (Normalize-ComparablePath $paneCwdText) -eq (Normalize-ComparablePath $childCwdDir)
+        (Test-ComparablePathEquals -Left $paneCwdText -Right $childCwdDir)
     ) ("Pane current path did not preserve the Unicode cwd: " + $paneCwdText)
 
     Wait-ForPath -Path $childOutputPath -Description "Unicode child cwd output"
@@ -252,7 +298,7 @@ try {
         [System.Text.UTF8Encoding]::new($false)
     ).Trim()
     Assert-True (
-        (Normalize-ComparablePath $childCwdText) -eq (Normalize-ComparablePath $childCwdDir)
+        (Test-ComparablePathEquals -Left $childCwdText -Right $childCwdDir)
     ) ("Child process startup from Unicode cwd did not preserve the working directory: " + $childCwdText)
 
     $captureEnvMap = @{}
@@ -301,6 +347,7 @@ try {
 }
 finally {
     Invoke-Tmux -Arguments @("-L", $label, "kill-server") -WorkingDirectory $caseDir -Environment $envMap -AllowFailure | Out-Null
+    Invoke-Tmux -Arguments @("-L", $editorLabel, "kill-server") -WorkingDirectory $caseDir -Environment $envMap -AllowFailure | Out-Null
     Invoke-Tmux -Arguments @("-L", $unicodeLabel, "kill-server") -WorkingDirectory $caseDir -Environment $envMap -AllowFailure | Out-Null
     if (-not $KeepArtifacts) {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

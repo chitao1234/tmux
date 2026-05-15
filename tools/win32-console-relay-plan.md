@@ -447,6 +447,12 @@ In progress.
   resizes the real console while backlog is active, verifies that tmux updates
   the attached client's `client_width` and `client_height` before detach, and
   checks both client-side and server-side relay resize logs.
+- Native UTF-8 split smoke now forces a writer-side split through a multibyte
+  console code point, verifies the intact text in the visible console buffer,
+  and checks the carried-byte logs at the console writer boundary.
+- Native invalid UTF-8 smoke now forces invalid bytes at the console writer
+  boundary, verifies `MultiByteToWideChar` failure logging, and checks that
+  attach aborts through the explicit output-abort and transport-loss path.
 - A dedicated native reader-loss harness now launches the relay attach inside a
   child console window, waits until relay output progress is visible, then
   closes that child console window and checks for either the real input-closed
@@ -487,6 +493,16 @@ under MSYS2.
   client when credit is exhausted and returned, checks that the server returns
   credit repeatedly, and records peak tmux-owned reserved plus reader-buffered
   bytes.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseUtf8Split`
+  Relay UTF-8 split coverage. It forces a multibyte character to cross relay
+  output chunk boundaries inside the client writer, checks that the visible
+  console output still shows the intact text, and verifies the carried-byte
+  logging that proves incremental UTF-8 decoding.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseInvalidUtf8`
+  Relay invalid UTF-8 coverage. It forces invalid UTF-8 into the console
+  writer boundary, verifies that conversion fails explicitly, and checks that
+  output abort plus transport-loss handling detach the client instead of
+  hanging.
 - `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible

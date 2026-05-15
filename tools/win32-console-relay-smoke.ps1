@@ -7,6 +7,8 @@ param(
     [switch]$ExerciseDetachBacklog,
     [switch]$ExerciseOutputProgress,
     [switch]$ExerciseResizeBacklog,
+    [switch]$ExerciseUtf8Split,
+    [switch]$ExerciseInvalidUtf8,
     [switch]$RemoveLogsOnSuccess
 )
 
@@ -234,6 +236,140 @@ function Write-ConsoleInputText {
     }
 }
 
+function Initialize-ConsoleOutputInterop {
+    if ("Win32ConsoleOutput" -as [type]) {
+        return
+    }
+
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class Win32ConsoleOutput
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct COORD
+    {
+        public short X;
+        public short Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SMALL_RECT
+    {
+        public short Left;
+        public short Top;
+        public short Right;
+        public short Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CONSOLE_SCREEN_BUFFER_INFO
+    {
+        public COORD dwSize;
+        public COORD dwCursorPosition;
+        public short wAttributes;
+        public SMALL_RECT srWindow;
+        public COORD dwMaximumWindowSize;
+    }
+
+    const uint GENERIC_READ = 0x80000000;
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint OPEN_EXISTING = 3;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint desiredAccess,
+        uint shareMode, IntPtr securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetConsoleScreenBufferInfo(IntPtr consoleOutput,
+        out CONSOLE_SCREEN_BUFFER_INFO info);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ReadConsoleOutputCharacterW(IntPtr consoleOutput,
+        StringBuilder buffer, uint length, COORD coord,
+        out uint numberOfCharsRead);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static string ReadVisibleText()
+    {
+        IntPtr handle = CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0,
+            IntPtr.Zero);
+        if (handle == new IntPtr(-1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "CreateFileW(CONOUT$) failed");
+
+        try
+        {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(handle, out info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "GetConsoleScreenBufferInfo failed");
+
+            int width = info.srWindow.Right - info.srWindow.Left + 1;
+            int top = info.srWindow.Top;
+            int bottom = info.srWindow.Bottom;
+            StringBuilder all = new StringBuilder(width * (bottom - top + 1));
+
+            for (int row = top; row <= bottom; row++)
+            {
+                StringBuilder line = new StringBuilder(width);
+                COORD coord;
+                coord.X = info.srWindow.Left;
+                coord.Y = (short)row;
+
+                uint read;
+                if (!ReadConsoleOutputCharacterW(handle, line, (uint)width,
+                    coord, out read))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "ReadConsoleOutputCharacterW failed");
+
+                string text = line.ToString();
+                if (text.Length < width)
+                    text = text.PadRight(width);
+                all.Append(text, 0, width);
+            }
+            return all.ToString();
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+}
+"@
+}
+
+function Get-ConsoleVisibleText {
+    Initialize-ConsoleOutputInterop
+    [Win32ConsoleOutput]::ReadVisibleText()
+}
+
+function Wait-ConsoleVisibleText {
+    param(
+        [string]$Needle,
+        [int]$TimeoutMs = 5000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        if ((Get-ConsoleVisibleText).Contains($Needle)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $false
+}
+
 function Get-ConsoleWindowSize {
     $size = $Host.UI.RawUI.WindowSize
     [pscustomobject]@{
@@ -417,6 +553,43 @@ function Wait-TmuxClientSize {
     $null
 }
 
+function Write-TextFileUtf8NoBom {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    [System.IO.File]::WriteAllText(
+        $Path,
+        $Content,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Write-Utf8SplitHelperScript {
+    param([string]$Path)
+
+    $content = @"
+Start-Sleep -Milliseconds 750
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+[Console]::Out.WriteLine(([string][char]0x6587) + 'UTF8-SPLIT-OK')
+Start-Sleep -Seconds 30
+"@
+    Write-TextFileUtf8NoBom -Path $Path -Content $content
+}
+
+function Write-InvalidUtf8HelperScript {
+    param([string]$Path)
+
+    $content = @"
+Start-Sleep -Milliseconds 750
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+[Console]::Out.WriteLine('UTF8-INVALID-PREFIX-OK')
+Start-Sleep -Seconds 30
+"@
+    Write-TextFileUtf8NoBom -Path $Path -Content $content
+}
+
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
     throw "This smoke must be run from a real Windows console, not redirected output or the Codex runner."
 }
@@ -431,11 +604,15 @@ $savedEnv = @{
     TMUX_WIN32_CONSOLE_RELAY = $env:TMUX_WIN32_CONSOLE_RELAY
     TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
     TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST
+    TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT
+    TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8 = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8
 }
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-relay-smoke-" + [Guid]::NewGuid().ToString("N"))
 $label = "$LabelPrefix-" + [Guid]::NewGuid().ToString("N")
 $config = Join-Path $root "empty.conf"
+$utf8SplitMarker = ([string][char]0x6587) + "UTF8-SPLIT-OK"
+$invalidUtf8Prefix = "UTF8-INVALID-PREFIX-"
 New-Item -ItemType Directory -Path $root | Out-Null
 New-Item -ItemType File -Path $config | Out-Null
 
@@ -449,6 +626,9 @@ try {
     $outputProgressLargeProgressCount = -1
     $outputProgressLargeStatusRedrawCount = -1
     $outputProgressLargeThresholdDeferredCount = -1
+    $utf8SplitVisible = $false
+    $utf8SplitCarryLogged = $false
+    $invalidUtf8PrefixVisible = $false
 
     $env:TMUX = $null
     $env:TMUX_WIN32_HANDLE_TTY = "0"
@@ -463,15 +643,71 @@ try {
     } else {
         $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $null
     }
+    if ($ExerciseUtf8Split) {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT = "1"
+    } else {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT = $null
+    }
+    if ($ExerciseInvalidUtf8) {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8 = "1"
+    } else {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8 = $null
+    }
 
     Push-Location $root
     try {
-        $sessionCommand = "cmd.exe"
+        $sessionCommandArgs = @("cmd.exe")
         if ($ExerciseInputCredit) {
-            $sessionCommand = 'cmd.exe /Q /K "findstr .* >nul"'
+            $sessionCommandArgs = @("cmd.exe", "/Q", "/K", "findstr .* >nul")
+        } elseif ($ExerciseUtf8Split) {
+            $splitHelper = Join-Path $root "utf8-split-helper.ps1"
+            Write-Utf8SplitHelperScript -Path $splitHelper
+            $sessionCommandArgs = @(
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $splitHelper
+            )
+        } elseif ($ExerciseInvalidUtf8) {
+            $invalidHelper = Join-Path $root "utf8-invalid-helper.ps1"
+            Write-InvalidUtf8HelperScript -Path $invalidHelper
+            $sessionCommandArgs = @(
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $invalidHelper
+            )
         }
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
-        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "relay", $sessionCommand) | Out-Null
+        Invoke-Tmux -Arguments (@(
+            "-f",
+            $config,
+            "-vv",
+            "-L",
+            $label,
+            "new-session",
+            "-d",
+            "-s",
+            "relay"
+        ) + $sessionCommandArgs) | Out-Null
+        if ($ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
+            Invoke-Tmux -Arguments @(
+                "-f",
+                $config,
+                "-L",
+                $label,
+                "set-option",
+                "-g",
+                "status",
+                "off"
+            ) | Out-Null
+        }
 
         Write-Host "Launching native-console relay attach."
         if ($ExerciseInputCredit) {
@@ -508,6 +744,50 @@ try {
                     "client-$AttachPid"
                 ) | Out-Null
             }
+        } elseif ($ExerciseUtf8Split) {
+            Write-Host "Relay UTF-8 split exercise is enabled. A multibyte character will be split across relay output messages and the visible console buffer will be checked."
+            Write-Host "Logs will be checked afterward: $root"
+            Clear-Host
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 15000 -AfterStart {
+                param([int]$AttachPid)
+
+                if (-not (Wait-ConsoleVisibleText -Needle $script:utf8SplitMarker -TimeoutMs 5000)) {
+                    throw "timed out waiting for UTF-8 split marker in visible console output"
+                }
+                $script:utf8SplitVisible = $true
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
+        } elseif ($ExerciseInvalidUtf8) {
+            Write-Host "Relay invalid UTF-8 exercise is enabled. Attach should fail after the console writer rejects invalid bytes."
+            Write-Host "Logs will be checked afterward: $root"
+            Clear-Host
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 15000
         } elseif ($SimulateOutputLoss) {
             Write-Host "Relay output loss is being simulated. Attach should fail automatically."
             Write-Host "Logs will be checked afterward: $root"
@@ -804,6 +1084,17 @@ try {
 
         $attachCode = $attach.ExitCode
         $attachPid = $attach.ProcessId
+        if ($ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
+            Start-Sleep -Milliseconds 200
+            $visibleText = Get-ConsoleVisibleText
+            if ($ExerciseUtf8Split) {
+                $utf8SplitVisible = $utf8SplitVisible -or
+                    $visibleText.Contains($utf8SplitMarker)
+            } else {
+                $invalidUtf8PrefixVisible =
+                    $visibleText.Contains($invalidUtf8Prefix)
+            }
+        }
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
     } finally {
         Pop-Location
@@ -837,6 +1128,9 @@ try {
     $statusRedrawCount = Get-LogMatchCount $logs "redraw status"
     $statusRedraw = $statusRedrawCount -ge 1
     $win32ThresholdDeferredCount = Get-LogMatchCount $logs "Win32 output bytes >"
+    $utf8SplitCarryLogged = Test-AnyLogMatch $attachLogs `
+        "preserving [0-9]+ trailing UTF-8 bytes|resuming with [0-9]+ carried UTF-8 bytes"
+    $invalidUtf8Failure = Test-AnyLogMatch $attachLogs "MultiByteToWideChar failed"
     $resizeClientLog = $false
     $resizeServerLog = $false
     if ($ExerciseResizeBacklog -and $resizeTarget -ne $null) {
@@ -863,6 +1157,16 @@ try {
         Write-Host "  returned credit events: $inputReturnedCount"
         Write-Host "  peak reserved bytes: $inputPeakReserved"
         Write-Host "  peak reader buffered bytes: $inputPeakBuffered"
+    }
+    if ($ExerciseUtf8Split) {
+        Write-Host "  UTF-8 split marker visible: $utf8SplitVisible"
+        Write-Host "  UTF-8 carry logged: $utf8SplitCarryLogged"
+    }
+    if ($ExerciseInvalidUtf8) {
+        Write-Host "  invalid UTF-8 prefix visible: $invalidUtf8PrefixVisible"
+        Write-Host "  invalid UTF-8 failure logged: $invalidUtf8Failure"
+        Write-Host "  output abort observed: $outputAbort"
+        Write-Host "  transport lost observed: $transportLost"
     }
     if ($SimulateTransportLost) {
         Write-Host "  transport lost observed: $transportLost"
@@ -915,6 +1219,16 @@ try {
             $inputPeakReserved -ge 0 -and $inputPeakReserved -le 65536 -and
             $inputPeakBuffered -ge 0 -and $inputPeakBuffered -le 65536 -and
             $failures.Count -eq 0
+    } elseif ($ExerciseUtf8Split) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $utf8SplitVisible -and
+            $utf8SplitCarryLogged -and
+            -not $invalidUtf8Failure -and $failures.Count -eq 0
+    } elseif ($ExerciseInvalidUtf8) {
+        $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and
+            $invalidUtf8Failure -and
+            $outputAbort -and $transportLost -and $failures.Count -eq 0
     } elseif ($SimulateOutputLoss) {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $outputAbort -and
@@ -957,6 +1271,10 @@ try {
         Write-Host ""
         if ($ExerciseInputCredit) {
             Write-Host "Native-console relay input-credit smoke passed."
+        } elseif ($ExerciseUtf8Split) {
+            Write-Host "Native-console relay UTF-8 split smoke passed."
+        } elseif ($ExerciseInvalidUtf8) {
+            Write-Host "Native-console relay invalid UTF-8 smoke passed."
         } elseif ($SimulateOutputLoss) {
             Write-Host "Native-console relay output-loss smoke passed."
         } elseif ($SimulateTransportLost) {
@@ -979,6 +1297,10 @@ try {
     Write-Host ""
     if ($ExerciseInputCredit) {
         Write-Host "Native-console relay input-credit smoke failed."
+    } elseif ($ExerciseUtf8Split) {
+        Write-Host "Native-console relay UTF-8 split smoke failed."
+    } elseif ($ExerciseInvalidUtf8) {
+        Write-Host "Native-console relay invalid UTF-8 smoke failed."
     } elseif ($SimulateOutputLoss) {
         Write-Host "Native-console relay output-loss smoke failed."
     } elseif ($SimulateTransportLost) {
@@ -1007,4 +1329,6 @@ try {
     $env:TMUX_WIN32_CONSOLE_RELAY = $savedEnv.TMUX_WIN32_CONSOLE_RELAY
     $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
     $env:TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST
+    $env:TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_UTF8_SPLIT
+    $env:TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8 = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8
 }
