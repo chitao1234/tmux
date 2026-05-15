@@ -50,6 +50,7 @@ static int		 win32_get_argv(int *, char ***);
 static char		*make_label(const char *, char **);
 
 static int		 areshell(const char *);
+static const char	*getenv_canonical(const char *);
 static const char	*getshell(void);
 
 static __dead void
@@ -114,12 +115,27 @@ win32_get_argv(int *argcp, char ***argvp)
 #endif
 
 static const char *
+getenv_canonical(const char *name)
+{
+	struct environ_entry	*envent;
+
+#ifdef TMUX_WIN32
+	if (global_environ != NULL) {
+		envent = environ_find(global_environ, name);
+		if (envent != NULL)
+			return (envent->value);
+	}
+#endif
+	return (getenv(name));
+}
+
+static const char *
 getshell(void)
 {
 	struct passwd	*pw;
 	const char	*shell;
 
-	shell = getenv("SHELL");
+	shell = getenv_canonical("SHELL");
 	if (checkshell(shell))
 		return (shell);
 
@@ -467,7 +483,7 @@ find_cwd(void)
 	if (getcwd(cwd, sizeof cwd) == NULL)
 		return (NULL);
 #endif
-	if ((pwd = getenv("PWD")) == NULL || *pwd == '\0')
+	if ((pwd = getenv_canonical("PWD")) == NULL || *pwd == '\0')
 		return (cwd);
 
 #ifdef TMUX_WIN32
@@ -502,13 +518,13 @@ find_home(void)
 		return (home);
 
 #ifdef TMUX_WIN32
-	value = getenv("HOME");
+	value = getenv_canonical("HOME");
 	if (value != NULL && *value != '\0') {
 		home = xstrdup(value);
 		return (home);
 	}
 #else
-	home = getenv("HOME");
+	home = getenv_canonical("HOME");
 #endif
 	if (home == NULL || *home == '\0') {
 		pw = getpwuid(getuid());
@@ -669,14 +685,14 @@ main(int argc, char **argv)
 	 * terminal, or if not they know that output from UTF-8-capable
 	 * programs may be wrong.
 	 */
-	if (getenv("TMUX") != NULL)
+	if (getenv_canonical("TMUX") != NULL)
 		flags |= CLIENT_UTF8;
 	else {
-		s = getenv("LC_ALL");
+		s = getenv_canonical("LC_ALL");
 		if (s == NULL || *s == '\0')
-			s = getenv("LC_CTYPE");
+			s = getenv_canonical("LC_CTYPE");
 		if (s == NULL || *s == '\0')
-			s = getenv("LANG");
+			s = getenv_canonical("LANG");
 		if (s == NULL || *s == '\0')
 			s = "";
 		if (strcasestr(s, "UTF-8") != NULL ||
@@ -707,7 +723,8 @@ main(int argc, char **argv)
 	    getshell());
 
 	/* Override keys to vi if VISUAL or EDITOR are set. */
-	if ((s = getenv("VISUAL")) != NULL || (s = getenv("EDITOR")) != NULL) {
+	if ((s = getenv_canonical("VISUAL")) != NULL ||
+	    (s = getenv_canonical("EDITOR")) != NULL) {
 		options_set_string(global_options, "editor", 0, "%s", s);
 		if (strrchr(s, '/') != NULL)
 			s = strrchr(s, '/') + 1;
@@ -725,7 +742,7 @@ main(int argc, char **argv)
 	 * used.
 	 */
 	if (path == NULL && label == NULL) {
-		s = getenv("TMUX");
+		s = getenv_canonical("TMUX");
 		if (s != NULL && *s != '\0' && *s != ',') {
 			path = xstrdup(s);
 			path[strcspn(path, ",")] = '\0';
