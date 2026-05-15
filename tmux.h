@@ -2054,6 +2054,7 @@ struct client {
 	HANDLE			 win32_stdin;
 	HANDLE			 win32_stdout;
 	int			 win32_console;
+	size_t			 win32_tty_in_pending;
 	size_t			 win32_tty_out_pending;
 #endif
 	struct event		 event;

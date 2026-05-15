@@ -51,6 +51,7 @@ static int		 client_win32_relay_test_output_loss_fired;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
+static size_t		 client_win32_input_credit;
 static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
@@ -91,6 +92,8 @@ static void		 client_win32_resize_timer_callback(tmux_event_fd,
 			     short, void *);
 static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
+static void		 client_win32_input_add_credit(size_t);
+static void		 client_win32_input_dispatch_credit(char *, ssize_t);
 static void		 client_win32_input_update_reading(void);
 static int		 client_win32_input_flush_pending(void);
 static void		 client_win32_input_send_failed(void);
@@ -563,15 +566,43 @@ client_win32_resize_timer_stop(void)
 }
 
 static void
+client_win32_input_dispatch_credit(char *data, ssize_t datalen)
+{
+	struct msg_win32_tty_input_credit	credit;
+
+	if (datalen != sizeof credit)
+		fatalx("bad MSG_WIN32_TTY_INPUT_CREDIT size");
+	memcpy(&credit, data, sizeof credit);
+	client_win32_input_add_credit(credit.size);
+}
+
+static void
+client_win32_input_add_credit(size_t size)
+{
+	if (size > SIZE_MAX - client_win32_input_credit)
+		fatalx("Win32 console relay input credit overflow");
+	client_win32_input_credit += size;
+	log_debug("%s: Win32 input credit granted %zu bytes, %zu available",
+	    __func__, size, client_win32_input_credit);
+	if (!client_exitflag && client_win32_input_pending != NULL)
+		client_win32_input_flush_pending();
+	client_win32_input_update_reading();
+}
+
+static void
 client_win32_input_update_reading(void)
 {
 	size_t	size;
 
-	if (client_win32_input == NULL || client_win32_input_pending == NULL)
+	if (client_win32_input == NULL)
 		return;
 
-	size = EVBUFFER_LENGTH(client_win32_input_pending);
-	win32_io_reader_set_reading(client_win32_input, size == 0);
+	if (client_win32_input_pending == NULL)
+		size = 0;
+	else
+		size = EVBUFFER_LENGTH(client_win32_input_pending);
+	win32_io_reader_set_reading(client_win32_input,
+	    !client_exitflag && client_win32_input_credit != 0 && size == 0);
 }
 
 static int
@@ -597,6 +628,9 @@ client_win32_input_flush_pending(void)
 			return (-1);
 		}
 		evbuffer_drain(client_win32_input_pending, nsend);
+		log_debug("%s: sent %zu bytes, %zu reserved, %zu credit left",
+		    __func__, nsend, EVBUFFER_LENGTH(client_win32_input_pending),
+		    client_win32_input_credit);
 	}
 	return (0);
 }
@@ -620,20 +654,28 @@ client_win32_input_callback(__unused void *arg)
 
 	if (client_peer == NULL || client_win32_input == NULL)
 		return;
+	if (client_win32_input_credit == 0) {
+		client_win32_input_update_reading();
+		return;
+	}
 
 	input = evbuffer_new();
 	if (input == NULL)
 		fatalx("out of memory");
-	win32_io_reader_drain(client_win32_input, input);
+	win32_io_reader_drain_limit(client_win32_input, input,
+	    client_win32_input_credit);
 	size = EVBUFFER_LENGTH(input);
-	log_debug("%s: forwarding %zu bytes", __func__, size);
+	log_debug("%s: reserving %zu bytes from console", __func__, size);
 	if (size != 0) {
 		if (client_win32_input_pending == NULL)
 			client_win32_input_pending = evbuffer_new();
 		if (client_win32_input_pending == NULL)
 			fatalx("out of memory");
+		client_win32_input_credit -= size;
 		if (evbuffer_add_buffer(client_win32_input_pending, input) != 0)
 			fatalx("out of memory");
+		log_debug("%s: reserved %zu bytes, %zu credit left", __func__,
+		    size, client_win32_input_credit);
 	}
 	evbuffer_free(input);
 
@@ -689,6 +731,7 @@ client_win32_input_stop(void)
 	win32_io_endpoint_free(client_win32_input);
 	client_win32_input = NULL;
 clear_pending:
+	client_win32_input_credit = 0;
 	if (client_win32_input_pending != NULL) {
 		evbuffer_free(client_win32_input_pending);
 		client_win32_input_pending = NULL;
@@ -962,7 +1005,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	    !(client_flags & CLIENT_CONTROL)) {
 		if (client_win32_console_relay_enabled()) {
 			client_win32_console_relay = 1;
-			log_debug("using Win32 console relay fallback");
+			log_debug("using Win32 console relay terminal transport");
 		} else {
 			log_debug("Win32 console relay disabled by "
 			    "TMUX_WIN32_CONSOLE_RELAY=0");
@@ -1477,6 +1520,9 @@ client_dispatch_wait(struct imsg *imsg)
 		file_write_close(&client_files, imsg);
 		break;
 #ifdef TMUX_WIN32
+	case MSG_WIN32_TTY_INPUT_CREDIT:
+		client_win32_input_dispatch_credit(data, datalen);
+		break;
 	case MSG_WIN32_TTY_OUTPUT:
 		client_win32_tty_output(data, datalen);
 		break;
@@ -1586,6 +1632,9 @@ client_dispatch_attached(struct imsg *imsg)
 		proc_send(client_peer, MSG_UNLOCK, -1, NULL, 0);
 		break;
 #ifdef TMUX_WIN32
+	case MSG_WIN32_TTY_INPUT_CREDIT:
+		client_win32_input_dispatch_credit(data, datalen);
+		break;
 	case MSG_WIN32_TTY_OUTPUT:
 		client_win32_tty_output(data, datalen);
 		break;

@@ -96,6 +96,7 @@ function Invoke-TmuxInteractive {
     $psi.Arguments = Join-Win32Arguments $Arguments
 
     $process = [System.Diagnostics.Process]::Start($psi)
+    $processId = $process.Id
     if ($TimeoutMs -gt 0) {
         if (-not $process.WaitForExit($TimeoutMs)) {
             $process.Kill()
@@ -104,7 +105,10 @@ function Invoke-TmuxInteractive {
     } else {
         $process.WaitForExit()
     }
-    $process.ExitCode
+    [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        ProcessId = $processId
+    }
 }
 
 function Test-AnyLogMatch {
@@ -175,7 +179,7 @@ try {
         if ($SimulateOutputLoss) {
             Write-Host "Relay output loss is being simulated. Attach should fail automatically."
             Write-Host "Logs will be checked afterward: $root"
-            $attachCode = Invoke-TmuxInteractive -Arguments @(
+            $attach = Invoke-TmuxInteractive -Arguments @(
                 "-f",
                 $config,
                 "-vv",
@@ -187,7 +191,7 @@ try {
             ) -TimeoutMs 10000
         } else {
             Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
-            $attachCode = Invoke-TmuxInteractive -Arguments @(
+            $attach = Invoke-TmuxInteractive -Arguments @(
                 "-f",
                 $config,
                 "-vv",
@@ -199,23 +203,36 @@ try {
             )
         }
 
+        $attachCode = $attach.ExitCode
+        $attachPid = $attach.ProcessId
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
     } finally {
         Pop-Location
     }
 
     $logs = @(Get-ChildItem -LiteralPath $root -Filter "tmux-*.log" -File)
-    $relayFallback = Test-AnyLogMatch $logs "using Win32 console relay fallback"
+    $attachLogs = @()
+    $attachLogPath = Join-Path $root ("tmux-client-{0}.log" -f $attachPid)
+    if (Test-Path -LiteralPath $attachLogPath -PathType Leaf) {
+        $attachLogs = @([System.IO.FileInfo](Get-Item -LiteralPath $attachLogPath))
+    }
+    if ($attachLogs.Count -eq 0) {
+        $attachLogs = $logs
+    }
+
+    $relayMode = Test-AnyLogMatch $attachLogs "using Win32 console relay (terminal transport|fallback)"
     $relayIdentify = Test-AnyLogMatch $logs "IDENTIFY_WIN32_TERMINAL"
-    $directOutput = Test-AnyLogMatch $logs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
+    $inputCredit = Test-AnyLogMatch $attachLogs "Win32 input credit"
+    $directOutput = Test-AnyLogMatch $attachLogs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
     $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
     Write-Host ""
     Write-Host "Smoke summary:"
     Write-Host "  attach exit code: $attachCode"
-    Write-Host "  relay fallback selected: $relayFallback"
+    Write-Host "  relay terminal mode selected: $relayMode"
     Write-Host "  relay terminal identify: $relayIdentify"
+    Write-Host "  input credit observed: $inputCredit"
     Write-Host "  direct handle path used: $directOutput"
     if ($SimulateOutputLoss) {
         Write-Host "  output abort observed: $outputAbort"
@@ -229,18 +246,19 @@ try {
     }
 
     if ($SimulateOutputLoss) {
-        $passed = $attachCode -ne 0 -and $relayFallback -and $relayIdentify -and
-            -not $directOutput -and $outputAbort -and $failures.Count -eq 0
+        $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $outputAbort -and
+            $failures.Count -eq 0
     } else {
-        $passed = $attachCode -eq 0 -and $relayFallback -and $relayIdentify -and
-            -not $directOutput -and $failures.Count -eq 0
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $failures.Count -eq 0
     }
     if ($passed) {
         Write-Host ""
         if ($SimulateOutputLoss) {
             Write-Host "Native-console relay output-loss smoke passed."
         } else {
-            Write-Host "Native-console relay fallback smoke passed."
+            Write-Host "Native-console relay smoke passed."
         }
         if ($RemoveLogsOnSuccess) {
             Remove-Item -LiteralPath $root -Recurse -Force
@@ -252,7 +270,7 @@ try {
     if ($SimulateOutputLoss) {
         Write-Host "Native-console relay output-loss smoke failed."
     } else {
-        Write-Host "Native-console relay fallback smoke failed."
+        Write-Host "Native-console relay smoke failed."
     }
     exit 1
 } finally {

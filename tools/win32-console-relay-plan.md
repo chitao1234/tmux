@@ -2,7 +2,7 @@
 
 Date: 2026-05-15
 
-Status: In progress; Stage 2 output-abort semantics implemented
+Status: In progress; Stages 2-3 implemented
 
 Related docs:
 
@@ -102,34 +102,23 @@ open the option of a future console attach or helper design.
 
 ## Current Relay Problems
 
-Current code and findings show three protocol-level gaps that are acceptable
-for a prototype but not for a first-class transport.
+Current code and findings still show one remaining protocol-level gap for a
+fully first-class transport, plus two recently closed gaps that motivated this
+plan.
 
-### 1. Output loss can deadlock close
+### 1. Output loss previously deadlocked close
 
-Today the server only learns successful output completion through
-`MSG_WIN32_TTY_OUTPUT_ACK`. If the client output writer fails after bytes were
-accepted but before they are fully written, the client sends `MSG_EXITING`
-without telling the server how much outstanding output will never be ACKed.
+Stage 2 fixed this by adding explicit `MSG_WIN32_TTY_OUTPUT_ABORT`
+accounting. Graceful close no longer depends on an ACK that can never arrive
+after client-side console writer failure.
 
-Result:
+### 2. Input relay previously had no tmux-level credit window
 
-- `c->win32_tty_out_pending` can remain nonzero forever;
-- graceful close can stall waiting for an ACK that cannot arrive.
+Stage 3 fixed this with explicit `MSG_WIN32_TTY_INPUT_CREDIT` flow control.
+The server now grants a bounded input window and the client reserves credit
+before draining console input into the relay path.
 
-### 2. Input relay has no tmux-level credit window
-
-The client pauses console reads only while bytes remain in
-`client_win32_input_pending`. Once bytes are moved into the peer imsg queue,
-the console reader resumes.
-
-Result:
-
-- a long paste can grow input in flight without a tmux-level bound;
-- pressure is controlled only by lower-level socket buffering, not by the
-  terminal transport protocol.
-
-### 3. Output ACK is too coarse
+### 3. Output ACK is still too coarse
 
 The client currently ACKs output at whole-drain granularity.
 
@@ -368,11 +357,15 @@ Minimum metrics in debug logs:
 
 ### Stage 2: add output abort semantics
 
+Implemented.
+
 - Extend the protocol with output-abort.
 - Track output accepted, completed, and aborted separately.
 - Make graceful close complete on either full progress or explicit abort.
 
 ### Stage 3: add input credit accounting
+
+Implemented.
 
 - Extend the protocol with server-issued input credits.
 - Track total input bytes in flight across local staging and IPC queueing.
@@ -407,7 +400,8 @@ under MSYS2.
 ### Existing coverage
 
 - `tools/win32-console-relay-smoke.ps1`
-  Baseline attach and detach on the native-console relay path.
+  Baseline attach and detach on the native-console relay path. It now also
+  checks that relay-mode logs include Win32 input credit activity.
 - `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible

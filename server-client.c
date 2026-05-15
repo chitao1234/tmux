@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -56,7 +57,10 @@ static void	server_client_report_theme(struct client *, enum client_theme);
 #ifdef TMUX_WIN32
 #define SERVER_CLIENT_WIN32_PANE_HIGH (1024 * 1024)
 #define SERVER_CLIENT_WIN32_PANE_LOW (512 * 1024)
+#define SERVER_CLIENT_WIN32_TTY_INPUT_CREDIT (64 * 1024)
 
+static void	server_client_win32_tty_input_credit(struct client *, size_t,
+		    const char *);
 static int	server_client_win32_tty_output_ack(struct client *,
 		    struct imsg *);
 static int	server_client_win32_tty_output_abort(struct client *,
@@ -2536,6 +2540,28 @@ error:
 }
 
 #ifdef TMUX_WIN32
+static void
+server_client_win32_tty_input_credit(struct client *c, size_t size,
+    const char *what)
+{
+	struct msg_win32_tty_input_credit	credit;
+
+	if (!c->win32_console || !(c->flags & CLIENT_TERMINAL) || size == 0)
+		return;
+	if (size > UINT32_MAX)
+		fatalx("Win32 console relay input credit too large");
+	if (size > SIZE_MAX - c->win32_tty_in_pending)
+		fatalx("Win32 console relay input credit overflow");
+
+	credit.size = size;
+	if (proc_send(c->peer, MSG_WIN32_TTY_INPUT_CREDIT, -1, &credit,
+	    sizeof credit) != 0)
+		return;
+	c->win32_tty_in_pending += size;
+	log_debug("%s: %s Win32 input credit %s %zu bytes, %zu available",
+	    __func__, c->name, what, size, c->win32_tty_in_pending);
+}
+
 static int
 server_client_win32_tty_input(struct client *c, struct imsg *imsg)
 {
@@ -2550,11 +2576,16 @@ server_client_win32_tty_input(struct client *c, struct imsg *imsg)
 	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	if (datalen == 0)
 		return (0);
+	if ((size_t)datalen > c->win32_tty_in_pending)
+		return (-1);
 
+	c->win32_tty_in_pending -= datalen;
 	evbuffer_add(tty->in, imsg->data, datalen);
-	log_debug("%s: %s read %zd bytes", __func__, c->name, datalen);
+	log_debug("%s: %s read %zd bytes, %zu credit left", __func__, c->name,
+	    datalen, c->win32_tty_in_pending);
 	while (tty_keys_next(tty))
 		;
+	server_client_win32_tty_input_credit(c, (size_t)datalen, "returned");
 	return (0);
 }
 
@@ -2905,6 +2936,8 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		if (tty_init(&c->tty, c) == 0) {
 			tty_set_size(&c->tty, sx, sy, xpixel, ypixel);
 			c->flags |= CLIENT_TERMINAL;
+			server_client_win32_tty_input_credit(c,
+			    SERVER_CLIENT_WIN32_TTY_INPUT_CREDIT, "granted");
 		}
 	}
 	else if (c->win32_stdin != NULL && c->win32_stdout != NULL) {

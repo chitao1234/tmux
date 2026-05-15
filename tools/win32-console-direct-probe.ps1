@@ -171,7 +171,7 @@ try {
     $stdout = Test-AnyLogMatch $logs "IDENTIFY_WIN32_STDOUT duplicated"
     $stdin = Test-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated"
     $size = Test-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE"
-    $relay = Test-AnyLogMatch $logs "IDENTIFY_WIN32_TERMINAL|using Win32 console relay fallback"
+    $relay = Test-AnyLogMatch $logs "IDENTIFY_WIN32_TERMINAL|using Win32 console relay (terminal transport|fallback)"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error|input closed, events 0x20")
 
     Write-Host ""

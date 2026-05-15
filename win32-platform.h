@@ -66,6 +66,8 @@ struct win32_io_endpoint *win32_io_reader_new_file(HANDLE, uint64_t,
 void		 win32_io_endpoint_free(struct win32_io_endpoint *);
 void		 win32_io_reader_drain(struct win32_io_endpoint *,
 		     struct evbuffer *);
+void		 win32_io_reader_drain_limit(struct win32_io_endpoint *,
+		     struct evbuffer *, size_t);
 void		 win32_io_reader_drain_bev(struct win32_io_endpoint *,
 		     struct bufferevent *);
 void		 win32_io_reader_set_reading(struct win32_io_endpoint *,

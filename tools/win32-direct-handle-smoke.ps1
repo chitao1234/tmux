@@ -225,7 +225,7 @@ function Invoke-DirectCommandSmoke {
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct command smoke did not duplicate stdin"
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 132x43" "direct command smoke did not send the expected size"
         Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct command smoke unexpectedly used the relay identify path"
-        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct command smoke unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "using Win32 console relay (terminal transport|fallback)" "direct command smoke unexpectedly enabled relay transport"
         Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct command smoke logged an I/O failure"
     } finally {
         Pop-Location
@@ -280,7 +280,7 @@ function Invoke-DirectAttachDetachSmoke {
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct attach smoke did not duplicate stdin"
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 100x31" "direct attach smoke did not send the expected size"
         Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct attach smoke unexpectedly used the relay identify path"
-        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct attach smoke unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "using Win32 console relay (terminal transport|fallback)" "direct attach smoke unexpectedly enabled relay transport"
         Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct attach smoke logged an I/O failure"
     } finally {
         if ($null -ne $run -and -not $run.Process.HasExited) {
@@ -355,7 +355,7 @@ function Invoke-DirectOutputStressSmoke {
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_STDIN duplicated" "direct output stress did not duplicate stdin"
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 120x40" "direct output stress did not send the expected size"
         Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct output stress unexpectedly used the relay identify path"
-        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct output stress unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "using Win32 console relay (terminal transport|fallback)" "direct output stress unexpectedly enabled relay transport"
         Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct output stress logged an I/O failure"
     } finally {
         if ($null -ne $run -and -not $run.Process.HasExited) {
@@ -432,7 +432,7 @@ function Invoke-DirectInputEofSmoke {
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 110x35" "direct input EOF smoke did not send the expected size"
         Assert-AnyLogMatch $logs "tty_win32_in_close" "direct input EOF smoke did not close direct input as a half-close"
         Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct input EOF smoke unexpectedly used the relay identify path"
-        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct input EOF smoke unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "using Win32 console relay (terminal transport|fallback)" "direct input EOF smoke unexpectedly enabled relay transport"
         Assert-NoLogMatch $logs "rejected|ReadFile failed|WriteFile failed" "direct input EOF smoke logged an I/O failure"
     } finally {
         if ($null -ne $run -and -not $run.Process.HasExited) {
@@ -508,7 +508,7 @@ function Invoke-DirectOutputLossSmoke {
         Assert-AnyLogMatch $logs "IDENTIFY_WIN32_SIZE 120x35" "direct output loss did not send the expected size"
         Assert-AnyLogMatch $logs "WriteFile failed|output error" "direct output loss did not exercise output failure handling"
         Assert-NoLogMatch $logs "IDENTIFY_WIN32_TERMINAL" "direct output loss unexpectedly used the relay identify path"
-        Assert-NoLogMatch $logs "using Win32 console relay fallback" "direct output loss unexpectedly enabled relay fallback"
+        Assert-NoLogMatch $logs "using Win32 console relay (terminal transport|fallback)" "direct output loss unexpectedly enabled relay transport"
         Assert-NoLogMatch $logs "rejected|ReadFile failed" "direct output loss logged an unexpected I/O failure"
     } finally {
         if ($null -ne $run -and -not $run.Process.HasExited) {

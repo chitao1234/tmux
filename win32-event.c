@@ -1865,10 +1865,24 @@ void
 win32_io_reader_drain(struct win32_io_endpoint *endpoint,
     struct evbuffer *dst)
 {
+	win32_io_reader_drain_limit(endpoint, dst, (size_t)-1);
+}
+
+void
+win32_io_reader_drain_limit(struct win32_io_endpoint *endpoint,
+    struct evbuffer *dst, size_t limit)
+{
 	struct win32_handle_event	*whe = endpoint->owner;
+	size_t				 size;
 
 	EnterCriticalSection(&whe->lock);
-	evbuffer_add_buffer(dst, whe->input);
+	size = EVBUFFER_LENGTH(whe->input);
+	if (limit >= size)
+		evbuffer_add_buffer(dst, whe->input);
+	else if (limit != 0) {
+		if (evbuffer_remove_buffer(whe->input, dst, limit) < 0)
+			fatalx("out of memory");
+	}
 	win32_handle_event_update_ready(whe);
 	LeaveCriticalSection(&whe->lock);
 }

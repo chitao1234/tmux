@@ -29,8 +29,8 @@ Unix-shaped contract while the underlying object is native Windows:
 2. Server startup has a normal-path lock, but foreground startup, path aliases,
    slash-root paths, and unconditional socket unlink still leave race and
    confusion windows.
-3. Console terminal relay still needs protocol-level flow control and
-   finer-grained output progress, not just better handle I/O.
+3. Console terminal relay now has explicit input flow control, but it still
+   needs finer-grained output progress and transport-loss semantics.
 4. Pane/job lifecycle still conflates process exit, output EOF, dead-pane
    state, passive cleanup, and forced termination.
 5. Native path, quoting, long-path, and Unicode environment support remains
@@ -144,40 +144,6 @@ Required direction:
   endpoint.
 - Bound `WaitForSingleObject(..., INFINITE)` or make waits observable in logs
   and diagnostics.
-
-### P1: Win32 client input relay still lacks IPC backpressure
-
-Files:
-
-- [`client.c`](../client.c): `client_win32_input_update_reading()` pauses only
-  while `client_win32_input_pending` is nonempty.
-- [`client.c`](../client.c): `client_win32_input_flush_pending()` drains that
-  buffer into `proc_send()` messages.
-- [`proc.c`](../proc.c): `proc_send()` queues into the peer `imsgbuf`; it does
-  not provide a credit/window signal.
-
-Problem:
-
-The client now avoids silently dropping input on `proc_send()` hard failure,
-but the backpressure point is still the wrong one. Once bytes are moved from
-`client_win32_input_pending` into the imsg output queue, local pending length
-returns to zero and console reading resumes. There is no limit on input bytes
-in flight through the IPC queue.
-
-Why it matters:
-
-A long paste or fast input stream can keep feeding the imsg queue while the
-server is busy or slow to read. Memory can grow without a tmux-level input
-credit policy.
-
-Required direction:
-
-- Add explicit flow control for `MSG_WIN32_TTY_INPUT`, similar in spirit to
-  terminal output accounting.
-- Pause the Win32 console reader based on total input in flight, not only on
-  client-local staging bytes.
-- Define what happens on server shutdown, hard peer failure, and partial
-  delivery.
 
 ### P1: Shell command construction for `cmd.exe` is unsafe
 
@@ -347,7 +313,7 @@ Required direction:
 Files:
 
 - [`client.c`](../client.c): direct Win32 handle I/O is gated to non-console
-  stdio handles; native console clients stay on the explicit relay fallback.
+  stdio handles; native console clients stay on the explicit relay transport.
 - [`win32-proc.c`](../win32-proc.c): the server is spawned with
   `DETACHED_PROCESS`.
 - [`win32-event.c`](../win32-event.c): detached server reads/writes through the
@@ -369,9 +335,9 @@ side of this failure from a real Windows PTY: forced direct mode duplicated
 stdin/stdout and sent size identify without relay, then the detached server
 failed direct console input with `ERROR_INVALID_HANDLE`.
 
-The quarantined relay path itself was also exercised from the same PTY and
-completed attach/detach successfully while logging
-`IDENTIFY_WIN32_TERMINAL` and the relay fallback debug line.
+The relay path itself was also exercised from the same PTY and completed
+attach/detach successfully while logging `IDENTIFY_WIN32_TERMINAL` and the
+relay terminal-transport debug line.
 
 Why it matters:
 
@@ -387,7 +353,7 @@ Required direction:
 - Keep native console clients on relay until direct duplicated console handles,
   a console attachment design, or a helper design proves the detached server
   can safely use their terminal I/O. Use `TMUX_WIN32_CONSOLE_RELAY=0` to
-  disable this compatibility fallback for no-relay testing.
+  disable relay for no-relay testing.
 - Use `TMUX_WIN32_HANDLE_TTY=force` only as a diagnostic matrix probe for
   native console direct handles. It intentionally bypasses the console handle
   exclusion, initializes/restores console modes, sends direct `MSG_RESIZE`
@@ -607,8 +573,9 @@ current implementation:
   ACK that cannot arrive. The tracked smoke entry point is
   `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`.
 - Terminal UTF-8 output decoding is incremental across client writer chunks.
-- Win32 console input is staged in `client_win32_input_pending` and is not
-  silently discarded on `proc_send()` hard failure.
+- Win32 console relay input now has explicit `MSG_WIN32_TTY_INPUT_CREDIT`
+  flow control. Input is staged locally, reserved against server-issued
+  credit, and is not silently discarded on `proc_send()` hard failure.
 - Win32 terminal output scheduling no longer recurses synchronously through
   `tty_write_callback()`.
 - Win32 `pipe-pane` helper ownership is no longer leaked on toggle-off or pane
@@ -635,8 +602,8 @@ console because redirected Codex or CI stdio is not a native console client
 shape. Current probe evidence shows duplicated console handles are
 transferable but not usable for detached server-side input.
 
-Native-console relay fallback smoke remains the supported compatibility path
-for that client shape. The tracked manual smoke entry point is
+Native-console relay smoke remains the supported primary path for that client
+shape. The tracked manual smoke entry point is
 `tools/win32-console-relay-smoke.ps1`.
 
 Tracked native-console relay output-loss smoke is now also available through
@@ -666,9 +633,9 @@ High-priority native PowerShell tests:
    close or invalidate the client console while output bytes are pending and
    verify the server completes exit instead of waiting forever.
 
-6. Input backpressure:
-   paste large data while the server is busy and verify bounded in-flight input
-   accounting.
+6. Input credit tuning:
+   paste large data while the server is busy and verify the implemented relay
+   credit window stays bounded under sustained backlog.
 
 7. Output responsiveness:
    produce sustained redraw-heavy output and verify incremental ACK/credit
