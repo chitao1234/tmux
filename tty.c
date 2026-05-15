@@ -884,6 +884,9 @@ tty_close_graceful(struct tty *tty)
 	if ((tty->flags & TTY_OPENED) && tty->win32_out != NULL) {
 		tty_stop_tty(tty);
 		if (!tty_win32_out_drained(tty)) {
+			log_debug("%s: %s Win32 direct output close pending "
+			    "(%zu bytes pending)", __func__, c->name,
+			    tty->win32_out_pending);
 			tty->flags |= TTY_CLOSEPENDING;
 			return (1);
 		}
@@ -892,6 +895,8 @@ tty_close_graceful(struct tty *tty)
 		tty_stop_tty(tty);
 		if (!c->win32_tty_transport_lost &&
 		    c->win32_tty_out_pending != 0) {
+			log_debug("%s: %s Win32 relay close pending (%zu bytes)",
+			    __func__, c->name, c->win32_tty_out_pending);
 			tty->flags |= TTY_CLOSEPENDING;
 			return (1);
 		}

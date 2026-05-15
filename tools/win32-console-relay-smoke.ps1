@@ -3,6 +3,7 @@ param(
     [string]$LabelPrefix = "win32-console-relay-smoke",
     [switch]$SimulateOutputLoss,
     [switch]$SimulateTransportLost,
+    [switch]$ExerciseDetachBacklog,
     [switch]$ExerciseOutputProgress,
     [switch]$RemoveLogsOnSuccess
 )
@@ -250,6 +251,54 @@ try {
                     "Enter"
                 ) | Out-Null
             }
+        } elseif ($ExerciseDetachBacklog) {
+            Write-Host "Relay detach-under-backlog exercise is enabled. Output will be generated and detach will happen while relay output is still pending."
+            Write-Host "Logs will be checked afterward: $root"
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 20000 -AfterStart {
+                param([int]$AttachPid)
+
+                Start-Sleep -Milliseconds 500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    "for /L %i in (1,1,20000) do @echo relay-detach-backlog-0123456789abcdefghijklmnopqrstuvwxyz"
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+                Start-Sleep -Milliseconds 150
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
         } elseif ($ExerciseOutputProgress) {
             Write-Host "Relay output progress exercise is enabled. Output will be generated and the attach client will be detached automatically."
             Write-Host "Logs will be checked afterward: $root"
@@ -335,6 +384,7 @@ try {
     $directOutput = Test-AnyLogMatch $attachLogs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
     $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
     $transportLost = Test-AnyLogMatch $logs "relay transport lost|simulating Win32 console relay transport loss|transport-lost"
+    $closePending = Test-AnyLogMatch $logs "Win32 relay close pending"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
@@ -347,6 +397,9 @@ try {
     Write-Host "  direct handle path used: $directOutput"
     if ($SimulateTransportLost) {
         Write-Host "  transport lost observed: $transportLost"
+    }
+    if ($ExerciseDetachBacklog) {
+        Write-Host "  close pending observed: $closePending"
     }
     if ($ExerciseOutputProgress) {
         Write-Host "  output progress events: $outputProgressCount"
@@ -370,6 +423,10 @@ try {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $transportLost -and
             $failures.Count -eq 0
+    } elseif ($ExerciseDetachBacklog) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $closePending -and
+            $outputProgressCount -ge 1 -and $failures.Count -eq 0
     } elseif ($ExerciseOutputProgress) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and
@@ -384,6 +441,8 @@ try {
             Write-Host "Native-console relay output-loss smoke passed."
         } elseif ($SimulateTransportLost) {
             Write-Host "Native-console relay transport-loss smoke passed."
+        } elseif ($ExerciseDetachBacklog) {
+            Write-Host "Native-console relay detach-backlog smoke passed."
         } elseif ($ExerciseOutputProgress) {
             Write-Host "Native-console relay output-progress smoke passed."
         } else {
@@ -400,6 +459,8 @@ try {
         Write-Host "Native-console relay output-loss smoke failed."
     } elseif ($SimulateTransportLost) {
         Write-Host "Native-console relay transport-loss smoke failed."
+    } elseif ($ExerciseDetachBacklog) {
+        Write-Host "Native-console relay detach-backlog smoke failed."
     } elseif ($ExerciseOutputProgress) {
         Write-Host "Native-console relay output-progress smoke failed."
     } else {

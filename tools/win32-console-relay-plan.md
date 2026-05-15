@@ -426,6 +426,11 @@ Implemented.
 
 ### Stage 6: test and tune
 
+In progress.
+
+- Native detach-under-backlog smoke now covers the close path where relay
+  output is still pending at detach time. The server logs the close-pending
+  state and the smoke verifies that detach completes under backlog.
 - Tune credit sizes and redraw thresholds using large paste and redraw-heavy
   workloads.
 - Verify memory stays bounded under sustained input.
@@ -454,6 +459,10 @@ under MSYS2.
   output is already queued, then verifies that attach exits promptly and logs
   explicit transport-loss handling rather than waiting for impossible relay
   completion.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseDetachBacklog`
+  Relay detach-under-backlog coverage. It detaches while output is still in
+  flight, verifies that relay close enters the logged pending state, and checks
+  that the attach still exits cleanly.
 - `tools/win32-direct-handle-smoke.ps1`
   Regression coverage for non-console direct-handle mode.
 
@@ -465,13 +474,10 @@ under MSYS2.
 2. Redraw-heavy output:
    extend the current output-progress smoke to assert redraw and status
    responsiveness under steady backlog, not only that progress events exist.
-3. Detach under output backlog:
-   detach while output is still in flight and verify close completes with
-   either progress or abort.
-4. Native reader failure without test knobs:
+3. Native reader failure without test knobs:
    reproduce actual console input loss and verify it follows the explicit
    transport-lost path now covered by simulated smoke.
-5. Resize during backlog:
+4. Resize during backlog:
    resize during heavy output and verify resize messages are not starved behind
    coarse output waiting.
 

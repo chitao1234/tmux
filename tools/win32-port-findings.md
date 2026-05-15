@@ -604,6 +604,11 @@ verifies that a declared relay transport loss while output is already in
 flight causes attach to exit promptly instead of waiting for impossible relay
 completion.
 
+Tracked native-console relay detach-backlog smoke is now also available
+through `tools/win32-console-relay-smoke.ps1 -ExerciseDetachBacklog`. It
+detaches while relay output is still pending, verifies that the server logs the
+relay close-pending state, and checks that detach still completes cleanly.
+
 High-priority native PowerShell tests:
 
 1. Auth admission:
@@ -631,8 +636,9 @@ High-priority native PowerShell tests:
    credit window stays bounded under sustained backlog.
 
 7. Output responsiveness:
-   expand the current output-progress smoke to assert redraw-threshold tuning,
-   status responsiveness, and detach behavior under sustained backlog.
+   extend the current output-progress smoke to assert redraw-threshold tuning
+   and status responsiveness under sustained backlog, not only output progress
+   and detach completion.
 
 8. Native reader failure:
    reproduce an actual console-input loss without the test knob and verify it
