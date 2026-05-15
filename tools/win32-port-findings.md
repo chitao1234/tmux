@@ -650,6 +650,11 @@ and does not kill output delivery, and that direct output handle loss does not
 make the server unusable. The tests below remain the broader coverage needed
 before treating the Win32 port as complete.
 
+Manual native-console direct-handle probing is tracked in
+`tools/win32-console-direct-probe.ps1`. It must be run from a real Windows
+console because redirected Codex or CI stdio is not a native console client
+shape.
+
 High-priority native PowerShell tests:
 
 1. Auth admission:

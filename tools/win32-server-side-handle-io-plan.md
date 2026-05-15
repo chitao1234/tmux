@@ -406,6 +406,17 @@ redirected attach/detach check, a sustained direct-output stress case, and a
 direct stdin EOF half-close check. The harness also covers direct output
 handle loss and verifies the server remains usable afterward.
 
+The manual native-console direct-handle probe is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\win32-console-direct-probe.ps1
+```
+
+Run it from a real Windows Terminal or conhost window, not from redirected
+output. It sets `TMUX_WIN32_HANDLE_TTY=force` and
+`TMUX_WIN32_CONSOLE_RELAY=0`, launches an attach, and inspects the resulting
+logs after the user detaches.
+
 ### Baseline Regression
 
 - Start a normal Win32 session with the existing console relay path.
