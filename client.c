@@ -100,6 +100,7 @@ static void		 client_win32_input_send_failed(void);
 static void		 client_win32_input_start(void);
 static void		 client_win32_input_stop(void);
 static void		 client_win32_output_callback(void *);
+static void		 client_win32_output_progress(size_t);
 static void		 client_win32_output_abort(size_t);
 static void		 client_win32_output_error_callback(void *);
 static void		 client_win32_output_event_callback(void *, uint32_t);
@@ -739,20 +740,37 @@ clear_pending:
 }
 
 static void
-client_win32_output_callback(__unused void *arg)
+client_win32_output_progress(size_t size)
 {
 	struct msg_win32_tty_output_ack	ack;
 
-	if (client_win32_output_pending == 0)
+	if (size == 0) {
+		if (client_exitflag)
+			client_exit();
 		return;
-	ack.size = client_win32_output_pending;
-	client_win32_output_pending = 0;
+	}
+	if (size > client_win32_output_pending)
+		fatalx("Win32 console relay output progress overflow");
+	client_win32_output_pending -= size;
+	log_debug("%s: progressed %zu bytes, %zu pending", __func__, size,
+	    client_win32_output_pending);
+	ack.size = size;
 	if (client_peer != NULL) {
 		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ACK, -1, &ack,
 		    sizeof ack);
 	}
 	if (client_exitflag)
 		client_exit();
+}
+
+static void
+client_win32_output_callback(__unused void *arg)
+{
+	size_t	size = 0;
+
+	if (client_win32_output != NULL)
+		size = win32_io_writer_consume_progress(client_win32_output);
+	client_win32_output_progress(size);
 }
 
 static void
@@ -787,6 +805,8 @@ client_win32_output_error_callback(__unused void *arg)
 static void
 client_win32_output_event_callback(void *arg, uint32_t events)
 {
+	if (events & WIN32_IO_EVENT_WRITE_PROGRESS)
+		client_win32_output_callback(arg);
 	if (events & WIN32_IO_EVENT_ERROR) {
 		client_win32_output_error_callback(arg);
 		return;

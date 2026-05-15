@@ -12,6 +12,7 @@
 #include <sys/un.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -205,6 +206,7 @@ struct win32_handle_writer {
 	int		 stop;
 	int		 console_queued;
 	int		 console_active;
+	size_t		 write_progress;
 	u_char		 utf8_partial[4];
 	size_t		 utf8_partial_len;
 };
@@ -332,6 +334,8 @@ static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
 		     HANDLE, const void *, size_t);
 static enum win32_handle_writer_backend
 		win32_handle_writer_backend_for_handle(HANDLE *);
+static void	win32_handle_writer_record_progress(
+		     struct win32_handle_writer *, size_t);
 
 static int
 win32_socketpair(SOCKET pair[2])
@@ -677,6 +681,16 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 		out |= WIN32_IO_EVENT_WRITE_DRAINED;
 	if (out != 0)
 		whw->endpoint.eventcb(whw->endpoint.arg, out);
+}
+
+static void
+win32_handle_writer_record_progress(struct win32_handle_writer *whw, size_t size)
+{
+	if (size == 0)
+		return;
+	if (size > SIZE_MAX - whw->write_progress)
+		fatalx("Win32 writer progress overflow");
+	whw->write_progress += size;
 }
 
 static void
@@ -1584,11 +1598,12 @@ win32_console_writer_run(struct win32_handle_writer *whw)
 
 		EnterCriticalSection(&whw->lock);
 		evbuffer_drain(whw->output, written);
+		win32_handle_writer_record_progress(whw, written);
 		notify = EVBUFFER_LENGTH(whw->output) == 0;
 		LeaveCriticalSection(&whw->lock);
-		if (notify)
-			win32_io_service_enqueue_writer(whw,
-			    WIN32_IO_EVENT_WRITE_DRAINED);
+		win32_io_service_enqueue_writer(whw,
+		    WIN32_IO_EVENT_WRITE_PROGRESS |
+		    (notify ? WIN32_IO_EVENT_WRITE_DRAINED : 0));
 	}
 	free(buf);
 	return;
@@ -2038,13 +2053,14 @@ win32_handle_writer_thread(void *arg)
 				return (0);
 			}
 
-			EnterCriticalSection(&whw->lock);
-			evbuffer_drain(whw->output, written);
-			notify = EVBUFFER_LENGTH(whw->output) == 0;
-			LeaveCriticalSection(&whw->lock);
-			if (notify)
-				win32_io_service_enqueue_writer(whw,
-				    WIN32_IO_EVENT_WRITE_DRAINED);
+		EnterCriticalSection(&whw->lock);
+		evbuffer_drain(whw->output, written);
+		win32_handle_writer_record_progress(whw, written);
+		notify = EVBUFFER_LENGTH(whw->output) == 0;
+		LeaveCriticalSection(&whw->lock);
+		win32_io_service_enqueue_writer(whw,
+		    WIN32_IO_EVENT_WRITE_PROGRESS |
+		    (notify ? WIN32_IO_EVENT_WRITE_DRAINED : 0));
 		}
 	}
 
@@ -2152,10 +2168,12 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
 	if (nwritten > whw->iocp_size)
 		nwritten = whw->iocp_size;
 	evbuffer_drain(whw->output, nwritten);
+	win32_handle_writer_record_progress(whw, nwritten);
 	if (whw->use_offset && !whw->append)
 		whw->offset += nwritten;
 	whw->iocp_size = 0;
-	events = win32_handle_writer_iocp_start(whw);
+	events = WIN32_IO_EVENT_WRITE_PROGRESS |
+	    win32_handle_writer_iocp_start(whw);
 
 out:
 	if (events != 0)
@@ -2506,6 +2524,24 @@ win32_io_writer_close(struct win32_io_endpoint *endpoint)
 		win32_console_writer_enqueue(whw);
 	if (events != 0)
 		win32_io_service_enqueue_writer(whw, events);
+}
+
+size_t
+win32_io_writer_consume_progress(struct win32_io_endpoint *endpoint)
+{
+	struct win32_handle_writer	*whw;
+	size_t				 size;
+
+	if (endpoint == NULL)
+		return (0);
+	whw = endpoint->owner;
+	if (whw == NULL)
+		return (0);
+	EnterCriticalSection(&whw->lock);
+	size = whw->write_progress;
+	whw->write_progress = 0;
+	LeaveCriticalSection(&whw->lock);
+	return (size);
 }
 
 size_t

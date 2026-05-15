@@ -35,7 +35,8 @@ enum win32_io_event {
 	WIN32_IO_EVENT_WRITE_CLOSED = 0x8,
 	WIN32_IO_EVENT_PROCESS_EXIT = 0x10,
 	WIN32_IO_EVENT_ERROR = 0x20,
-	WIN32_IO_EVENT_CANCELED = 0x40
+	WIN32_IO_EVENT_CANCELED = 0x40,
+	WIN32_IO_EVENT_WRITE_PROGRESS = 0x80
 };
 
 const char	*win32_strerror(DWORD);
@@ -89,6 +90,7 @@ struct win32_io_endpoint *win32_io_writer_new_terminal_borrowed(HANDLE *,
 int		 win32_io_writer_write(struct win32_io_endpoint *,
 		     const void *, size_t);
 void		 win32_io_writer_close(struct win32_io_endpoint *);
+size_t		 win32_io_writer_consume_progress(struct win32_io_endpoint *);
 size_t		 win32_io_writer_buffered(struct win32_io_endpoint *);
 int		 win32_io_writer_drained(struct win32_io_endpoint *);
 int		 win32_io_writer_writable(struct win32_io_endpoint *);

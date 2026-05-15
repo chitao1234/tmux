@@ -2,6 +2,7 @@ param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-console-relay-smoke",
     [switch]$SimulateOutputLoss,
+    [switch]$ExerciseOutputProgress,
     [switch]$RemoveLogsOnSuccess
 )
 
@@ -86,7 +87,8 @@ function Invoke-Tmux {
 function Invoke-TmuxInteractive {
     param(
         [string[]]$Arguments,
-        [int]$TimeoutMs = 0
+        [int]$TimeoutMs = 0,
+        [scriptblock]$AfterStart
     )
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -97,6 +99,9 @@ function Invoke-TmuxInteractive {
 
     $process = [System.Diagnostics.Process]::Start($psi)
     $processId = $process.Id
+    if ($AfterStart -ne $null) {
+        & $AfterStart $processId
+    }
     if ($TimeoutMs -gt 0) {
         if (-not $process.WaitForExit($TimeoutMs)) {
             $process.Kill()
@@ -137,6 +142,19 @@ function Get-LogMatches {
                 "{0}:{1}: {2}" -f $log.Name, $_.LineNumber, $_.Line
             }
     }
+}
+
+function Get-LogMatchCount {
+    param(
+        [System.IO.FileInfo[]]$Logs,
+        [string]$Pattern
+    )
+
+    $count = 0
+    foreach ($log in $Logs) {
+        $count += @(Select-String -LiteralPath $log.FullName -Pattern $Pattern).Count
+    }
+    $count
 }
 
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
@@ -189,6 +207,54 @@ try {
                 "-t",
                 "relay"
             ) -TimeoutMs 10000
+        } elseif ($ExerciseOutputProgress) {
+            Write-Host "Relay output progress exercise is enabled. Output will be generated and the attach client will be detached automatically."
+            Write-Host "Logs will be checked afterward: $root"
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 20000 -AfterStart {
+                param([int]$AttachPid)
+
+                Start-Sleep -Milliseconds 750
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    "for /L %i in (1,1,6000) do @echo relay-progress-0123456789abcdefghijklmnopqrstuvwxyz"
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+                Start-Sleep -Milliseconds 1500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
         } else {
             Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
             $attach = Invoke-TmuxInteractive -Arguments @(
@@ -225,6 +291,7 @@ try {
     $inputCredit = Test-AnyLogMatch $attachLogs "Win32 input credit"
     $directOutput = Test-AnyLogMatch $attachLogs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
     $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
+    $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
     Write-Host ""
@@ -234,6 +301,9 @@ try {
     Write-Host "  relay terminal identify: $relayIdentify"
     Write-Host "  input credit observed: $inputCredit"
     Write-Host "  direct handle path used: $directOutput"
+    if ($ExerciseOutputProgress) {
+        Write-Host "  output progress events: $outputProgressCount"
+    }
     if ($SimulateOutputLoss) {
         Write-Host "  output abort observed: $outputAbort"
     }
@@ -249,6 +319,10 @@ try {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $outputAbort -and
             $failures.Count -eq 0
+    } elseif ($ExerciseOutputProgress) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and
+            $outputProgressCount -ge 2 -and $failures.Count -eq 0
     } else {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $failures.Count -eq 0
@@ -257,6 +331,8 @@ try {
         Write-Host ""
         if ($SimulateOutputLoss) {
             Write-Host "Native-console relay output-loss smoke passed."
+        } elseif ($ExerciseOutputProgress) {
+            Write-Host "Native-console relay output-progress smoke passed."
         } else {
             Write-Host "Native-console relay smoke passed."
         }
@@ -269,6 +345,8 @@ try {
     Write-Host ""
     if ($SimulateOutputLoss) {
         Write-Host "Native-console relay output-loss smoke failed."
+    } elseif ($ExerciseOutputProgress) {
+        Write-Host "Native-console relay output-progress smoke failed."
     } else {
         Write-Host "Native-console relay smoke failed."
     }

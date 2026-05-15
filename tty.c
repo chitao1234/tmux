@@ -480,8 +480,12 @@ tty_win32_out_callback(void *data)
 	struct client	*c = tty->client;
 	size_t		 size;
 
-	size = tty->win32_out_pending;
-	tty->win32_out_pending = 0;
+	size = win32_io_writer_consume_progress(tty->win32_out);
+	if (size > tty->win32_out_pending)
+		fatalx("Win32 terminal output progress overflow");
+	tty->win32_out_pending -= size;
+	log_debug("%s: %s Win32 output progressed %zu bytes, %zu pending",
+	    __func__, c->name, size, tty->win32_out_pending);
 	if (c->redraw > 0 && size != 0) {
 		if (size >= c->redraw)
 			c->redraw = 0;
@@ -513,6 +517,8 @@ tty_win32_out_error_callback(void *data)
 static void
 tty_win32_out_event_callback(void *data, uint32_t events)
 {
+	if (events & WIN32_IO_EVENT_WRITE_PROGRESS)
+		tty_win32_out_callback(data);
 	if (events & WIN32_IO_EVENT_ERROR) {
 		tty_win32_out_error_callback(data);
 		return;

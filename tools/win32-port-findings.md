@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-14
+Date: 2026-05-15
 
 Scope: codebase-wide Win32 implementation review of IPC/auth, terminal
 relay, ConPTY/jobs, command execution, and filesystem/path compatibility. This
@@ -29,8 +29,8 @@ Unix-shaped contract while the underlying object is native Windows:
 2. Server startup has a normal-path lock, but foreground startup, path aliases,
    slash-root paths, and unconditional socket unlink still leave race and
    confusion windows.
-3. Console terminal relay now has explicit input flow control, but it still
-   needs finer-grained output progress and transport-loss semantics.
+3. Console terminal relay now has explicit input flow control and incremental
+   output progress, but it still needs transport-loss semantics.
 4. Pane/job lifecycle still conflates process exit, output EOF, dead-pane
    state, passive cleanup, and forced termination.
 5. Native path, quoting, long-path, and Unicode environment support remains
@@ -276,37 +276,6 @@ Required direction:
 - Teach respawn/destroy paths which state they require.
 - Preserve the invariant that ConPTY output is not closed before the reader has
   reached EOF or an explicit forced close is requested.
-
-### P2: Terminal output ACK is drain-only and too coarse
-
-Files:
-
-- [`client.c`](../client.c): `client_win32_output_callback()` ACKs the whole
-  client pending counter only on writer drain.
-- [`win32-event.c`](../win32-event.c): writer callbacks expose
-  `WIN32_IO_EVENT_WRITE_DRAINED` only when the internal buffer is empty.
-- [`server-client.c`](../server-client.c): redraw is deferred while any Win32
-  output bytes are pending.
-- [`tty.c`](../tty.c): the send side uses a bounded pending byte limit.
-
-Problem:
-
-The correctness issue where ACKs could cover bytes never written is fixed, but
-the protocol is now stop-and-wait at full drain granularity. The client ACKs a
-lump only when everything queued to its writer has drained.
-
-Why it matters:
-
-Heavy output can defer redraw, status updates, and close progress until the
-entire current output window empties. This is a responsiveness problem, not an
-I/O service correctness bug.
-
-Required direction:
-
-- ACK completed writes incrementally, not only full drain events.
-- Gate redraw on thresholds or credits rather than "any pending byte."
-- Keep final close semantics strict enough to avoid losing terminal reset
-  output.
 
 ### P2: Transferable native console handles cannot yet back detached server-side terminal I/O
 
@@ -576,6 +545,11 @@ current implementation:
 - Win32 console relay input now has explicit `MSG_WIN32_TTY_INPUT_CREDIT`
   flow control. Input is staged locally, reserved against server-issued
   credit, and is not silently discarded on `proc_send()` hard failure.
+- Win32 console relay output now reports incremental progress instead of
+  waiting for full writer drain. Writer backends emit
+  `WIN32_IO_EVENT_WRITE_PROGRESS`, relay/direct tty accounting consumes it
+  incrementally, redraw deferral uses a threshold, and the tracked smoke entry
+  point is `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`.
 - Win32 terminal output scheduling no longer recurses synchronously through
   `tty_write_callback()`.
 - Win32 `pipe-pane` helper ownership is no longer leaked on toggle-off or pane
@@ -611,6 +585,11 @@ Tracked native-console relay output-loss smoke is now also available through
 relay output failure sends an explicit abort and that attach exits promptly
 instead of hanging for an impossible ACK.
 
+Tracked native-console relay output-progress smoke is now also available
+through `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`. It
+verifies that sustained output produces multiple incremental relay progress
+events rather than waiting for a full writer drain.
+
 High-priority native PowerShell tests:
 
 1. Auth admission:
@@ -638,8 +617,8 @@ High-priority native PowerShell tests:
    credit window stays bounded under sustained backlog.
 
 7. Output responsiveness:
-   produce sustained redraw-heavy output and verify incremental ACK/credit
-   behavior once implemented.
+   expand the current output-progress smoke to assert redraw-threshold tuning,
+   status responsiveness, and detach behavior under sustained backlog.
 
 8. Handle relay:
    attach from a non-console Win32 frontend only after authenticated handle
@@ -680,8 +659,8 @@ High-priority native PowerShell tests:
    paths, startup-lock bypasses, bounded lock wait, and stale unlink defense.
 
 2. Terminal relay protocol:
-   lost-output abort semantics, input credits, incremental output ACKs, redraw
-   thresholds, and authenticated terminal handle transfer.
+   transport-lost semantics, redraw/credit tuning, and authenticated terminal
+   handle transfer.
 
 3. Pane/job lifecycle:
    split process-exited vs output-drained state, split passive cleanup from

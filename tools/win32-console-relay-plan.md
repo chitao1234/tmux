@@ -2,7 +2,7 @@
 
 Date: 2026-05-15
 
-Status: In progress; Stages 2-3 implemented
+Status: In progress; Stages 2-4 implemented
 
 Related docs:
 
@@ -102,9 +102,10 @@ open the option of a future console attach or helper design.
 
 ## Current Relay Problems
 
-Current code and findings still show one remaining protocol-level gap for a
-fully first-class transport, plus two recently closed gaps that motivated this
-plan.
+Current code and findings now show one remaining protocol-level gap for a
+fully first-class transport. The earlier Stage 2-4 gaps are included here as
+completed hardening work because they define the relay contract that native
+console clients now rely on.
 
 ### 1. Output loss previously deadlocked close
 
@@ -118,15 +119,34 @@ Stage 3 fixed this with explicit `MSG_WIN32_TTY_INPUT_CREDIT` flow control.
 The server now grants a bounded input window and the client reserves credit
 before draining console input into the relay path.
 
-### 3. Output ACK is still too coarse
+### 3. Output progress previously was drain-only and too coarse
 
-The client currently ACKs output at whole-drain granularity.
+Stage 4 fixed this without adding a new protocol message name.
+
+The client now reports output completion incrementally through the existing
+`MSG_WIN32_TTY_OUTPUT_ACK` message semantics. The Win32 I/O service exposes
+`WIN32_IO_EVENT_WRITE_PROGRESS`, the client and direct tty paths consume that
+progress incrementally, and server redraw deferral is threshold-based instead
+of "any pending byte means wait."
 
 Result:
 
-- redraw and close progress are tied to full writer drain events;
-- heavy output behaves like stop-and-wait over large windows;
-- responsiveness suffers even when correctness is preserved.
+- redraw and close progress no longer depend on full writer drain events;
+- heavy output no longer behaves like stop-and-wait over large windows;
+- responsiveness improves while close accounting still stays explicit.
+
+### 4. Remaining gap: transport-lost semantics
+
+The remaining relay hardening work is explicit transport-loss handling.
+
+Result today:
+
+- output abort is explicit when the client writer fails;
+- input credits bound in-flight input;
+- incremental output progress reduces redraw and close latency;
+- but detach, exit, shutdown, and peer-loss paths still need a single
+  transport-lost contract so neither side waits on progress that can no
+  longer arrive.
 
 ## Target Relay Model
 
@@ -169,21 +189,24 @@ handles.
 
 ## Protocol Changes
 
-The current relay messages are insufficient for a first-class transport:
+The relay started from this minimal message set:
 
 - `MSG_WIN32_TTY_INPUT`
 - `MSG_WIN32_TTY_OUTPUT`
 - `MSG_WIN32_TTY_OUTPUT_ACK`
 - `MSG_WIN32_TTY_RESIZE`
 
-The protocol should be extended with explicit credit and abort messages.
+Hardening extends those semantics with explicit credit, abort, and
+transport-loss handling while keeping `MSG_WIN32_TTY_OUTPUT_ACK` as the
+completed-output progress message.
 
 ### New message family
 
 - `MSG_WIN32_TTY_INPUT_CREDIT`
   Server to client. Adds input send credit in bytes.
-- `MSG_WIN32_TTY_OUTPUT_PROGRESS`
-  Client to server. Reports completed output bytes incrementally.
+- `MSG_WIN32_TTY_OUTPUT_ACK`
+  Client to server. Reports completed output bytes incrementally. The message
+  name is retained; the semantics are no longer limited to full-drain ACKs.
 - `MSG_WIN32_TTY_OUTPUT_ABORT`
   Client to server. Reports output bytes dropped due to writer failure or
   console loss.
@@ -206,10 +229,12 @@ enumerator spelling.
 
 #### Output progress
 
-- Progress reports bytes actually written, not merely accepted by the client
-  writer.
+- Progress reports bytes drained from the client writer toward the terminal,
+  not merely bytes accepted from IPC into the relay transport.
 - Progress can be sent before full drain.
 - The server decrements `c->win32_tty_out_pending` by progress amount.
+- Direct non-console tty output uses the same writer-progress primitive so
+  relay and direct-handle modes share the same accounting model.
 
 #### Output abort
 
@@ -373,10 +398,14 @@ Implemented.
 
 ### Stage 4: add incremental output progress
 
-- Extend writer callbacks or accounting so client can report completed bytes
-  before full drain.
-- Replace drain-only ACK logic with incremental progress updates.
-- Relax redraw gating to threshold-based behavior.
+Implemented.
+
+- Writer backends now publish `WIN32_IO_EVENT_WRITE_PROGRESS`.
+- Client relay output and direct tty output both consume incremental writer
+  progress.
+- `MSG_WIN32_TTY_OUTPUT_ACK` is now used as incremental completed-byte
+  progress.
+- Redraw gating is threshold-based rather than blocked by any pending byte.
 
 ### Stage 5: harden transport loss semantics
 
@@ -402,6 +431,10 @@ under MSYS2.
 - `tools/win32-console-relay-smoke.ps1`
   Baseline attach and detach on the native-console relay path. It now also
   checks that relay-mode logs include Win32 input credit activity.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`
+  Relay output-progress coverage. It generates sustained console output,
+  detaches the correct attach client by PID, and verifies that multiple
+  incremental output-progress events were reported.
 - `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible
@@ -415,8 +448,8 @@ under MSYS2.
    paste enough input to exceed the intended credit window and verify relay
    reading pauses and resumes without unbounded memory growth.
 2. Redraw-heavy output:
-   generate steady output and verify incremental progress keeps redraw and
-   status updates responsive.
+   extend the current output-progress smoke to assert redraw and status
+   responsiveness under steady backlog, not only that progress events exist.
 3. Detach under output backlog:
    detach while output is still in flight and verify close completes with
    either progress or abort.

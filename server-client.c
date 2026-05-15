@@ -58,6 +58,7 @@ static void	server_client_report_theme(struct client *, enum client_theme);
 #define SERVER_CLIENT_WIN32_PANE_HIGH (1024 * 1024)
 #define SERVER_CLIENT_WIN32_PANE_LOW (512 * 1024)
 #define SERVER_CLIENT_WIN32_TTY_INPUT_CREDIT (64 * 1024)
+#define SERVER_CLIENT_WIN32_TTY_REDRAW_LIMIT (32 * 1024)
 
 static void	server_client_win32_tty_input_credit(struct client *, size_t,
 		    const char *);
@@ -2063,9 +2064,9 @@ server_client_check_redraw(struct client *c)
 	}
 #ifdef TMUX_WIN32
 	tty_pending = c->win32_tty_out_pending + tty->win32_out_pending;
-	if (needed && tty_pending != 0) {
-		log_debug("%s: redraw deferred (%zu Win32 output bytes)",
-		    c->name, tty_pending);
+	if (needed && tty_pending > SERVER_CLIENT_WIN32_TTY_REDRAW_LIMIT) {
+		log_debug("%s: redraw deferred (%zu Win32 output bytes > %u)",
+		    c->name, tty_pending, SERVER_CLIENT_WIN32_TTY_REDRAW_LIMIT);
 		if (!evtimer_initialized(&ev))
 			evtimer_set(&ev, server_client_redraw_timer, NULL);
 		if (!evtimer_pending(&ev, NULL)) {
@@ -2635,7 +2636,7 @@ server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
 		return (-1);
 	memcpy(&ack, imsg->data, sizeof ack);
 	size = ack.size;
-	return (server_client_win32_tty_output_update(c, size, "ack", 1));
+	return (server_client_win32_tty_output_update(c, size, "progress", 1));
 }
 
 static int
