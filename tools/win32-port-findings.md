@@ -596,7 +596,9 @@ instead of hanging for an impossible ACK.
 Tracked native-console relay output-progress smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`. It
 verifies that sustained output produces multiple incremental relay progress
-events rather than waiting for a full writer drain.
+events, forces a status redraw while backlog is active, and records redraw
+deferral plus redraw-release behavior rather than only waiting for a full
+writer drain.
 
 Tracked native-console relay input-credit smoke is now also available through
 `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`. It injects more
@@ -643,9 +645,9 @@ High-priority native PowerShell tests:
    inferred from the credit-window pause/resume cycle.
 
 7. Output responsiveness:
-   extend the current output-progress smoke to assert redraw-threshold tuning
-   and status responsiveness under sustained backlog, not only output progress
-   and detach completion.
+   extend the current output-progress coverage across more output patterns and
+   threshold sizes so redraw responsiveness is tuned broadly, not only
+   demonstrated on the current stress case.
 
 8. Native reader failure:
    reproduce an actual console-input loss without the test knob and verify it

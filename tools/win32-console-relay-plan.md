@@ -435,6 +435,9 @@ In progress.
   window through the real console input buffer, verifies a client-side credit
   pause and resume, and checks that the server returns credit repeatedly while
   attach still exits cleanly.
+- Native output-progress smoke now also forces a status redraw while output
+  backlog is active and verifies redraw deferral plus redraw-release behavior,
+  not only the existence of progress ACKs.
 - Tune credit sizes and redraw thresholds using large paste and redraw-heavy
   workloads.
 - Verify memory stays bounded under sustained input.
@@ -452,8 +455,9 @@ under MSYS2.
   checks that relay-mode logs include Win32 input credit activity.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`
   Relay output-progress coverage. It generates sustained console output,
-  detaches the correct attach client by PID, and verifies that multiple
-  incremental output-progress events were reported.
+  forces a status redraw while backlog is active, detaches the correct attach
+  client by PID, and verifies multiple incremental output-progress events plus
+  redraw deferral and redraw-release activity.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`
   Relay input-credit coverage. It injects more than the 64 KiB credit window
   through `CONIN$`, verifies that console input pauses and resumes at the
@@ -481,9 +485,10 @@ under MSYS2.
    extend the current input-credit smoke with stronger peak-buffer or process
    memory checks so bounded memory is measured directly, not only inferred from
    credit-window behavior.
-2. Redraw-heavy output:
-   extend the current output-progress smoke to assert redraw and status
-   responsiveness under steady backlog, not only that progress events exist.
+2. Broader redraw tuning:
+   extend the current output-progress coverage across more output patterns and
+   threshold sizes so redraw responsiveness is tuned, not only demonstrated on
+   the current stress case.
 3. Native reader failure without test knobs:
    reproduce actual console input loss and verify it follows the explicit
    transport-lost path now covered by simulated smoke.

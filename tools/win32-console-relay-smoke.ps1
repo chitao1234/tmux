@@ -489,6 +489,17 @@ try {
                     "relay",
                     "Enter"
                 ) | Out-Null
+                Start-Sleep -Milliseconds 250
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "set-option",
+                    "-g",
+                    "status-left",
+                    "relay-output-progress-backlog"
+                ) | Out-Null
                 Start-Sleep -Milliseconds 1500
                 Invoke-Tmux -Arguments @(
                     "-f",
@@ -542,6 +553,9 @@ try {
     $inputResumeCount = Get-LogMatchCount $attachLogs "console input resumed"
     $inputReturnedCount = Get-LogMatchCount $logs "Win32 input credit returned"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
+    $redrawDeferredCount = Get-LogMatchCount $logs "redraw deferred"
+    $waitingForRedrawCount = Get-LogMatchCount $logs "waiting for redraw, [0-9]+ bytes left"
+    $statusRedraw = Test-AnyLogMatch $logs "redraw status"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
     Write-Host ""
@@ -564,6 +578,9 @@ try {
     }
     if ($ExerciseOutputProgress) {
         Write-Host "  output progress events: $outputProgressCount"
+        Write-Host "  redraw deferred events: $redrawDeferredCount"
+        Write-Host "  waiting-for-redraw events: $waitingForRedrawCount"
+        Write-Host "  status redraw observed: $statusRedraw"
     }
     if ($SimulateOutputLoss) {
         Write-Host "  output abort observed: $outputAbort"
@@ -595,8 +612,10 @@ try {
             $outputProgressCount -ge 1 -and $failures.Count -eq 0
     } elseif ($ExerciseOutputProgress) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
-            $inputCredit -and -not $directOutput -and
-            $outputProgressCount -ge 2 -and $failures.Count -eq 0
+        $inputCredit -and -not $directOutput -and
+            $outputProgressCount -ge 2 -and $redrawDeferredCount -ge 1 -and
+            $waitingForRedrawCount -ge 1 -and $statusRedraw -and
+            $failures.Count -eq 0
     } else {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $failures.Count -eq 0
