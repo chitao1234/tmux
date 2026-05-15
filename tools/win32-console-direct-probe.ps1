@@ -140,7 +140,9 @@ $savedEnv = @{
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-direct-probe-" + [Guid]::NewGuid().ToString("N"))
 $label = "$LabelPrefix-" + [Guid]::NewGuid().ToString("N")
+$config = Join-Path $root "empty.conf"
 New-Item -ItemType Directory -Path $root | Out-Null
+New-Item -ItemType File -Path $config | Out-Null
 
 try {
     $env:TMUX = $null
@@ -149,16 +151,16 @@ try {
 
     Push-Location $root
     try {
-        Invoke-Tmux -Arguments @("-L", $label, "kill-server") -AllowFailure | Out-Null
-        Invoke-Tmux -Arguments @("-vv", "-L", $label, "new-session", "-d", "-s", "probe", "cmd.exe") | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "probe", "cmd.exe") | Out-Null
 
         Write-Host "Launching forced direct native-console attach."
         Write-Host "If the screen works, press Ctrl-b then d to detach."
         Write-Host "If it fails or hangs, close the tmux client and inspect logs at: $root"
 
-        $attachCode = Invoke-TmuxInteractive -Arguments @("-vv", "-L", $label, "attach-session", "-t", "probe")
+        $attachCode = Invoke-TmuxInteractive -Arguments @("-f", $config, "-vv", "-L", $label, "attach-session", "-t", "probe")
 
-        Invoke-Tmux -Arguments @("-L", $label, "kill-server") -AllowFailure | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
     } finally {
         Pop-Location
     }

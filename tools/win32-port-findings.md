@@ -399,6 +399,11 @@ duplicated console stdin fails on server-side `ReadFile()` with
 writer attempts to write. Non-console stdio handles such as pipes can use the
 direct handle path.
 
+The tracked `tools/win32-console-direct-probe.ps1` probe reproduced the input
+side of this failure from a real Windows PTY: forced direct mode duplicated
+stdin/stdout and sent size identify without relay, then the detached server
+failed direct console input with `ERROR_INVALID_HANDLE`.
+
 Why it matters:
 
 Handle transfer alone is not enough to replace the client console relay for
@@ -654,7 +659,8 @@ before treating the Win32 port as complete.
 Manual native-console direct-handle probing is tracked in
 `tools/win32-console-direct-probe.ps1`. It must be run from a real Windows
 console because redirected Codex or CI stdio is not a native console client
-shape.
+shape. Current probe evidence shows duplicated console handles are
+transferable but not usable for detached server-side input.
 
 High-priority native PowerShell tests:
 

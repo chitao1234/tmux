@@ -89,6 +89,11 @@ while the server is running in its normal detached process model.
   a supported default path.
 - Native console relay is selected explicitly as a compatibility fallback and
   can be disabled for no-relay testing with `TMUX_WIN32_CONSOLE_RELAY=0`.
+- The native-console direct probe has been run from a real Windows PTY. It
+  proved handle transfer but not usable server-side console I/O: stdout and
+  stdin duplicated and size identify succeeded, no relay was used, but the
+  detached server failed direct console input with `ERROR_INVALID_HANDLE`.
+  Native console remains the documented reason to keep the relay quarantined.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
   `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
   `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
@@ -419,6 +424,11 @@ Run it from a real Windows Terminal or conhost window, not from redirected
 output. It sets `TMUX_WIN32_HANDLE_TTY=force` and
 `TMUX_WIN32_CONSOLE_RELAY=0`, launches an attach, and inspects the resulting
 logs after the user detaches.
+
+Current result: the probe can transfer console stdin/stdout handles but fails
+server-side direct console input from the detached server with
+`ERROR_INVALID_HANDLE`. That is a usable-handle failure, so relay removal is
+not currently justified for native console clients.
 
 ### Baseline Regression
 
