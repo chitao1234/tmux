@@ -36,6 +36,24 @@ static int	 win32_import_environment_entry(const wchar_t *,
 		     struct environ *);
 static int	 win32_import_utf8_entry(char *, struct environ *);
 static int	 win32_errno_from_last_error(DWORD);
+static const char *win32_getenv_canonical(const char *);
+
+static const char *
+win32_getenv_canonical(const char *name)
+{
+	struct environ_entry	*envent;
+	const char		*value;
+
+	if (name == NULL || *name == '\0')
+		return (NULL);
+	if (global_environ != NULL) {
+		envent = environ_find(global_environ, name);
+		if (envent != NULL)
+			return (envent->value);
+	}
+	value = getenv(name);
+	return (value);
+}
 
 static BOOL WINAPI
 win32_console_ctrl_handler(DWORD type)
@@ -576,8 +594,8 @@ win32_terminal_prepare_terminfo(void)
 	char		*exe_utf8, *dir, *candidate;
 	size_t		 i;
 
-	terminfo = getenv("TERMINFO");
-	terminfo_dirs = getenv("TERMINFO_DIRS");
+	terminfo = win32_getenv_canonical("TERMINFO");
+	terminfo_dirs = win32_getenv_canonical("TERMINFO_DIRS");
 	if ((terminfo != NULL && *terminfo != '\0') ||
 	    (terminfo_dirs != NULL && *terminfo_dirs != '\0'))
 		return (0);
@@ -621,13 +639,13 @@ win32_passwd_set(const char *name)
 {
 	const char	*home, *shell;
 
-	home = getenv("HOME");
+	home = win32_getenv_canonical("HOME");
 	if (home == NULL || *home == '\0')
-		home = getenv("USERPROFILE");
+		home = win32_getenv_canonical("USERPROFILE");
 	if (home == NULL || *home == '\0')
 		home = "C:\\";
 
-	shell = getenv("SHELL");
+	shell = win32_getenv_canonical("SHELL");
 	if (shell == NULL || *shell == '\0')
 		shell = _PATH_BSHELL;
 
@@ -650,9 +668,9 @@ getpwuid(__unused uid_t uid)
 {
 	const char	*name;
 
-	name = getenv("USER");
+	name = win32_getenv_canonical("USER");
 	if (name == NULL || *name == '\0')
-		name = getenv("USERNAME");
+		name = win32_getenv_canonical("USERNAME");
 	if (name == NULL || *name == '\0')
 		name = "win32";
 	win32_passwd_set(name);
