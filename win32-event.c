@@ -2674,30 +2674,18 @@ win32_handle_write_console(HANDLE handle, const u_char *data, size_t size)
 	if (n == 0) {
 		log_debug("%s: MultiByteToWideChar failed: %s", __func__,
 		    win32_strerror(GetLastError()));
-		n = MultiByteToWideChar(CP_UTF8, 0, data, nbytes, NULL, 0);
-		if (n == 0) {
-			errno = EILSEQ;
-			return (-1);
-		}
-		wdata = xcalloc(n, sizeof *wdata);
-		if (MultiByteToWideChar(CP_UTF8, 0, data, nbytes, wdata,
-		    n) == 0) {
-			log_debug("%s: MultiByteToWideChar fallback failed: %s",
-			    __func__, win32_strerror(GetLastError()));
-			free(wdata);
-			errno = EILSEQ;
-			return (-1);
-		}
-	} else {
-		wdata = xcalloc(n, sizeof *wdata);
-		if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data,
-		    nbytes, wdata, n) == 0) {
-			log_debug("%s: MultiByteToWideChar failed: %s",
-			    __func__, win32_strerror(GetLastError()));
-			free(wdata);
-			errno = EILSEQ;
-			return (-1);
-		}
+		errno = EILSEQ;
+		return (-1);
+	}
+
+	wdata = xcalloc(n, sizeof *wdata);
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, nbytes,
+	    wdata, n) == 0) {
+		log_debug("%s: MultiByteToWideChar failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		free(wdata);
+		errno = EILSEQ;
+		return (-1);
 	}
 
 	total = 0;

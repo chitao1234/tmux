@@ -67,8 +67,16 @@ function Invoke-Tmux {
     }
 
     $process = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $stdoutReader = [System.IO.StreamReader]::new(
+        $process.StandardOutput.BaseStream,
+        [System.Text.UTF8Encoding]::new($false),
+        $true)
+    $stderrReader = [System.IO.StreamReader]::new(
+        $process.StandardError.BaseStream,
+        [System.Text.UTF8Encoding]::new($false),
+        $true)
+    $stdout = $stdoutReader.ReadToEnd()
+    $stderr = $stderrReader.ReadToEnd()
     $process.WaitForExit()
 
     $output = @()
@@ -100,6 +108,36 @@ function Assert-True {
     }
 }
 
+function Get-Utf8Bytes {
+    param([string]$Text)
+
+    [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
+}
+
+function Test-ByteSequence {
+    param(
+        [byte[]]$Haystack,
+        [byte[]]$Needle
+    )
+
+    if ($Needle.Length -eq 0) {
+        return $true
+    }
+    for ($i = 0; $i -le $Haystack.Length - $Needle.Length; $i++) {
+        $match = $true
+        for ($j = 0; $j -lt $Needle.Length; $j++) {
+            if ($Haystack[$i + $j] -ne $Needle[$j]) {
+                $match = $false
+                break
+            }
+        }
+        if ($match) {
+            return $true
+        }
+    }
+    return $false
+}
+
 $script:TmuxPath = [System.IO.Path]::GetFullPath($TmuxPath)
 $root = Join-Path $env:TEMP ($LabelPrefix + "-" + [guid]::NewGuid().ToString("N"))
 $caseDir = Join-Path $root "工作目录"
@@ -109,14 +147,14 @@ $label = $LabelPrefix + "-" + [guid]::NewGuid().ToString("N")
 New-Item -ItemType Directory -Path $caseDir -Force | Out-Null
 [System.IO.File]::WriteAllText(
     $configPath,
-    "set -g status-left BOUNDARY_OK`n",
+    "set -g status-left '边界_OK'`n",
     [System.Text.UTF8Encoding]::new($false))
 
 $envMap = @{
     HOME = $caseDir
     USERPROFILE = $caseDir
     TERM = "xterm-256color"
-    VISUAL = "nvim"
+    VISUAL = "编辑器.exe"
 }
 
 try {
@@ -129,9 +167,15 @@ try {
     $showTerm = Invoke-Tmux -Arguments @("-L", $label, "show-environment", "-g", "TERM") -WorkingDirectory $caseDir -Environment $envMap
     Assert-True ($showTerm.Output -contains "TERM=xterm-256color") "TERM did not round-trip through global environment"
 
+    $showEditor = Invoke-Tmux -Arguments @("-L", $label, "show-options", "-g", "editor") -WorkingDirectory $caseDir -Environment $envMap
+    $showEditorText = $showEditor.Output -join "`n"
+    $editorNeedle = Get-Utf8Bytes "editor 编辑器.exe"
+    $editorBytes = Get-Utf8Bytes $showEditorText
+    Assert-True (Test-ByteSequence -Haystack $editorBytes -Needle $editorNeedle) ("VISUAL did not round-trip through editor option: " + $showEditorText)
+
     $showStatus = Invoke-Tmux -Arguments @("-L", $label, "show-options", "-g", "status-left") -WorkingDirectory $caseDir -Environment $envMap
     $showStatusText = $showStatus.Output -join "`n"
-    Assert-True ($showStatusText -match "status-left.*BOUNDARY_OK") ("UTF-8 config path did not apply: " + $showStatusText)
+    Assert-True ($showStatusText -match "status-left.*边界_OK") ("UTF-8 config path did not apply: " + $showStatusText)
 
     Write-Output "win32 utf8 boundary smoke passed"
 }

@@ -20,6 +20,9 @@
 #include <sys/wait.h>
 
 #include <fcntl.h>
+#ifdef TMUX_WIN32
+#include <io.h>
+#endif
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,11 +96,98 @@ struct popup_editor {
 static void	popup_editor_close_cb(int, void *);
 
 #ifdef TMUX_WIN32
+static LONG	popup_editor_temp_serial;
+
+static int
+popup_editor_win32_errno(DWORD error)
+{
+	switch (error) {
+	case ERROR_FILE_NOT_FOUND:
+	case ERROR_PATH_NOT_FOUND:
+		return (ENOENT);
+	case ERROR_ACCESS_DENIED:
+	case ERROR_SHARING_VIOLATION:
+	case ERROR_LOCK_VIOLATION:
+		return (EACCES);
+	case ERROR_FILE_EXISTS:
+	case ERROR_ALREADY_EXISTS:
+		return (EEXIST);
+	case ERROR_INVALID_NAME:
+	case ERROR_INVALID_PARAMETER:
+		return (EINVAL);
+	case ERROR_NOT_ENOUGH_MEMORY:
+	case ERROR_OUTOFMEMORY:
+		return (ENOMEM);
+	default:
+		return (EIO);
+	}
+}
+
+static int
+popup_editor_create_temp_file(const char *dir, char **path)
+{
+	const char	*slash;
+	char		*candidate;
+	wchar_t		*wpath;
+	HANDLE		 handle;
+	ULONGLONG	 tick;
+	DWORD		 error;
+	int		 fd, i;
+	LONG		 serial;
+
+	if (dir == NULL || *dir == '\0') {
+		errno = ENOENT;
+		return (-1);
+	}
+
+	slash = (dir[strlen(dir) - 1] == '/' || dir[strlen(dir) - 1] == '\\') ?
+	    "" : "/";
+	tick = GetTickCount64();
+	serial = InterlockedIncrement(&popup_editor_temp_serial);
+
+	for (i = 0; i < 128; i++) {
+		xasprintf(&candidate, "%s%stmux.%08lx.%08lx.%llx.%02x.tmp",
+		    dir, slash, (u_long)GetCurrentProcessId(), (u_long)serial,
+		    (unsigned long long)tick, i);
+		wpath = win32_utf8_to_wide(candidate);
+		if (wpath == NULL) {
+			free(candidate);
+			errno = EINVAL;
+			return (-1);
+		}
+		handle = CreateFileW(wpath, GENERIC_READ|GENERIC_WRITE,
+		    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL,
+		    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+		free(wpath);
+		if (handle == INVALID_HANDLE_VALUE) {
+			error = GetLastError();
+			free(candidate);
+			if (error == ERROR_FILE_EXISTS ||
+			    error == ERROR_ALREADY_EXISTS)
+				continue;
+			errno = popup_editor_win32_errno(error);
+			return (-1);
+		}
+		fd = _open_osfhandle((intptr_t)handle, _O_BINARY);
+		if (fd == -1) {
+			CloseHandle(handle);
+			free(candidate);
+			errno = EMFILE;
+			return (-1);
+		}
+		*path = candidate;
+		return (fd);
+	}
+
+	errno = EEXIST;
+	return (-1);
+}
+
 static int
 popup_editor_temp_path(char **path, char **cmdpath, char **cwd)
 {
 	const char *slash, *name, *backslash;
-	char	*dir, *template;
+	char	*dir;
 	int	 fd;
 
 	dir = win32_getenv_utf8("TMP");
@@ -115,28 +205,21 @@ popup_editor_temp_path(char **path, char **cmdpath, char **cwd)
 		return (-1);
 	}
 
-	slash = (dir[strlen(dir) - 1] == '/' || dir[strlen(dir) - 1] == '\\') ?
-	    "" : "/";
-	xasprintf(&template, "%s%stmux.XXXXXXXX", dir, slash);
+	fd = popup_editor_create_temp_file(dir, path);
 	free(dir);
-
-	fd = mkstemp(template);
-	if (fd == -1) {
-		free(template);
+	if (fd == -1)
 		return (-1);
-	}
-	*path = template;
-	slash = strrchr(template, '/');
-	backslash = strrchr(template, '\\');
+	slash = strrchr(*path, '/');
+	backslash = strrchr(*path, '\\');
 	if (slash == NULL || backslash > slash)
 		slash = backslash;
 	if (slash == NULL) {
-		*cmdpath = xstrdup(template);
+		*cmdpath = xstrdup(*path);
 		*cwd = xstrdup(".");
 	} else {
 		name = slash + 1;
 		*cmdpath = xstrdup(name);
-		*cwd = xstrndup(template, slash - template);
+		*cwd = xstrndup(*path, slash - *path);
 	}
 	return (fd);
 }
@@ -971,7 +1054,11 @@ popup_write(struct client *c, const char *data, size_t size)
 static void
 popup_editor_free(struct popup_editor *pe)
 {
+#ifdef TMUX_WIN32
+	(void)win32_unlink_utf8(pe->path);
+#else
 	unlink(pe->path);
+#endif
 	free(pe->path);
 	free(pe->cmdpath);
 	free(pe->cwd);
