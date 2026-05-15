@@ -405,14 +405,14 @@ function Wait-TmuxClientSize {
         [int]$TimeoutMs = 3000
     )
 
-    $deadline = [Environment]::TickCount64 + $TimeoutMs
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     do {
         $size = Get-TmuxClientSize -Config $Config -Label $Label -ClientPid $ClientPid
         if ($size -ne $null -and $size.Width -eq $Width -and $size.Height -eq $Height) {
             return $size
         }
         Start-Sleep -Milliseconds 100
-    } while ([Environment]::TickCount64 -lt $deadline)
+    } while ([DateTime]::UtcNow -lt $deadline)
 
     $null
 }

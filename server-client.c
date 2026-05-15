@@ -60,6 +60,8 @@ static void	server_client_report_theme(struct client *, enum client_theme);
 #define SERVER_CLIENT_WIN32_TTY_INPUT_CREDIT (64 * 1024)
 #define SERVER_CLIENT_WIN32_TTY_REDRAW_LIMIT (32 * 1024)
 
+static void	server_client_win32_tty_peer_lost(struct client *,
+		    const char *);
 static void	server_client_win32_tty_input_credit(struct client *, size_t,
 		    const char *);
 static int	server_client_win32_tty_output_ack(struct client *,
@@ -400,6 +402,29 @@ server_client_open(struct client *c, char **cause)
 	return (0);
 }
 
+/* Treat peer death as relay transport loss when the client cannot report it. */
+#ifdef TMUX_WIN32
+static void
+server_client_win32_tty_peer_lost(struct client *c, const char *what)
+{
+	size_t		 dropped;
+	const char	*name;
+
+	if (!c->win32_console || c->win32_tty_transport_lost)
+		return;
+
+	dropped = c->win32_tty_out_pending;
+	name = c->name == NULL ? "unknown" : c->name;
+	c->win32_tty_transport_lost = 1;
+	log_debug("%s: %s relay peer lost (%s), dropping %zu output bytes and "
+	    "%zu input credit bytes", __func__, name, what, dropped,
+	    c->win32_tty_in_pending);
+	c->win32_tty_in_pending = 0;
+	c->win32_tty_out_pending = 0;
+	c->redraw = 0;
+}
+#endif
+
 /* Lost an attached client. */
 static void
 server_client_attached_lost(struct client *c)
@@ -474,6 +499,9 @@ server_client_lost(struct client *c)
 	struct client_file	*cf, *cf1;
 	struct client_window	*cw, *cw1;
 
+#ifdef TMUX_WIN32
+	server_client_win32_tty_peer_lost(c, "peer closed");
+#endif
 	c->flags |= CLIENT_DEAD;
 
 	server_client_clear_overlay(c);

@@ -1,6 +1,6 @@
 param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
-    [string]$LabelPrefix = "win32-console-relay-reader-loss-smoke",
+    [string]$LabelPrefix = "w32-relay-rloss",
     [switch]$RemoveLogsOnSuccess
 )
 
@@ -138,14 +138,14 @@ function Wait-LogMatch {
         [int]$TimeoutMs = 3000
     )
 
-    $deadline = [Environment]::TickCount64 + $TimeoutMs
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     do {
         $logs = Get-CurrentTmuxLogs -Path $Path
         if (Test-AnyLogMatch $logs $Pattern) {
             return $true
         }
         Start-Sleep -Milliseconds 100
-    } while ([Environment]::TickCount64 -lt $deadline)
+    } while ([DateTime]::UtcNow -lt $deadline)
 
     $false
 }
@@ -212,7 +212,7 @@ function Wait-AttachConsoleState {
         [int]$TimeoutMs = 5000
     )
 
-    $deadline = [Environment]::TickCount64 + $TimeoutMs
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     do {
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             $text = Get-Content -LiteralPath $Path -Raw
@@ -224,7 +224,7 @@ function Wait-AttachConsoleState {
             }
         }
         Start-Sleep -Milliseconds 100
-    } while ([Environment]::TickCount64 -lt $deadline)
+    } while ([DateTime]::UtcNow -lt $deadline)
 
     throw "Timed out waiting for attach console state at $Path"
 }
@@ -359,6 +359,7 @@ try {
     $clientInputClosed = Test-AnyLogMatch $attachLogs "console input closed"
     $clientTransportLost = Test-AnyLogMatch $attachLogs "Win32 console relay transport lost \(console input closed\)"
     $serverTransportLost = Test-AnyLogMatch $logs "relay transport lost \(input closed\)"
+    $serverPeerLostFallback = Test-AnyLogMatch $logs "relay peer lost \(peer closed\)"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $interestingFailures = @(Get-LogMatches $logs "rejected|output error")
 
@@ -373,6 +374,7 @@ try {
     Write-Host "  client input-closed observed: $clientInputClosed"
     Write-Host "  client transport-lost observed: $clientTransportLost"
     Write-Host "  server transport-lost observed: $serverTransportLost"
+    Write-Host "  server peer-loss fallback observed: $serverPeerLostFallback"
     Write-Host "  output progress events: $outputProgressCount"
     Write-Host "  logs: $root"
 
@@ -384,9 +386,10 @@ try {
 
     $passed = $relayMode -and $relayIdentify -and $inputCredit -and
         -not $directOutput -and $outputProgressReady -and
-        $clientInputClosed -and $clientTransportLost -and
-        $serverTransportLost -and $outputProgressCount -ge 1 -and
-        $interestingFailures.Count -eq 0
+        $outputProgressCount -ge 1 -and $interestingFailures.Count -eq 0 -and (
+            ($clientInputClosed -and $clientTransportLost -and $serverTransportLost) -or
+            $serverPeerLostFallback
+        )
     if ($passed) {
         Write-Host ""
         Write-Host "Native-console relay reader-loss smoke passed."

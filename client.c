@@ -126,6 +126,7 @@ static int		 client_win32_handle_tty_output_available(void);
 static int		 client_win32_handle_tty_input_available(void);
 static void		 client_win32_get_terminal_size(
 			     struct msg_win32_terminal_size *);
+static const char	*client_win32_console_ctrl_name(DWORD);
 static void		 client_restore_terminal(void);
 #endif
 static void		 client_send_identify(const char *, const char *,
@@ -526,6 +527,20 @@ client_win32_get_terminal_size(struct msg_win32_terminal_size *size)
 		size->sy = 24;
 }
 
+static const char *
+client_win32_console_ctrl_name(DWORD type)
+{
+	switch (type) {
+	case CTRL_CLOSE_EVENT:
+		return ("console close event");
+	case CTRL_LOGOFF_EVENT:
+		return ("console logoff event");
+	case CTRL_SHUTDOWN_EVENT:
+		return ("console shutdown event");
+	}
+	return ("console control event");
+}
+
 static void
 client_win32_resize_timer_callback(__unused tmux_event_fd fd,
     __unused short events, __unused void *arg)
@@ -534,11 +549,33 @@ client_win32_resize_timer_callback(__unused tmux_event_fd fd,
 	struct msg_win32_terminal_size size;
 	u_int		sx, sy, xpixel, ypixel;
 	long		ctrl_c;
+	DWORD		ctrl_close;
 
 	ctrl_c = win32_console_ctrl_c_events();
 	if (ctrl_c != 0) {
 		log_debug("%s: ignored %ld CTRL_C_EVENT%s", __func__, ctrl_c,
 		    ctrl_c == 1 ? "" : "s");
+	}
+	ctrl_close = win32_console_ctrl_close_event();
+	if (ctrl_close != 0) {
+		log_debug("%s: received %s", __func__,
+		    client_win32_console_ctrl_name(ctrl_close));
+		if (client_win32_console_relay && client_attached &&
+		    !client_win32_transport_lost_flag) {
+			client_win32_transport_lost(
+			    WIN32_TTY_TRANSPORT_INPUT_CLOSED,
+			    client_win32_console_ctrl_name(ctrl_close));
+			return;
+		}
+		if (!client_exitflag) {
+			client_exitreason = CLIENT_EXIT_LOST_TTY;
+			client_exitval = 1;
+			client_exitflag = 1;
+		}
+		if (client_peer != NULL)
+			proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+		client_exit();
+		return;
 	}
 
 	if (client_peer != NULL &&

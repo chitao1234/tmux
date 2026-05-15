@@ -27,6 +27,7 @@ static char    *win32_passwd_name;
 static char    *win32_passwd_dir;
 static char    *win32_passwd_shell;
 static LONG	win32_ctrl_c_events;
+static LONG	win32_ctrl_close_event;
 char	      **environ;
 
 static BOOL WINAPI
@@ -36,6 +37,11 @@ win32_console_ctrl_handler(DWORD type)
 		InterlockedIncrement(&win32_ctrl_c_events);
 		return (TRUE);
 	}
+	if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT ||
+	    type == CTRL_SHUTDOWN_EVENT) {
+		InterlockedExchange(&win32_ctrl_close_event, (LONG)type);
+		return (TRUE);
+	}
 	return (FALSE);
 }
 
@@ -43,6 +49,12 @@ long
 win32_console_ctrl_c_events(void)
 {
 	return (InterlockedExchange(&win32_ctrl_c_events, 0));
+}
+
+DWORD
+win32_console_ctrl_close_event(void)
+{
+	return ((DWORD)InterlockedExchange(&win32_ctrl_close_event, 0));
 }
 
 void
