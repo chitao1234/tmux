@@ -329,11 +329,11 @@ Required direction:
   native console direct handles. It intentionally bypasses the console handle
   exclusion, initializes/restores console modes, sends direct `MSG_RESIZE`
   nudges from the console resize poller, and is not a supported product mode.
-- Treat relay removal as gated on usable handles, not merely transferable
-  handles.
-- If the full supported-client matrix proves every client path can transfer
-  handles that the detached server can use, remove the relay path instead of
-  keeping it as a second production terminal stack.
+- Treat any future relay replacement as gated on usable handles, not merely
+  transferable handles.
+- If a future separate design proves that the detached server can use native
+  console handles across the supported client matrix, reevaluate whether
+  keeping two terminal transports still makes sense.
 - Continue using direct server-side handles for non-console stdio paths that
   pass native smoke tests.
 
