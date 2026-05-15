@@ -667,7 +667,8 @@ shape. Current probe evidence shows duplicated console handles are
 transferable but not usable for detached server-side input.
 
 Native-console relay fallback smoke remains the supported compatibility path
-for that client shape.
+for that client shape. The tracked manual smoke entry point is
+`tools/win32-console-relay-smoke.ps1`.
 
 High-priority native PowerShell tests:
 

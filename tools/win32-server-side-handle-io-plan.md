@@ -2,7 +2,8 @@
 
 Date: 2026-05-15
 
-Status: Draft
+Status: Implemented for non-console direct-handle I/O; native-console relay
+quarantined
 
 Related docs:
 
@@ -97,7 +98,8 @@ while the server is running in its normal detached process model.
 - A native-console relay attach/detach smoke has also been run from the same
   Windows PTY. The relay path attached and detached successfully, identified
   with `MSG_IDENTIFY_WIN32_TERMINAL`, and did not use direct stdin/stdout
-  handle identify for the relay client.
+  handle identify for the relay client. The tracked manual smoke entry point is
+  `tools/win32-console-relay-smoke.ps1`.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
   `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
   `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
@@ -433,6 +435,18 @@ Current result: the probe can transfer console stdin/stdout handles but fails
 server-side direct console input from the detached server with
 `ERROR_INVALID_HANDLE`. That is a usable-handle failure, so relay removal is
 not currently justified for native console clients.
+
+The manual native-console relay fallback smoke is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\win32-console-relay-smoke.ps1
+```
+
+Run it from a real Windows Terminal or conhost window, not from redirected
+output. It disables direct-handle mode with `TMUX_WIN32_HANDLE_TTY=0`, launches
+a native-console attach, and checks that the client selected the quarantined
+relay path with `MSG_IDENTIFY_WIN32_TERMINAL` and without direct stdin/stdout
+handle identify.
 
 Current relay result: a real Windows PTY attach/detach smoke succeeds on the
 quarantined native-console relay path and logs `MSG_IDENTIFY_WIN32_TERMINAL`
