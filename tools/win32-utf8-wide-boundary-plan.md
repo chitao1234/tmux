@@ -68,6 +68,9 @@ Completed since this plan was drafted:
   synchronized through [`win32-error.c`](../win32-error.c).
 - Startup environment lookups now prefer canonical `global_environ` in
   [`tmux.c`](../tmux.c).
+- Win32 client runtime knob and terminal metadata reads now use the explicit
+  wide environment helper in [`client.c`](../client.c), not direct
+  `getenv()` call sites.
 - Config-file loading now uses [`win32_fopen_utf8()`](../win32-error.c) from
   [`cfg.c`](../cfg.c).
 - Win32 IPC cleanup paths now use [`win32_unlink_utf8()`](../win32-error.c)
@@ -82,10 +85,6 @@ Remaining boundary issues:
   active Win32 paths in [`file.c`](../file.c), [`status.c`](../status.c), and
   [`popup.c`](../popup.c) already route through Win32 helper-backed file I/O
   rather than narrow CRT filesystem calls.
-- Some Win32 runtime knob lookups in [`client.c`](../client.c) still read the
-  process environment directly via `getenv()`. That is acceptable only if we
-  intentionally treat them as process-local diagnostics and terminal metadata
-  rather than tmux canonical environment state.
 - `utf8.c` still exposes `utf8_towc()` / `utf8_fromwc()` even though Windows
   `wchar_t` is UTF-16 code-unit sized, not a stable internal scalar type.
 - Validation still needs more console-boundary stress coverage, especially for
@@ -192,10 +191,7 @@ This plan is complete when:
 1. Re-audit [`file.c`](../file.c), [`status.c`](../status.c),
    [`popup.c`](../popup.c), and [`log.c`](../log.c) to document or eliminate
    any remaining Win32-facing narrow CRT path use.
-2. Decide whether the remaining Win32-only `getenv()` reads in
-   [`client.c`](../client.c) should stay process-local or move behind an
-   explicit helper.
-3. Expand smoke coverage toward console-boundary edge cases, especially
+2. Expand smoke coverage toward console-boundary edge cases, especially
    multibyte output splits and invalid UTF-8 rejection at the writer boundary.
-4. Decide whether `utf8_towc()` / `utf8_fromwc()` should be removed,
+3. Decide whether `utf8_towc()` / `utf8_fromwc()` should be removed,
    Win32-scoped, or left as internal-only helpers with clearer documentation.

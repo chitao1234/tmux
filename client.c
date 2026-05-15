@@ -398,66 +398,74 @@ client_win32_valid_handle(HANDLE handle)
 static int
 client_win32_console_relay_enabled(void)
 {
-	const char	*value;
+	char	*value;
+	int	 enabled = 1;
 
-	value = getenv("TMUX_WIN32_CONSOLE_RELAY");
+	value = win32_getenv_utf8("TMUX_WIN32_CONSOLE_RELAY");
 	if (value != NULL && strcmp(value, "0") == 0)
-		return (0);
-	return (1);
+		enabled = 0;
+	free(value);
+	return (enabled);
 }
 
 static int
 client_win32_console_relay_test_output_loss_enabled(void)
 {
-	const char	*value;
+	char	*value;
 
 	if (client_win32_relay_test_output_loss != 0)
 		return (client_win32_relay_test_output_loss > 0);
 
-	value = getenv("TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS");
+	value = win32_getenv_utf8("TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS");
 	if (value != NULL && strcmp(value, "0") != 0)
 		client_win32_relay_test_output_loss = 1;
 	else
 		client_win32_relay_test_output_loss = -1;
+	free(value);
 	return (client_win32_relay_test_output_loss > 0);
 }
 
 static int
 client_win32_console_relay_test_transport_lost_enabled(void)
 {
-	const char	*value;
+	char	*value;
 
 	if (client_win32_relay_test_transport_lost != 0)
 		return (client_win32_relay_test_transport_lost > 0);
 
-	value = getenv("TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST");
+	value = win32_getenv_utf8("TMUX_WIN32_CONSOLE_RELAY_TEST_TRANSPORT_LOST");
 	if (value != NULL && strcmp(value, "0") != 0)
 		client_win32_relay_test_transport_lost = 1;
 	else
 		client_win32_relay_test_transport_lost = -1;
+	free(value);
 	return (client_win32_relay_test_transport_lost > 0);
 }
 
 static int
 client_win32_handle_tty_enabled(void)
 {
-	const char	*value;
+	char	*value;
+	int	 enabled = 1;
 
-	value = getenv("TMUX_WIN32_HANDLE_TTY");
+	value = win32_getenv_utf8("TMUX_WIN32_HANDLE_TTY");
 	if (value != NULL && strcmp(value, "0") == 0)
-		return (0);
-	return (1);
+		enabled = 0;
+	free(value);
+	return (enabled);
 }
 
 static int
 client_win32_handle_tty_forced(void)
 {
-	const char	*value;
+	char	*value;
+	int	 forced = 0;
 
-	value = getenv("TMUX_WIN32_HANDLE_TTY");
+	value = win32_getenv_utf8("TMUX_WIN32_HANDLE_TTY");
 	if (value != NULL && strcmp(value, "force") == 0)
-		return (1);
-	return (0);
+		forced = 1;
+	free(value);
+	return (forced);
 }
 
 static int
@@ -501,7 +509,8 @@ client_win32_handle_tty_input_available(void)
 static void
 client_win32_get_terminal_size(struct msg_win32_terminal_size *size)
 {
-	const char	*errstr, *value;
+	const char	*errstr;
+	char		*value;
 	long long	 ll;
 
 	memset(size, 0, sizeof *size);
@@ -510,18 +519,21 @@ client_win32_get_terminal_size(struct msg_win32_terminal_size *size)
 	    &size->xpixel, &size->ypixel) == 0)
 		return;
 
-	value = getenv("COLUMNS");
+	value = win32_getenv_utf8("COLUMNS");
 	if (value != NULL && *value != '\0') {
 		ll = strtonum(value, 1, UINT_MAX, &errstr);
 		if (errstr == NULL)
 			size->sx = ll;
 	}
-	value = getenv("LINES");
+	free(value);
+
+	value = win32_getenv_utf8("LINES");
 	if (value != NULL && *value != '\0') {
 		ll = strtonum(value, 1, UINT_MAX, &errstr);
 		if (errstr == NULL)
 			size->sy = ll;
 	}
+	free(value);
 	if (size->sx == 0)
 		size->sx = 80;
 	if (size->sy == 0)
@@ -1179,11 +1191,16 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	if ((ttynam = ttyname(STDIN_FILENO)) == NULL)
 		ttynam = "";
 #endif
+#ifdef TMUX_WIN32
+	termname_owned = win32_getenv_utf8("TERM");
+	if (termname_owned == NULL)
+		termname_owned = xstrdup("");
+	termname = termname_owned;
+#else
 	if ((termname = getenv("TERM")) == NULL)
 		termname = "";
+#endif
 #ifdef TMUX_WIN32
-	termname_owned = xstrdup(termname);
-	termname = termname_owned;
 	(void)win32_terminal_prepare_terminfo();
 	client_is_console = win32_terminal_is_client_console();
 	client_win32_handle_tty = client_win32_handle_tty_enabled();
