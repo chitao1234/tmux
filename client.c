@@ -55,6 +55,7 @@ static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
 static size_t		 client_win32_input_credit;
+static int		 client_win32_input_reading;
 static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
@@ -623,6 +624,7 @@ static void
 client_win32_input_update_reading(void)
 {
 	size_t	size;
+	int	enabled;
 
 	if (client_win32_input == NULL)
 		return;
@@ -631,9 +633,32 @@ client_win32_input_update_reading(void)
 		size = 0;
 	else
 		size = EVBUFFER_LENGTH(client_win32_input_pending);
-	win32_io_reader_set_reading(client_win32_input,
-	    !client_exitflag && !client_win32_transport_lost_flag &&
-	    client_win32_input_credit != 0 && size == 0);
+	enabled = !client_exitflag && !client_win32_transport_lost_flag &&
+	    client_win32_input_credit != 0 && size == 0;
+	if (enabled != client_win32_input_reading) {
+		if (enabled) {
+			log_debug("%s: console input resumed (%zu credit, %zu "
+			    "reserved)", __func__, client_win32_input_credit,
+			    size);
+		} else if (client_exitflag) {
+			log_debug("%s: console input paused (client exiting, %zu "
+			    "credit, %zu reserved)", __func__,
+			    client_win32_input_credit, size);
+		} else if (client_win32_transport_lost_flag) {
+			log_debug("%s: console input paused (transport lost, %zu "
+			    "credit, %zu reserved)", __func__,
+			    client_win32_input_credit, size);
+		} else if (client_win32_input_credit == 0) {
+			log_debug("%s: console input paused (credit exhausted, "
+			    "%zu reserved)", __func__, size);
+		} else {
+			log_debug("%s: console input paused (%zu reserved bytes "
+			    "pending send, %zu credit left)", __func__, size,
+			    client_win32_input_credit);
+		}
+		client_win32_input_reading = enabled;
+	}
+	win32_io_reader_set_reading(client_win32_input, enabled);
 }
 
 static int
@@ -760,6 +785,7 @@ client_win32_input_stop(void)
 	win32_io_endpoint_free(client_win32_input);
 	client_win32_input = NULL;
 clear_pending:
+	client_win32_input_reading = 0;
 	client_win32_input_credit = 0;
 	if (client_win32_input_pending != NULL) {
 		evbuffer_free(client_win32_input_pending);

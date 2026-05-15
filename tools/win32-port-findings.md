@@ -598,6 +598,12 @@ through `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`. It
 verifies that sustained output produces multiple incremental relay progress
 events rather than waiting for a full writer drain.
 
+Tracked native-console relay input-credit smoke is now also available through
+`tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`. It injects more
+than the 64 KiB credit window through the real console input buffer, verifies a
+client-side credit pause and resume, and checks that the server returns credit
+repeatedly while attach still exits cleanly.
+
 Tracked native-console relay transport-loss smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`. It
 verifies that a declared relay transport loss while output is already in
@@ -632,8 +638,9 @@ High-priority native PowerShell tests:
    verify the server completes exit instead of waiting forever.
 
 6. Input credit tuning:
-   paste large data while the server is busy and verify the implemented relay
-   credit window stays bounded under sustained backlog.
+   extend the current input-credit smoke with stronger peak-buffer or process
+   memory checks so bounded relay memory is measured directly, not only
+   inferred from the credit-window pause/resume cycle.
 
 7. Output responsiveness:
    extend the current output-progress smoke to assert redraw-threshold tuning

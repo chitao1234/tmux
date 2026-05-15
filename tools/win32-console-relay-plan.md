@@ -431,6 +431,10 @@ In progress.
 - Native detach-under-backlog smoke now covers the close path where relay
   output is still pending at detach time. The server logs the close-pending
   state and the smoke verifies that detach completes under backlog.
+- Native input-credit smoke now injects more than the 64 KiB relay credit
+  window through the real console input buffer, verifies a client-side credit
+  pause and resume, and checks that the server returns credit repeatedly while
+  attach still exits cleanly.
 - Tune credit sizes and redraw thresholds using large paste and redraw-heavy
   workloads.
 - Verify memory stays bounded under sustained input.
@@ -450,6 +454,11 @@ under MSYS2.
   Relay output-progress coverage. It generates sustained console output,
   detaches the correct attach client by PID, and verifies that multiple
   incremental output-progress events were reported.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`
+  Relay input-credit coverage. It injects more than the 64 KiB credit window
+  through `CONIN$`, verifies that console input pauses and resumes at the
+  client when credit is exhausted and returned, and checks that the server
+  returns credit repeatedly.
 - `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible
@@ -468,9 +477,10 @@ under MSYS2.
 
 ### New relay-focused tests needed
 
-1. Large paste:
-   paste enough input to exceed the intended credit window and verify relay
-   reading pauses and resumes without unbounded memory growth.
+1. Larger input tuning:
+   extend the current input-credit smoke with stronger peak-buffer or process
+   memory checks so bounded memory is measured directly, not only inferred from
+   credit-window behavior.
 2. Redraw-heavy output:
    extend the current output-progress smoke to assert redraw and status
    responsiveness under steady backlog, not only that progress events exist.

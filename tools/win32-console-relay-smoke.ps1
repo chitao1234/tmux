@@ -1,6 +1,7 @@
 param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-console-relay-smoke",
+    [switch]$ExerciseInputCredit,
     [switch]$SimulateOutputLoss,
     [switch]$SimulateTransportLost,
     [switch]$ExerciseDetachBacklog,
@@ -118,6 +119,120 @@ function Invoke-TmuxInteractive {
     }
 }
 
+function Initialize-ConsoleInputInterop {
+    if ("Win32ConsoleInput" -as [type]) {
+        return
+    }
+
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class Win32ConsoleInput
+{
+    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+    public struct INPUT_RECORD
+    {
+        [FieldOffset(0)] public ushort EventType;
+        [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct KEY_EVENT_RECORD
+    {
+        [MarshalAs(UnmanagedType.Bool)] public bool bKeyDown;
+        public ushort wRepeatCount;
+        public ushort wVirtualKeyCode;
+        public ushort wVirtualScanCode;
+        public char UnicodeChar;
+        public uint dwControlKeyState;
+    }
+
+    const ushort KEY_EVENT = 0x0001;
+    const uint GENERIC_READ = 0x80000000;
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint OPEN_EXISTING = 3;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint desiredAccess,
+        uint shareMode, IntPtr securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool WriteConsoleInputW(IntPtr consoleInput,
+        INPUT_RECORD[] buffer, uint length, out uint eventsWritten);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static void WriteText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        IntPtr handle = CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0,
+            IntPtr.Zero);
+        if (handle == new IntPtr(-1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "CreateFileW(CONIN$) failed");
+
+        try
+        {
+            INPUT_RECORD[] records = new INPUT_RECORD[text.Length];
+            for (int i = 0; i < text.Length; i++)
+            {
+                records[i].EventType = KEY_EVENT;
+                records[i].KeyEvent.bKeyDown = true;
+                records[i].KeyEvent.wRepeatCount = 1;
+                records[i].KeyEvent.wVirtualKeyCode = 0;
+                records[i].KeyEvent.wVirtualScanCode = 0;
+                records[i].KeyEvent.UnicodeChar = text[i];
+                records[i].KeyEvent.dwControlKeyState = 0;
+            }
+
+            uint written;
+            if (!WriteConsoleInputW(handle, records, (uint)records.Length,
+                out written))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "WriteConsoleInputW failed");
+            if (written != (uint)records.Length)
+                throw new InvalidOperationException(
+                    "WriteConsoleInputW wrote " + written + " of " +
+                    records.Length + " events");
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+}
+"@
+}
+
+function Write-ConsoleInputText {
+    param(
+        [string]$Text,
+        [int]$ChunkSize = 512,
+        [int]$ChunkDelayMs = 1
+    )
+
+    Initialize-ConsoleInputInterop
+
+    $offset = 0
+    while ($offset -lt $Text.Length) {
+        $length = [Math]::Min($ChunkSize, $Text.Length - $offset)
+        [Win32ConsoleInput]::WriteText($Text.Substring($offset, $length))
+        $offset += $length
+        if ($ChunkDelayMs -gt 0 -and $offset -lt $Text.Length) {
+            Start-Sleep -Milliseconds $ChunkDelayMs
+        }
+    }
+}
+
 function Test-AnyLogMatch {
     param(
         [System.IO.FileInfo[]]$Logs,
@@ -198,11 +313,49 @@ try {
 
     Push-Location $root
     try {
+        $sessionCommand = "cmd.exe"
+        if ($ExerciseInputCredit) {
+            $sessionCommand = 'cmd.exe /Q /K "findstr .* >nul"'
+        }
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
-        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "relay", "cmd.exe") | Out-Null
+        Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "relay", $sessionCommand) | Out-Null
 
         Write-Host "Launching native-console relay attach."
-        if ($SimulateOutputLoss) {
+        if ($ExerciseInputCredit) {
+            Write-Host "Relay input-credit exercise is enabled. Large native console input will be injected and the attach client will be detached automatically."
+            Write-Host "Logs will be checked afterward: $root"
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 25000 -AfterStart {
+                param([int]$AttachPid)
+
+                $builder = [System.Text.StringBuilder]::new()
+                $line = "relay-input-credit-" + [string]::new([char]'x', 48)
+
+                Start-Sleep -Milliseconds 750
+                for ($i = 0; $i -lt 1100; $i++) {
+                    [void]$builder.Append($line).Append("`r")
+                }
+                Write-ConsoleInputText -Text $builder.ToString() -ChunkSize 4096 -ChunkDelayMs 0
+                Start-Sleep -Milliseconds 1500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
+        } elseif ($SimulateOutputLoss) {
             Write-Host "Relay output loss is being simulated. Attach should fail automatically."
             Write-Host "Logs will be checked afterward: $root"
             $attach = Invoke-TmuxInteractive -Arguments @(
@@ -385,6 +538,9 @@ try {
     $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
     $transportLost = Test-AnyLogMatch $logs "relay transport lost|simulating Win32 console relay transport loss|transport-lost"
     $closePending = Test-AnyLogMatch $logs "Win32 relay close pending"
+    $inputPauseCount = Get-LogMatchCount $attachLogs "console input paused \((credit exhausted|[0-9]+ reserved bytes pending send)"
+    $inputResumeCount = Get-LogMatchCount $attachLogs "console input resumed"
+    $inputReturnedCount = Get-LogMatchCount $logs "Win32 input credit returned"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
@@ -395,6 +551,11 @@ try {
     Write-Host "  relay terminal identify: $relayIdentify"
     Write-Host "  input credit observed: $inputCredit"
     Write-Host "  direct handle path used: $directOutput"
+    if ($ExerciseInputCredit) {
+        Write-Host "  input pause events: $inputPauseCount"
+        Write-Host "  input resume events: $inputResumeCount"
+        Write-Host "  returned credit events: $inputReturnedCount"
+    }
     if ($SimulateTransportLost) {
         Write-Host "  transport lost observed: $transportLost"
     }
@@ -415,7 +576,12 @@ try {
         $failures | ForEach-Object { Write-Host "  $_" }
     }
 
-    if ($SimulateOutputLoss) {
+    if ($ExerciseInputCredit) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $inputPauseCount -ge 1 -and
+            $inputResumeCount -ge 2 -and $inputReturnedCount -ge 2 -and
+            $failures.Count -eq 0
+    } elseif ($SimulateOutputLoss) {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $outputAbort -and
             $failures.Count -eq 0
@@ -437,7 +603,9 @@ try {
     }
     if ($passed) {
         Write-Host ""
-        if ($SimulateOutputLoss) {
+        if ($ExerciseInputCredit) {
+            Write-Host "Native-console relay input-credit smoke passed."
+        } elseif ($SimulateOutputLoss) {
             Write-Host "Native-console relay output-loss smoke passed."
         } elseif ($SimulateTransportLost) {
             Write-Host "Native-console relay transport-loss smoke passed."
@@ -455,7 +623,9 @@ try {
     }
 
     Write-Host ""
-    if ($SimulateOutputLoss) {
+    if ($ExerciseInputCredit) {
+        Write-Host "Native-console relay input-credit smoke failed."
+    } elseif ($SimulateOutputLoss) {
         Write-Host "Native-console relay output-loss smoke failed."
     } elseif ($SimulateTransportLost) {
         Write-Host "Native-console relay transport-loss smoke failed."
