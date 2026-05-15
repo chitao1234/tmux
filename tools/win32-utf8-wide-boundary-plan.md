@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: Draft
+Status: In Progress
 
 Related docs:
 
@@ -56,25 +56,38 @@ The boundary is not:
 
 ## Current Problems To Close
 
-The current tree already has partial wide-char handling, but it is not
-systematic.
+The current tree has the core boundary helpers in place, but a few important
+edges are still incomplete.
 
-- Startup environment import still aliases `_environ` in
-  [`win32-error.c`](../win32-error.c).
-- `tmux.c` still copies the CRT environment directly into `global_environ`
-  after startup.
-- `compat/setenv.c` still mutates `_putenv` / `_environ` on Win32.
-- `tmux.c` and `win32-error.c` still use `getenv()` for Windows-facing values
-  such as `SHELL`, `HOME`, `USERPROFILE`, `TERMINFO`, `TMUX`, `VISUAL`, and
-  `EDITOR`.
-- `cfg.c` still loads config files with narrow `fopen()` on Windows.
-- `file.c` still falls back from `CreateFileW()` to narrow `open()` for some
-  non-regular path cases.
-- `win32-ipc.c` still removes socket cleanup paths with narrow `unlink()`.
-- `win32-event.c` still falls back to permissive UTF-8 conversion after a
-  strict `MultiByteToWideChar()` failure for console writes.
-- `utf8.c` exposes `utf8_towc()` / `utf8_fromwc()` even though Windows
+Completed since this plan was drafted:
+
+- Startup environment import now comes from `GetEnvironmentStringsW()` in
+  [`win32-error.c`](../win32-error.c), not raw `_environ`.
+- Win32 `setenv()` / `unsetenv()` now cross through wide helpers in
+  [`compat/setenv.c`](../compat/setenv.c) and keep `global_environ`
+  synchronized through [`win32-error.c`](../win32-error.c).
+- Startup environment lookups now prefer canonical `global_environ` in
+  [`tmux.c`](../tmux.c).
+- Config-file loading now uses [`win32_fopen_utf8()`](../win32-error.c) from
+  [`cfg.c`](../cfg.c).
+- Win32 IPC cleanup paths now use [`win32_unlink_utf8()`](../win32-error.c)
+  from [`win32-ipc.c`](../win32-ipc.c).
+- Console writes in [`win32-event.c`](../win32-event.c) now reject invalid
+  UTF-8 instead of silently falling back to permissive conversion.
+- The helper layer no longer relies on fixed `MAX_PATH` module-path buffers.
+
+Remaining boundary issues:
+
+- `file.c` still has non-Win32 `fopen()` / `open()` branches in shared code,
+  and the Win32 path should be re-audited to confirm there is no remaining
+  fallback to narrow CRT semantics for Windows-facing operations.
+- Some Win32 runtime knob lookups in [`client.c`](../client.c) still read the
+  process environment directly via `getenv()`. That is acceptable only if we
+  intentionally treat them as process-local diagnostics rather than tmux
+  canonical environment state.
+- `utf8.c` still exposes `utf8_towc()` / `utf8_fromwc()` even though Windows
   `wchar_t` is UTF-16 code-unit sized, not a stable internal scalar type.
+- Validation coverage is still incomplete for some Unicode file and cwd cases.
 
 ## Implementation Stages
 
@@ -88,23 +101,24 @@ systematic.
 
 ### Stage 2: Fix environment ingress and egress
 
-- Replace the `_environ` startup import with a wide environment import path.
-- Normalize imported environment entries into tmux's UTF-8 environment store.
-- Replace direct Win32-facing `getenv()` uses with either `global_environ`
-  lookups or explicit wide helpers.
-- Replace `compat/setenv.c` / `unsetenv()` Win32 behavior with a wide
-  boundary helper, then refresh tmux's UTF-8 environment state from that
-  helper.
-- Make the client identify path send normalized UTF-8 environment strings
-  only, not raw CRT snapshots.
+- Done: replace the `_environ` startup import with a wide environment import
+  path.
+- Done: normalize imported environment entries into tmux's UTF-8 environment
+  store.
+- Mostly done: replace direct Win32-facing `getenv()` uses with either
+  `global_environ` lookups or explicit wide helpers.
+- Done: replace `compat/setenv.c` / `unsetenv()` Win32 behavior with a wide
+  boundary helper and keep tmux's UTF-8 environment state synchronized.
+- Done: the client identify path sends normalized UTF-8 environment strings,
+  not raw CRT snapshots.
 
 ### Stage 3: Close filesystem and path leaks
 
-- Replace narrow config-file loading in `cfg.c` with a wide path helper.
-- Remove narrow fallbacks in `file.c` where a Windows path has already been
-  normalized to UTF-16.
-- Convert socket cleanup and managed-root cleanup in `win32-ipc.c` to wide
-  path operations.
+- Done: replace narrow config-file loading in `cfg.c` with a wide path helper.
+- Remaining: re-audit `file.c` and remove any narrow fallback where a Windows
+  path has already been normalized to UTF-16.
+- Done: convert socket cleanup and managed-root cleanup in `win32-ipc.c` to
+  wide path operations.
 - Audit `log.c`, `popup.c`, `status.c`, `server.c`, and `client.c` for any
   Win32-facing path operation that still relies on narrow CRT behavior.
 - Remove `MAX_PATH`-limited assumptions from the helper layer where possible.
@@ -122,8 +136,8 @@ systematic.
 
 - Keep tmux core text UTF-8.
 - Keep the real console writer as the only UTF-16 text sink.
-- Decide whether invalid UTF-8 at the console boundary is rejected or
-  sanitized, then apply that rule consistently.
+- Done: invalid UTF-8 at the console boundary is rejected rather than
+  sanitized.
 - Avoid using console code page changes as part of correctness.
 
 ### Stage 6: Validation
@@ -168,3 +182,16 @@ This plan is complete when:
   environment or filesystem state;
 - console output conversion policy is explicit and consistent;
 - tests cover non-ASCII and invalid-input cases at the new boundary.
+
+## Next Concrete Work
+
+1. Re-audit [`file.c`](../file.c), [`status.c`](../status.c),
+   [`popup.c`](../popup.c), and [`log.c`](../log.c) to document or eliminate
+   any remaining Win32-facing narrow CRT path use.
+2. Decide whether the remaining Win32-only `getenv()` reads in
+   [`client.c`](../client.c) should stay process-local or move behind an
+   explicit helper.
+3. Add smoke coverage for Unicode file read/write paths and child startup from
+   a Unicode cwd.
+4. Decide whether `utf8_towc()` / `utf8_fromwc()` should be removed,
+   Win32-scoped, or left as internal-only helpers with clearer documentation.

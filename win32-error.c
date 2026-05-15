@@ -37,6 +37,7 @@ static int	 win32_import_environment_entry(const wchar_t *,
 static int	 win32_import_utf8_entry(char *, struct environ *);
 static int	 win32_errno_from_last_error(DWORD);
 static const char *win32_getenv_canonical(const char *);
+static void	 win32_sync_global_environ_entry(const char *, const char *);
 
 static const char *
 win32_getenv_canonical(const char *name)
@@ -53,6 +54,17 @@ win32_getenv_canonical(const char *name)
 	}
 	value = getenv(name);
 	return (value);
+}
+
+static void
+win32_sync_global_environ_entry(const char *name, const char *value)
+{
+	if (global_environ == NULL || name == NULL || *name == '\0')
+		return;
+	if (value != NULL)
+		environ_set(global_environ, name, 0, "%s", value);
+	else
+		environ_unset(global_environ, name);
 }
 
 static BOOL WINAPI
@@ -289,6 +301,7 @@ win32_setenv_utf8(const char *name, const char *value, int overwrite)
 	}
 
 	win32_refresh_environ();
+	win32_sync_global_environ_entry(name, value);
 	return (0);
 }
 
@@ -316,6 +329,7 @@ win32_unsetenv_utf8(const char *name)
 	}
 
 	win32_refresh_environ();
+	win32_sync_global_environ_entry(name, NULL);
 	return (0);
 }
 

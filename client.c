@@ -1260,6 +1260,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	options_free(global_s_options);
 	options_free(global_w_options);
 	environ_free(global_environ);
+	global_environ = NULL;
 
 	/* Set up control mode. */
 #ifndef TMUX_WIN32
