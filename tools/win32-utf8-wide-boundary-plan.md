@@ -71,6 +71,9 @@ Completed since this plan was drafted:
 - Win32 client runtime knob and terminal metadata reads now use the explicit
   wide environment helper in [`client.c`](../client.c), not direct
   `getenv()` call sites.
+- Unused public `wchar_t`-shaped UTF-8 helpers were removed from
+  [`tmux.h`](../tmux.h) and [`utf8.c`](../utf8.c), so the core no longer
+  advertises a misleading wide-character conversion boundary.
 - Config-file loading now uses [`win32_fopen_utf8()`](../win32-error.c) from
   [`cfg.c`](../cfg.c).
 - Win32 IPC cleanup paths now use [`win32_unlink_utf8()`](../win32-error.c)
@@ -85,8 +88,6 @@ Remaining boundary issues:
   active Win32 paths in [`file.c`](../file.c), [`status.c`](../status.c), and
   [`popup.c`](../popup.c) already route through Win32 helper-backed file I/O
   rather than narrow CRT filesystem calls.
-- `utf8.c` still exposes `utf8_towc()` / `utf8_fromwc()` even though Windows
-  `wchar_t` is UTF-16 code-unit sized, not a stable internal scalar type.
 - Validation still needs more console-boundary stress coverage, especially for
   multibyte output splits and explicit invalid UTF-8 writer behavior.
 
@@ -193,5 +194,3 @@ This plan is complete when:
    any remaining Win32-facing narrow CRT path use.
 2. Expand smoke coverage toward console-boundary edge cases, especially
    multibyte output splits and invalid UTF-8 rejection at the writer boundary.
-3. Decide whether `utf8_towc()` / `utf8_fromwc()` should be removed,
-   Win32-scoped, or left as internal-only helpers with clearer documentation.

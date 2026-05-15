@@ -855,28 +855,6 @@ utf8_fromuc(u_int uc, struct utf8_data *ud)
 	return (UTF8_ERROR);
 }
 
-/* Convert UTF-8 character to wide character. */
-enum utf8_state
-utf8_towc(const struct utf8_data *ud, wchar_t *wc)
-{
-	u_int	uc;
-
-	if (utf8_touc(ud, &uc) != UTF8_DONE)
-		return (UTF8_ERROR);
-	if (uc > WCHAR_MAX)
-		return (UTF8_ERROR);
-	*wc = uc;
-	log_debug("UTF-8 %.*s is %05X", (int)ud->size, ud->data, uc);
-	return (UTF8_DONE);
-}
-
-/* Convert wide character to UTF-8 character. */
-enum utf8_state
-utf8_fromwc(wchar_t wc, struct utf8_data *ud)
-{
-	return (utf8_fromuc(wc, ud));
-}
-
 /*
  * Open UTF-8 sequence.
  *
