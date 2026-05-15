@@ -439,6 +439,10 @@ In progress.
 - Native output-progress smoke now also forces a status redraw while output
   backlog is active and verifies redraw deferral plus redraw-release behavior,
   not only the existence of progress ACKs.
+- Native resize-under-backlog smoke now generates sustained relay output,
+  resizes the real console while backlog is active, verifies that tmux updates
+  the attached client's `client_width` and `client_height` before detach, and
+  checks both client-side and server-side relay resize logs.
 - Tune credit sizes and redraw thresholds using large paste and redraw-heavy
   workloads.
 - Verify memory stays bounded under sustained input.
@@ -459,6 +463,11 @@ under MSYS2.
   forces a status redraw while backlog is active, detaches the correct attach
   client by PID, and verifies multiple incremental output-progress events plus
   redraw deferral and redraw-release activity.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseResizeBacklog`
+  Relay resize-under-backlog coverage. It generates sustained console output,
+  resizes the real console while relay output is still pending, verifies that
+  tmux updates the attached client's size through `list-clients`, and checks
+  both client-side and server-side relay resize logs before detach.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`
   Relay input-credit coverage. It injects more than the 64 KiB credit window
   through `CONIN$`, verifies that console input pauses and resumes at the
@@ -490,9 +499,6 @@ under MSYS2.
 2. Native reader failure without test knobs:
    reproduce actual console input loss and verify it follows the explicit
    transport-lost path now covered by simulated smoke.
-3. Resize during backlog:
-   resize during heavy output and verify resize messages are not starved behind
-   coarse output waiting.
 
 ## Exit Criteria
 

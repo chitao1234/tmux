@@ -6,6 +6,7 @@ param(
     [switch]$SimulateTransportLost,
     [switch]$ExerciseDetachBacklog,
     [switch]$ExerciseOutputProgress,
+    [switch]$ExerciseResizeBacklog,
     [switch]$RemoveLogsOnSuccess
 )
 
@@ -233,6 +234,67 @@ function Write-ConsoleInputText {
     }
 }
 
+function Get-ConsoleWindowSize {
+    $size = $Host.UI.RawUI.WindowSize
+    [pscustomobject]@{
+        Width = $size.Width
+        Height = $size.Height
+    }
+}
+
+function Get-AlternateConsoleWindowSize {
+    param(
+        [int]$Width,
+        [int]$Height
+    )
+
+    $targetWidth = $Width
+    $targetHeight = $Height
+
+    if ($Width -gt 100) {
+        $targetWidth = $Width - 8
+    } elseif ($Height -gt 32) {
+        $targetHeight = $Height - 4
+    } elseif ($Width -gt 52) {
+        $targetWidth = $Width - 4
+    } elseif ($Height -gt 20) {
+        $targetHeight = $Height - 2
+    } else {
+        $targetWidth = $Width + 4
+    }
+    if ($targetWidth -eq $Width -and $targetHeight -eq $Height) {
+        throw "Could not choose an alternate console size from ${Width}x${Height}."
+    }
+
+    [pscustomobject]@{
+        Width = $targetWidth
+        Height = $targetHeight
+    }
+}
+
+function Set-ConsoleWindowSize {
+    param(
+        [int]$Width,
+        [int]$Height
+    )
+
+    $raw = $Host.UI.RawUI
+    $buffer = $raw.BufferSize
+    $bufferWidth = [Math]::Max($buffer.Width, $Width)
+    $bufferHeight = [Math]::Max($buffer.Height, $Height)
+
+    if ($bufferWidth -ne $buffer.Width -or $bufferHeight -ne $buffer.Height) {
+        $raw.BufferSize = [System.Management.Automation.Host.Size]::new(
+            $bufferWidth,
+            $bufferHeight
+        )
+    }
+    $raw.WindowSize = [System.Management.Automation.Host.Size]::new(
+        $Width,
+        $Height
+    )
+}
+
 function Test-AnyLogMatch {
     param(
         [System.IO.FileInfo[]]$Logs,
@@ -295,6 +357,58 @@ function Get-LogMaximumCapture {
     $maximum
 }
 
+function Get-TmuxClientSize {
+    param(
+        [string]$Config,
+        [string]$Label,
+        [int]$ClientPid
+    )
+
+    $result = Invoke-Tmux -Arguments @(
+        "-f",
+        $Config,
+        "-L",
+        $Label,
+        "list-clients",
+        "-F",
+        "#{client_name} #{client_width} #{client_height}"
+    ) -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return $null
+    }
+    foreach ($line in $result.Output) {
+        if ($line -match "^client-$ClientPid\s+([0-9]+)\s+([0-9]+)$") {
+            return [pscustomobject]@{
+                Width = [int]$Matches[1]
+                Height = [int]$Matches[2]
+            }
+        }
+    }
+    $null
+}
+
+function Wait-TmuxClientSize {
+    param(
+        [string]$Config,
+        [string]$Label,
+        [int]$ClientPid,
+        [int]$Width,
+        [int]$Height,
+        [int]$TimeoutMs = 3000
+    )
+
+    $deadline = [Environment]::TickCount64 + $TimeoutMs
+    do {
+        $size = Get-TmuxClientSize -Config $Config -Label $Label -ClientPid $ClientPid
+        if ($size -ne $null -and $size.Width -eq $Width -and $size.Height -eq $Height) {
+            return $size
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([Environment]::TickCount64 -lt $deadline)
+
+    $null
+}
+
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
     throw "This smoke must be run from a real Windows console, not redirected output or the Codex runner."
 }
@@ -318,6 +432,10 @@ New-Item -ItemType Directory -Path $root | Out-Null
 New-Item -ItemType File -Path $config | Out-Null
 
 try {
+    $restoreConsoleSize = $null
+    $resizeTarget = $null
+    $resizeObserved = $null
+
     $env:TMUX = $null
     $env:TMUX_WIN32_HANDLE_TTY = "0"
     $env:TMUX_WIN32_CONSOLE_RELAY = $null
@@ -532,6 +650,68 @@ try {
                     "client-$AttachPid"
                 ) | Out-Null
             }
+        } elseif ($ExerciseResizeBacklog) {
+            Write-Host "Relay resize-under-backlog exercise is enabled. Output will be generated, the real console will be resized, and the attach client will be detached automatically."
+            Write-Host "Logs will be checked afterward: $root"
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 20000 -AfterStart {
+                param([int]$AttachPid)
+
+                Start-Sleep -Milliseconds 750
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    "for /L %i in (1,1,9000) do @echo relay-resize-backlog-0123456789abcdefghijklmnopqrstuvwxyz"
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+                Start-Sleep -Milliseconds 250
+                $script:restoreConsoleSize = Get-ConsoleWindowSize
+                $script:resizeTarget = Get-AlternateConsoleWindowSize `
+                    -Width $script:restoreConsoleSize.Width `
+                    -Height $script:restoreConsoleSize.Height
+                Set-ConsoleWindowSize -Width $script:resizeTarget.Width `
+                    -Height $script:resizeTarget.Height
+                $script:resizeObserved = Wait-TmuxClientSize `
+                    -Config $config `
+                    -Label $label `
+                    -ClientPid $AttachPid `
+                    -Width $script:resizeTarget.Width `
+                    -Height $script:resizeTarget.Height `
+                    -TimeoutMs 3000
+                Start-Sleep -Milliseconds 500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
         } else {
             Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
             $attach = Invoke-TmuxInteractive -Arguments @(
@@ -579,6 +759,17 @@ try {
     $redrawDeferredCount = Get-LogMatchCount $logs "redraw deferred"
     $waitingForRedrawCount = Get-LogMatchCount $logs "waiting for redraw, [0-9]+ bytes left"
     $statusRedraw = Test-AnyLogMatch $logs "redraw status"
+    $resizeClientLog = $false
+    $resizeServerLog = $false
+    if ($ExerciseResizeBacklog -and $resizeTarget -ne $null) {
+        $resizeClientLog = Test-AnyLogMatch $attachLogs (
+            "console size is now $($resizeTarget.Width)x$($resizeTarget.Height)"
+        )
+        $resizeServerLog = Test-AnyLogMatch $logs (
+            "server_client_win32_resize: client-$attachPid now " +
+            "$($resizeTarget.Width)x$($resizeTarget.Height)"
+        )
+    }
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
     Write-Host ""
@@ -606,6 +797,20 @@ try {
         Write-Host "  redraw deferred events: $redrawDeferredCount"
         Write-Host "  waiting-for-redraw events: $waitingForRedrawCount"
         Write-Host "  status redraw observed: $statusRedraw"
+    }
+    if ($ExerciseResizeBacklog) {
+        if ($resizeTarget -ne $null) {
+            Write-Host "  resize target: $($resizeTarget.Width)x$($resizeTarget.Height)"
+        }
+        if ($resizeObserved -ne $null) {
+            Write-Host "  resize observed by server query: $($resizeObserved.Width)x$($resizeObserved.Height)"
+        } else {
+            Write-Host "  resize observed by server query: <none>"
+        }
+        Write-Host "  client resize log observed: $resizeClientLog"
+        Write-Host "  server resize log observed: $resizeServerLog"
+        Write-Host "  output progress events: $outputProgressCount"
+        Write-Host "  redraw deferred events: $redrawDeferredCount"
     }
     if ($SimulateOutputLoss) {
         Write-Host "  output abort observed: $outputAbort"
@@ -643,6 +848,15 @@ try {
             $outputProgressCount -ge 2 -and $redrawDeferredCount -ge 1 -and
             $waitingForRedrawCount -ge 1 -and $statusRedraw -and
             $failures.Count -eq 0
+    } elseif ($ExerciseResizeBacklog) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $resizeTarget -ne $null -and
+            $resizeObserved -ne $null -and
+            $resizeObserved.Width -eq $resizeTarget.Width -and
+            $resizeObserved.Height -eq $resizeTarget.Height -and
+            $resizeClientLog -and $resizeServerLog -and
+            $outputProgressCount -ge 1 -and $redrawDeferredCount -ge 1 -and
+            $failures.Count -eq 0
     } else {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $failures.Count -eq 0
@@ -659,6 +873,8 @@ try {
             Write-Host "Native-console relay detach-backlog smoke passed."
         } elseif ($ExerciseOutputProgress) {
             Write-Host "Native-console relay output-progress smoke passed."
+        } elseif ($ExerciseResizeBacklog) {
+            Write-Host "Native-console relay resize-backlog smoke passed."
         } else {
             Write-Host "Native-console relay smoke passed."
         }
@@ -679,11 +895,21 @@ try {
         Write-Host "Native-console relay detach-backlog smoke failed."
     } elseif ($ExerciseOutputProgress) {
         Write-Host "Native-console relay output-progress smoke failed."
+    } elseif ($ExerciseResizeBacklog) {
+        Write-Host "Native-console relay resize-backlog smoke failed."
     } else {
         Write-Host "Native-console relay smoke failed."
     }
     exit 1
 } finally {
+    if ($restoreConsoleSize -ne $null) {
+        try {
+            Set-ConsoleWindowSize -Width $restoreConsoleSize.Width `
+                -Height $restoreConsoleSize.Height
+        } catch {
+            Write-Warning "Failed to restore console size to $($restoreConsoleSize.Width)x$($restoreConsoleSize.Height): $_"
+        }
+    }
     $env:TMUX = $savedEnv.TMUX
     $env:TMUX_WIN32_HANDLE_TTY = $savedEnv.TMUX_WIN32_HANDLE_TTY
     $env:TMUX_WIN32_CONSOLE_RELAY = $savedEnv.TMUX_WIN32_CONSOLE_RELAY

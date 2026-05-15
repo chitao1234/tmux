@@ -600,6 +600,12 @@ events, forces a status redraw while backlog is active, and records redraw
 deferral plus redraw-release behavior rather than only waiting for a full
 writer drain.
 
+Tracked native-console relay resize-under-backlog smoke is now also available
+through `tools/win32-console-relay-smoke.ps1 -ExerciseResizeBacklog`. It
+generates sustained relay output, resizes the real console while backlog is
+active, verifies that tmux updates the attached client's size through
+`list-clients`, and checks both client-side and server-side relay resize logs.
+
 Tracked native-console relay input-credit smoke is now also available through
 `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`. It injects more
 than the 64 KiB credit window through the real console input buffer, verifies a
