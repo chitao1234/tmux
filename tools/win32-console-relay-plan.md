@@ -433,8 +433,9 @@ In progress.
   state and the smoke verifies that detach completes under backlog.
 - Native input-credit smoke now injects more than the 64 KiB relay credit
   window through the real console input buffer, verifies a client-side credit
-  pause and resume, and checks that the server returns credit repeatedly while
-  attach still exits cleanly.
+  pause and resume, checks that the server returns credit repeatedly while
+  attach still exits cleanly, and records peak tmux-owned reserved plus reader-
+  buffered bytes so bounded relay memory is measured directly.
 - Native output-progress smoke now also forces a status redraw while output
   backlog is active and verifies redraw deferral plus redraw-release behavior,
   not only the existence of progress ACKs.
@@ -461,8 +462,9 @@ under MSYS2.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`
   Relay input-credit coverage. It injects more than the 64 KiB credit window
   through `CONIN$`, verifies that console input pauses and resumes at the
-  client when credit is exhausted and returned, and checks that the server
-  returns credit repeatedly.
+  client when credit is exhausted and returned, checks that the server returns
+  credit repeatedly, and records peak tmux-owned reserved plus reader-buffered
+  bytes.
 - `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
   Relay output-loss coverage. It verifies that output failure sends explicit
   abort accounting and that attach exits instead of hanging for an impossible
@@ -481,18 +483,14 @@ under MSYS2.
 
 ### New relay-focused tests needed
 
-1. Larger input tuning:
-   extend the current input-credit smoke with stronger peak-buffer or process
-   memory checks so bounded memory is measured directly, not only inferred from
-   credit-window behavior.
-2. Broader redraw tuning:
+1. Broader redraw tuning:
    extend the current output-progress coverage across more output patterns and
    threshold sizes so redraw responsiveness is tuned, not only demonstrated on
    the current stress case.
-3. Native reader failure without test knobs:
+2. Native reader failure without test knobs:
    reproduce actual console input loss and verify it follows the explicit
    transport-lost path now covered by simulated smoke.
-4. Resize during backlog:
+3. Resize during backlog:
    resize during heavy output and verify resize messages are not starved behind
    coarse output waiting.
 

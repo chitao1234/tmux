@@ -56,6 +56,8 @@ static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
 static size_t		 client_win32_input_credit;
 static int		 client_win32_input_reading;
+static size_t		 client_win32_input_pending_peak;
+static size_t		 client_win32_input_buffered_peak;
 static size_t		 client_win32_output_pending;
 static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
@@ -98,6 +100,7 @@ static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
 static void		 client_win32_input_add_credit(size_t);
 static void		 client_win32_input_dispatch_credit(char *, ssize_t);
+static void		 client_win32_input_note_buffers(const char *);
 static void		 client_win32_input_update_reading(void);
 static int		 client_win32_input_flush_pending(void);
 static void		 client_win32_input_send_failed(void);
@@ -621,6 +624,31 @@ client_win32_input_add_credit(size_t size)
 }
 
 static void
+client_win32_input_note_buffers(const char *what)
+{
+	size_t	pending, buffered;
+
+	if (client_win32_input_pending == NULL)
+		pending = 0;
+	else
+		pending = EVBUFFER_LENGTH(client_win32_input_pending);
+	if (client_win32_input == NULL)
+		buffered = 0;
+	else
+		buffered = win32_io_reader_buffered(client_win32_input);
+	if (pending > client_win32_input_pending_peak) {
+		client_win32_input_pending_peak = pending;
+		log_debug("%s: peak reserved %zu bytes (%s)", __func__, pending,
+		    what);
+	}
+	if (buffered > client_win32_input_buffered_peak) {
+		client_win32_input_buffered_peak = buffered;
+		log_debug("%s: peak reader buffered %zu bytes (%s)", __func__,
+		    buffered, what);
+	}
+}
+
+static void
 client_win32_input_update_reading(void)
 {
 	size_t	size;
@@ -633,6 +661,7 @@ client_win32_input_update_reading(void)
 		size = 0;
 	else
 		size = EVBUFFER_LENGTH(client_win32_input_pending);
+	client_win32_input_note_buffers("update-reading");
 	enabled = !client_exitflag && !client_win32_transport_lost_flag &&
 	    client_win32_input_credit != 0 && size == 0;
 	if (enabled != client_win32_input_reading) {
@@ -730,6 +759,7 @@ client_win32_input_callback(__unused void *arg)
 		client_win32_input_credit -= size;
 		if (evbuffer_add_buffer(client_win32_input_pending, input) != 0)
 			fatalx("out of memory");
+		client_win32_input_note_buffers("callback");
 		log_debug("%s: reserved %zu bytes, %zu credit left", __func__,
 		    size, client_win32_input_credit);
 	}
@@ -785,7 +815,16 @@ client_win32_input_stop(void)
 	win32_io_endpoint_free(client_win32_input);
 	client_win32_input = NULL;
 clear_pending:
+	if (client_win32_input_pending_peak != 0 ||
+	    client_win32_input_buffered_peak != 0) {
+		log_debug("%s: console input peak reserved %zu bytes, peak "
+		    "reader buffered %zu bytes", __func__,
+		    client_win32_input_pending_peak,
+		    client_win32_input_buffered_peak);
+	}
 	client_win32_input_reading = 0;
+	client_win32_input_pending_peak = 0;
+	client_win32_input_buffered_peak = 0;
 	client_win32_input_credit = 0;
 	if (client_win32_input_pending != NULL) {
 		evbuffer_free(client_win32_input_pending);

@@ -274,6 +274,27 @@ function Get-LogMatchCount {
     $count
 }
 
+function Get-LogMaximumCapture {
+    param(
+        [System.IO.FileInfo[]]$Logs,
+        [string]$Pattern
+    )
+
+    $maximum = $null
+    foreach ($log in $Logs) {
+        foreach ($match in Select-String -LiteralPath $log.FullName -Pattern $Pattern) {
+            $value = [int64]$match.Matches[0].Groups[1].Value
+            if ($maximum -eq $null -or $value -gt $maximum) {
+                $maximum = $value
+            }
+        }
+    }
+    if ($maximum -eq $null) {
+        return -1
+    }
+    $maximum
+}
+
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
     throw "This smoke must be run from a real Windows console, not redirected output or the Codex runner."
 }
@@ -552,6 +573,8 @@ try {
     $inputPauseCount = Get-LogMatchCount $attachLogs "console input paused \((credit exhausted|[0-9]+ reserved bytes pending send)"
     $inputResumeCount = Get-LogMatchCount $attachLogs "console input resumed"
     $inputReturnedCount = Get-LogMatchCount $logs "Win32 input credit returned"
+    $inputPeakReserved = Get-LogMaximumCapture $attachLogs "console input peak reserved ([0-9]+) bytes, peak reader buffered [0-9]+ bytes"
+    $inputPeakBuffered = Get-LogMaximumCapture $attachLogs "console input peak reserved [0-9]+ bytes, peak reader buffered ([0-9]+) bytes"
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $redrawDeferredCount = Get-LogMatchCount $logs "redraw deferred"
     $waitingForRedrawCount = Get-LogMatchCount $logs "waiting for redraw, [0-9]+ bytes left"
@@ -569,6 +592,8 @@ try {
         Write-Host "  input pause events: $inputPauseCount"
         Write-Host "  input resume events: $inputResumeCount"
         Write-Host "  returned credit events: $inputReturnedCount"
+        Write-Host "  peak reserved bytes: $inputPeakReserved"
+        Write-Host "  peak reader buffered bytes: $inputPeakBuffered"
     }
     if ($SimulateTransportLost) {
         Write-Host "  transport lost observed: $transportLost"
@@ -597,6 +622,8 @@ try {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $inputPauseCount -ge 1 -and
             $inputResumeCount -ge 2 -and $inputReturnedCount -ge 2 -and
+            $inputPeakReserved -ge 0 -and $inputPeakReserved -le 65536 -and
+            $inputPeakBuffered -ge 0 -and $inputPeakBuffered -le 65536 -and
             $failures.Count -eq 0
     } elseif ($SimulateOutputLoss) {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and

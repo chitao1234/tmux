@@ -603,8 +603,9 @@ writer drain.
 Tracked native-console relay input-credit smoke is now also available through
 `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`. It injects more
 than the 64 KiB credit window through the real console input buffer, verifies a
-client-side credit pause and resume, and checks that the server returns credit
-repeatedly while attach still exits cleanly.
+client-side credit pause and resume, checks that the server returns credit
+repeatedly while attach still exits cleanly, and records peak tmux-owned
+reserved plus reader-buffered bytes.
 
 Tracked native-console relay transport-loss smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -SimulateTransportLost`. It
@@ -640,9 +641,9 @@ High-priority native PowerShell tests:
    verify the server completes exit instead of waiting forever.
 
 6. Input credit tuning:
-   extend the current input-credit smoke with stronger peak-buffer or process
-   memory checks so bounded relay memory is measured directly, not only
-   inferred from the credit-window pause/resume cycle.
+   if later tuning needs it, broaden bounded-memory coverage beyond the current
+   client-side peak-buffer metrics to include server-side or process-level
+   observations across more workloads.
 
 7. Output responsiveness:
    extend the current output-progress coverage across more output patterns and
