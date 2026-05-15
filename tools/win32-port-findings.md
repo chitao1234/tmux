@@ -626,6 +626,13 @@ through `tools/win32-console-relay-smoke.ps1 -ExerciseDetachBacklog`. It
 detaches while relay output is still pending, verifies that the server logs the
 relay close-pending state, and checks that detach still completes cleanly.
 
+Tracked native-console relay reader-loss harness is now also available through
+`tools/win32-console-relay-reader-loss-smoke.ps1`. It launches the relay
+attach in a child console window, waits until relay output progress is visible,
+closes that child console window with `WM_CLOSE`, and checks whether the
+resulting logs follow the explicit input-closed transport-loss path. This still
+needs native-host validation before the gap is retired.
+
 High-priority native PowerShell tests:
 
 1. Auth admission:
@@ -654,9 +661,9 @@ High-priority native PowerShell tests:
    observations across more workloads.
 
 7. Native reader failure:
-   reproduce an actual console-input loss without the test knob and verify it
-   follows the explicit transport-lost path already covered by simulated
-   smoke.
+   validate the child-console-close harness on supported native console hosts
+   and verify it reliably follows the explicit transport-lost path already
+   covered by simulated smoke.
 
 8. Handle relay:
    attach from a non-console Win32 frontend only after authenticated handle

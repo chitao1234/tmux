@@ -447,6 +447,11 @@ In progress.
   resizes the real console while backlog is active, verifies that tmux updates
   the attached client's `client_width` and `client_height` before detach, and
   checks both client-side and server-side relay resize logs.
+- A dedicated native reader-loss harness now launches the relay attach inside a
+  child console window, waits until relay output progress is visible, then
+  closes that child console window and checks for the real input-closed
+  transport-loss path. This still needs validation across supported native
+  console hosts before the gap is fully retired.
 - Tune credit sizes and redraw thresholds using large paste and redraw-heavy
   workloads.
 - Verify memory stays bounded under sustained input.
@@ -493,14 +498,20 @@ under MSYS2.
   Relay detach-under-backlog coverage. It detaches while output is still in
   flight, verifies that relay close enters the logged pending state, and checks
   that the attach still exits cleanly.
+- `tools/win32-console-relay-reader-loss-smoke.ps1`
+  Native reader-loss harness. It launches the relay attach in its own child
+  console window, waits for live relay output progress, closes that child
+  console window with `WM_CLOSE`, and checks whether the client and server logs
+  follow the explicit input-closed transport-loss path.
 - `tools/win32-direct-handle-smoke.ps1`
   Regression coverage for non-console direct-handle mode.
 
 ### New relay-focused tests needed
 
 1. Native reader failure without test knobs:
-   reproduce actual console input loss and verify it follows the explicit
-   transport-lost path now covered by simulated smoke.
+   validate the child-console-close harness across supported native console
+   hosts and confirm it reliably follows the explicit transport-lost path now
+   covered by simulated smoke.
 
 ## Exit Criteria
 
