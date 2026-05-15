@@ -44,6 +44,7 @@ static int		 client_console_ready;
 static int		 client_win32_console_relay;
 static int		 client_win32_handle_tty;
 static int		 client_win32_handle_tty_force;
+static int		 client_win32_direct_console;
 static int		 client_win32_handle_tty_input;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
@@ -496,12 +497,15 @@ client_win32_resize_timer_callback(__unused tmux_event_fd fd,
 		log_debug("%s: console size is now %ux%u", __func__, sx, sy);
 		client_win32_resize_sx = sx;
 		client_win32_resize_sy = sy;
-		size.sx = sx;
-		size.sy = sy;
-		size.xpixel = xpixel;
-		size.ypixel = ypixel;
-		proc_send(client_peer, MSG_WIN32_TTY_RESIZE, -1, &size,
-		    sizeof size);
+		if (client_win32_console_relay) {
+			size.sx = sx;
+			size.sy = sy;
+			size.xpixel = xpixel;
+			size.ypixel = ypixel;
+			proc_send(client_peer, MSG_WIN32_TTY_RESIZE, -1,
+			    &size, sizeof size);
+		} else
+			proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
 	}
 
 	if (!client_exitflag)
@@ -516,7 +520,7 @@ client_win32_resize_timer_start(void)
 
 	if (client_win32_resize_timer_set)
 		return;
-	if (!client_win32_console_relay)
+	if (!client_win32_console_relay && !client_win32_direct_console)
 		return;
 
 	if (win32_terminal_get_size(NULL, &sx, &sy, &xpixel, &ypixel) == 0) {
@@ -901,6 +905,8 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	if (client_win32_handle_tty)
 		client_win32_handle_tty_input =
 		    client_win32_handle_tty_input_available();
+	client_win32_direct_console = (client_is_console &&
+	    client_win32_handle_tty && client_win32_handle_tty_force);
 	if (client_win32_handle_tty && client_win32_handle_tty_force)
 		log_debug("forcing direct Win32 terminal handles by "
 		    "TMUX_WIN32_HANDLE_TTY=force");
@@ -984,7 +990,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		tcsetattr(STDIN_FILENO, TCSANOW, &tio);
 	}
 #else
-	if (client_win32_console_relay) {
+	if (client_win32_console_relay || client_win32_direct_console) {
 		if (win32_terminal_init_client(&cause) != 0) {
 			fprintf(stderr, "%s\n", cause);
 			free(cause);

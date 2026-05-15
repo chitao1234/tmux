@@ -416,7 +416,8 @@ Required direction:
   disable this compatibility fallback for no-relay testing.
 - Use `TMUX_WIN32_HANDLE_TTY=force` only as a diagnostic matrix probe for
   native console direct handles. It intentionally bypasses the console handle
-  exclusion and is not a supported product mode.
+  exclusion, initializes/restores console modes, sends direct `MSG_RESIZE`
+  nudges from the console resize poller, and is not a supported product mode.
 - Treat relay removal as gated on usable handles, not merely transferable
   handles.
 - If the full supported-client matrix proves every client path can transfer

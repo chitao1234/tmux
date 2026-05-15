@@ -83,7 +83,10 @@ while the server is running in its normal detached process model.
 - `TMUX_WIN32_HANDLE_TTY=force` is a diagnostic-only override for the
   supported-client matrix. It bypasses the native console handle exclusion so
   testers can prove whether duplicated console handles are usable from the
-  detached server. It is not a supported default path.
+  detached server. In this forced probe mode the client initializes/restores
+  console modes and uses the console resize poller only to send `MSG_RESIZE`
+  nudges; relay-specific `MSG_WIN32_TTY_RESIZE` remains relay-only. It is not
+  a supported default path.
 - Native console relay is selected explicitly as a compatibility fallback and
   can be disabled for no-relay testing with `TMUX_WIN32_CONSOLE_RELAY=0`.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
