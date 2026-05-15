@@ -438,7 +438,11 @@ In progress.
   buffered bytes so bounded relay memory is measured directly.
 - Native output-progress smoke now also forces a status redraw while output
   backlog is active and verifies redraw deferral plus redraw-release behavior,
-  not only the existence of progress ACKs.
+  not only the existence of progress ACKs. It now also snapshots live logs
+  across a lighter output phase and a heavy backlog phase so it can verify that
+  status redraws continue without Win32 threshold deferral below the redraw
+  limit, then confirm that the heavy phase does cross the Win32 threshold and
+  later releases redraw again.
 - Native resize-under-backlog smoke now generates sustained relay output,
   resizes the real console while backlog is active, verifies that tmux updates
   the attached client's `client_width` and `client_height` before detach, and
@@ -460,9 +464,11 @@ under MSYS2.
   checks that relay-mode logs include Win32 input credit activity.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`
   Relay output-progress coverage. It generates sustained console output,
-  forces a status redraw while backlog is active, detaches the correct attach
-  client by PID, and verifies multiple incremental output-progress events plus
-  redraw deferral and redraw-release activity.
+  forces status redraws across both a lighter output phase and a heavy backlog
+  phase, detaches the correct attach client by PID, and verifies multiple
+  incremental output-progress events plus both sides of redraw-threshold
+  behavior: no Win32 threshold deferral below the limit, then explicit Win32
+  threshold deferral and redraw release once the heavy phase crosses it.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseResizeBacklog`
   Relay resize-under-backlog coverage. It generates sustained console output,
   resizes the real console while relay output is still pending, verifies that
@@ -492,11 +498,7 @@ under MSYS2.
 
 ### New relay-focused tests needed
 
-1. Broader redraw tuning:
-   extend the current output-progress coverage across more output patterns and
-   threshold sizes so redraw responsiveness is tuned, not only demonstrated on
-   the current stress case.
-2. Native reader failure without test knobs:
+1. Native reader failure without test knobs:
    reproduce actual console input loss and verify it follows the explicit
    transport-lost path now covered by simulated smoke.
 

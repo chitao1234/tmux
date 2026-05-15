@@ -596,9 +596,11 @@ instead of hanging for an impossible ACK.
 Tracked native-console relay output-progress smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`. It
 verifies that sustained output produces multiple incremental relay progress
-events, forces a status redraw while backlog is active, and records redraw
-deferral plus redraw-release behavior rather than only waiting for a full
-writer drain.
+events, forces status redraws across both a lighter output phase and a heavy
+backlog phase, and records redraw deferral plus redraw-release behavior rather
+than only waiting for a full writer drain. It now also distinguishes the two
+phases so the smoke checks that light backlog does not trigger Win32 threshold
+deferral while heavy backlog does.
 
 Tracked native-console relay resize-under-backlog smoke is now also available
 through `tools/win32-console-relay-smoke.ps1 -ExerciseResizeBacklog`. It
@@ -651,45 +653,40 @@ High-priority native PowerShell tests:
    client-side peak-buffer metrics to include server-side or process-level
    observations across more workloads.
 
-7. Output responsiveness:
-   extend the current output-progress coverage across more output patterns and
-   threshold sizes so redraw responsiveness is tuned broadly, not only
-   demonstrated on the current stress case.
-
-8. Native reader failure:
+7. Native reader failure:
    reproduce an actual console-input loss without the test knob and verify it
    follows the explicit transport-lost path already covered by simulated
    smoke.
 
-9. Handle relay:
+8. Handle relay:
    attach from a non-console Win32 frontend only after authenticated handle
    transfer is implemented.
 
-10. Pane lifecycle:
+9. Pane lifecycle:
    root process exits with delayed ConPTY tail output; verify tail output is
    preserved, dead-pane state is correct, and respawn behavior matches policy.
 
-11. `pipe-pane` lifecycle:
+10. `pipe-pane` lifecycle:
     destroy panes while `pipe-pane -O`, `-I`, and `-IO` helpers still have
     pending data; verify no unintended truncation or helper leak.
 
-12. Passive vs forced teardown:
+11. Passive vs forced teardown:
     verify natural pane exit, remain-on-exit, kill-pane, and respawn use the
     intended Win32 close/kill mode.
 
-13. Command quoting:
+12. Command quoting:
     run popup editors and shell commands with spaces, quotes, `&`, `|`, `^`,
     and parentheses under `cmd.exe`.
 
-14. Long paths:
+13. Long paths:
     start tmux from a long cwd and long executable path; verify server spawn,
     terminfo discovery, `PWD`, and relative paths.
 
-15. Unicode environment and filesystem:
+14. Unicode environment and filesystem:
     launch with non-ASCII environment values and access configs, buffers,
     logs, and history files under non-ASCII paths.
 
-16. Glob semantics:
+15. Glob semantics:
     test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names, and
     mixed slash/backslash input for `source-file`.
 

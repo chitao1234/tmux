@@ -357,6 +357,14 @@ function Get-LogMaximumCapture {
     $maximum
 }
 
+function Get-CurrentTmuxLogs {
+    param(
+        [string]$Path
+    )
+
+    @(Get-ChildItem -LiteralPath $Path -Filter "tmux-*.log" -File)
+}
+
 function Get-TmuxClientSize {
     param(
         [string]$Config,
@@ -435,6 +443,12 @@ try {
     $restoreConsoleSize = $null
     $resizeTarget = $null
     $resizeObserved = $null
+    $outputProgressSmallProgressCount = -1
+    $outputProgressSmallStatusRedrawCount = -1
+    $outputProgressSmallThresholdDeferredCount = -1
+    $outputProgressLargeProgressCount = -1
+    $outputProgressLargeStatusRedrawCount = -1
+    $outputProgressLargeThresholdDeferredCount = -1
 
     $env:TMUX = $null
     $env:TMUX_WIN32_HANDLE_TTY = "0"
@@ -606,7 +620,57 @@ try {
             ) -TimeoutMs 20000 -AfterStart {
                 param([int]$AttachPid)
 
+                $baselineLogs = Get-CurrentTmuxLogs -Path $root
+                $baselineProgress = Get-LogMatchCount $baselineLogs "client_win32_output_progress: progressed"
+                $baselineStatusRedraw = Get-LogMatchCount $baselineLogs "redraw status"
+                $baselineThresholdDeferred = Get-LogMatchCount $baselineLogs "Win32 output bytes >"
+
                 Start-Sleep -Milliseconds 750
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    "for /L %i in (1,1,300) do @echo relay-progress-light-0123456789abcdefghijklmnopqrstuvwxyz"
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+                Start-Sleep -Milliseconds 100
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "set-option",
+                    "-g",
+                    "status-left",
+                    "relay-output-progress-light"
+                ) | Out-Null
+                Start-Sleep -Milliseconds 1250
+
+                $lightLogs = Get-CurrentTmuxLogs -Path $root
+                $lightProgress = Get-LogMatchCount $lightLogs "client_win32_output_progress: progressed"
+                $lightStatusRedraw = Get-LogMatchCount $lightLogs "redraw status"
+                $lightThresholdDeferred = Get-LogMatchCount $lightLogs "Win32 output bytes >"
+                $script:outputProgressSmallProgressCount =
+                    $lightProgress - $baselineProgress
+                $script:outputProgressSmallStatusRedrawCount =
+                    $lightStatusRedraw - $baselineStatusRedraw
+                $script:outputProgressSmallThresholdDeferredCount =
+                    $lightThresholdDeferred - $baselineThresholdDeferred
+
                 Invoke-Tmux -Arguments @(
                     "-f",
                     $config,
@@ -640,6 +704,18 @@ try {
                     "relay-output-progress-backlog"
                 ) | Out-Null
                 Start-Sleep -Milliseconds 1500
+
+                $heavyLogs = Get-CurrentTmuxLogs -Path $root
+                $heavyProgress = Get-LogMatchCount $heavyLogs "client_win32_output_progress: progressed"
+                $heavyStatusRedraw = Get-LogMatchCount $heavyLogs "redraw status"
+                $heavyThresholdDeferred = Get-LogMatchCount $heavyLogs "Win32 output bytes >"
+                $script:outputProgressLargeProgressCount =
+                    $heavyProgress - $lightProgress
+                $script:outputProgressLargeStatusRedrawCount =
+                    $heavyStatusRedraw - $lightStatusRedraw
+                $script:outputProgressLargeThresholdDeferredCount =
+                    $heavyThresholdDeferred - $lightThresholdDeferred
+
                 Invoke-Tmux -Arguments @(
                     "-f",
                     $config,
@@ -758,7 +834,9 @@ try {
     $outputProgressCount = Get-LogMatchCount $attachLogs "client_win32_output_progress: progressed"
     $redrawDeferredCount = Get-LogMatchCount $logs "redraw deferred"
     $waitingForRedrawCount = Get-LogMatchCount $logs "waiting for redraw, [0-9]+ bytes left"
-    $statusRedraw = Test-AnyLogMatch $logs "redraw status"
+    $statusRedrawCount = Get-LogMatchCount $logs "redraw status"
+    $statusRedraw = $statusRedrawCount -ge 1
+    $win32ThresholdDeferredCount = Get-LogMatchCount $logs "Win32 output bytes >"
     $resizeClientLog = $false
     $resizeServerLog = $false
     if ($ExerciseResizeBacklog -and $resizeTarget -ne $null) {
@@ -795,8 +873,15 @@ try {
     if ($ExerciseOutputProgress) {
         Write-Host "  output progress events: $outputProgressCount"
         Write-Host "  redraw deferred events: $redrawDeferredCount"
+        Write-Host "  Win32 threshold deferral events: $win32ThresholdDeferredCount"
         Write-Host "  waiting-for-redraw events: $waitingForRedrawCount"
-        Write-Host "  status redraw observed: $statusRedraw"
+        Write-Host "  status redraw events: $statusRedrawCount"
+        Write-Host "  light-phase progress events: $outputProgressSmallProgressCount"
+        Write-Host "  light-phase status redraw events: $outputProgressSmallStatusRedrawCount"
+        Write-Host "  light-phase Win32 threshold deferrals: $outputProgressSmallThresholdDeferredCount"
+        Write-Host "  heavy-phase progress events: $outputProgressLargeProgressCount"
+        Write-Host "  heavy-phase status redraw events: $outputProgressLargeStatusRedrawCount"
+        Write-Host "  heavy-phase Win32 threshold deferrals: $outputProgressLargeThresholdDeferredCount"
     }
     if ($ExerciseResizeBacklog) {
         if ($resizeTarget -ne $null) {
@@ -846,7 +931,14 @@ try {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
         $inputCredit -and -not $directOutput -and
             $outputProgressCount -ge 2 -and $redrawDeferredCount -ge 1 -and
+            $win32ThresholdDeferredCount -ge 1 -and
             $waitingForRedrawCount -ge 1 -and $statusRedraw -and
+            $outputProgressSmallProgressCount -ge 1 -and
+            $outputProgressSmallStatusRedrawCount -ge 1 -and
+            $outputProgressSmallThresholdDeferredCount -eq 0 -and
+            $outputProgressLargeProgressCount -ge 1 -and
+            $outputProgressLargeStatusRedrawCount -ge 1 -and
+            $outputProgressLargeThresholdDeferredCount -ge 1 -and
             $failures.Count -eq 0
     } elseif ($ExerciseResizeBacklog) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
