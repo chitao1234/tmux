@@ -5,8 +5,15 @@ Date: 2026-05-15
 Status: Implemented for non-console direct-handle I/O; native-console relay
 quarantined
 
+Scope note:
+
+This plan now describes the direct-handle path for non-console Win32 clients.
+The native-console product path is covered separately in
+[`tools/win32-console-relay-plan.md`](win32-console-relay-plan.md).
+
 Related docs:
 
+- [`tools/win32-console-relay-plan.md`](win32-console-relay-plan.md)
 - [`tools/win32-io-service-plan.md`](win32-io-service-plan.md)
 - [`tools/win32-port-findings.md`](win32-port-findings.md)
 
