@@ -78,16 +78,18 @@ Completed since this plan was drafted:
 
 Remaining boundary issues:
 
-- `file.c` still has non-Win32 `fopen()` / `open()` branches in shared code,
-  and the Win32 path should be re-audited to confirm there is no remaining
-  fallback to narrow CRT semantics for Windows-facing operations.
+- The shared `fopen()` / `open()` calls still need periodic audit, but the
+  active Win32 paths in [`file.c`](../file.c), [`status.c`](../status.c), and
+  [`popup.c`](../popup.c) already route through Win32 helper-backed file I/O
+  rather than narrow CRT filesystem calls.
 - Some Win32 runtime knob lookups in [`client.c`](../client.c) still read the
   process environment directly via `getenv()`. That is acceptable only if we
-  intentionally treat them as process-local diagnostics rather than tmux
-  canonical environment state.
+  intentionally treat them as process-local diagnostics and terminal metadata
+  rather than tmux canonical environment state.
 - `utf8.c` still exposes `utf8_towc()` / `utf8_fromwc()` even though Windows
   `wchar_t` is UTF-16 code-unit sized, not a stable internal scalar type.
-- Validation coverage is still incomplete for some Unicode file and cwd cases.
+- Validation still needs more console-boundary stress coverage, especially for
+  multibyte output splits and explicit invalid UTF-8 writer behavior.
 
 ## Implementation Stages
 
@@ -146,8 +148,10 @@ Remaining boundary issues:
   - non-ASCII `HOME`, `USERPROFILE`, `SHELL`, `EDITOR`, `VISUAL`, and `TMUX`;
   - non-ASCII config paths;
   - non-ASCII socket and IPC paths;
-  - Unicode file read/write paths;
-  - child process startup from a Unicode cwd;
+  - Done: Unicode file read/write paths are covered by
+    [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1).
+  - Done: child process startup from a Unicode cwd is covered by
+    [`tools/win32-utf8-boundary-smoke.ps1`](win32-utf8-boundary-smoke.ps1).
   - console output that crosses multibyte boundaries;
   - invalid UTF-8 behavior at the console writer boundary.
 - Verify that the Win32 path no longer depends on raw `_environ`,
@@ -191,7 +195,7 @@ This plan is complete when:
 2. Decide whether the remaining Win32-only `getenv()` reads in
    [`client.c`](../client.c) should stay process-local or move behind an
    explicit helper.
-3. Add smoke coverage for Unicode file read/write paths and child startup from
-   a Unicode cwd.
+3. Expand smoke coverage toward console-boundary edge cases, especially
+   multibyte output splits and invalid UTF-8 rejection at the writer boundary.
 4. Decide whether `utf8_towc()` / `utf8_fromwc()` should be removed,
    Win32-scoped, or left as internal-only helpers with clearer documentation.

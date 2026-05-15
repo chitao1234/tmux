@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-utf8-boundary",
     [switch]$KeepArtifacts
@@ -138,15 +138,47 @@ function Test-ByteSequence {
     return $false
 }
 
+function Wait-ForPath {
+    param(
+        [string]$Path,
+        [int]$TimeoutSeconds = 5,
+        [string]$Description = $Path
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (-not (Test-Path -LiteralPath $Path)) {
+        if ([DateTime]::UtcNow -gt $deadline) {
+            throw "timed out waiting for $Description"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Normalize-ComparablePath {
+    param([string]$Path)
+
+    if ($null -eq $Path) {
+        return $null
+    }
+    return $Path.TrimEnd('\', '/')
+}
+
 $script:TmuxPath = [System.IO.Path]::GetFullPath($TmuxPath)
 $root = Join-Path $env:TEMP ("tmux-u8-" + [guid]::NewGuid().ToString("N"))
 $caseDir = Join-Path $root "工作目录"
+$childCwdDir = Join-Path $caseDir "子进程目录"
+$childOutputPath = Join-Path $childCwdDir "子输出.txt"
+$bufferPath = Join-Path $caseDir "缓冲区-文件.txt"
 $configPath = Join-Path $root "配置.tmux.conf"
 $label = $LabelPrefix + "-" + [guid]::NewGuid().ToString("N")
 $unicodeLabel = "标签-" + [guid]::NewGuid().ToString("N")
 $tmuxValuePath = Join-Path $caseDir "tmux-value.txt"
+$bufferName = "unicode-file"
+$loadedBufferName = "unicode-load"
+$bufferContent = "文件_内容_边界"
 
 New-Item -ItemType Directory -Path $caseDir -Force | Out-Null
+New-Item -ItemType Directory -Path $childCwdDir -Force | Out-Null
 [System.IO.File]::WriteAllText(
     $configPath,
     "set -g status-left '边界_OK'`n",
@@ -179,6 +211,50 @@ try {
     $showStatusText = $showStatus.Output -join "`n"
     Assert-True ($showStatusText -match "status-left.*边界_OK") ("UTF-8 config path did not apply: " + $showStatusText)
 
+    Invoke-Tmux -Arguments @("-L", $label, "set-buffer", "-b", $bufferName, $bufferContent) -WorkingDirectory $caseDir -Environment $envMap | Out-Null
+    Invoke-Tmux -Arguments @("-L", $label, "save-buffer", "-b", $bufferName, $bufferPath) -WorkingDirectory $caseDir -Environment $envMap | Out-Null
+    $savedBufferText = [System.IO.File]::ReadAllText(
+        $bufferPath,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Assert-True ($savedBufferText -eq $bufferContent) "Unicode file write path did not preserve buffer content"
+
+    Invoke-Tmux -Arguments @("-L", $label, "load-buffer", "-b", $loadedBufferName, $bufferPath) -WorkingDirectory $caseDir -Environment $envMap | Out-Null
+    $showLoadedBuffer = Invoke-Tmux -Arguments @("-L", $label, "show-buffer", "-b", $loadedBufferName) -WorkingDirectory $caseDir -Environment $envMap
+    $loadedBufferText = $showLoadedBuffer.Output -join "`n"
+    Assert-True ($loadedBufferText -eq $bufferContent) "Unicode file read path did not round-trip buffer content"
+
+    Invoke-Tmux -Arguments @(
+        "-L",
+        $label,
+        "new-session",
+        "-d",
+        "-s",
+        "cwdcheck",
+        "-c",
+        $childCwdDir,
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        '[System.IO.File]::WriteAllText(".\子输出.txt", (Get-Location).Path, [System.Text.UTF8Encoding]::new($false))'
+    ) -WorkingDirectory $root -Environment $envMap | Out-Null
+
+    $showPaneCwd = Invoke-Tmux -Arguments @("-L", $label, "display-message", "-p", "-t", "cwdcheck", "#{pane_current_path}") -WorkingDirectory $caseDir -Environment $envMap
+    $paneCwdText = $showPaneCwd.Output | Select-Object -First 1
+    Assert-True (
+        (Normalize-ComparablePath $paneCwdText) -eq (Normalize-ComparablePath $childCwdDir)
+    ) ("Pane current path did not preserve the Unicode cwd: " + $paneCwdText)
+
+    Wait-ForPath -Path $childOutputPath -Description "Unicode child cwd output"
+    $childCwdText = [System.IO.File]::ReadAllText(
+        $childOutputPath,
+        [System.Text.UTF8Encoding]::new($false)
+    ).Trim()
+    Assert-True (
+        (Normalize-ComparablePath $childCwdText) -eq (Normalize-ComparablePath $childCwdDir)
+    ) ("Child process startup from Unicode cwd did not preserve the working directory: " + $childCwdText)
+
     $captureEnvMap = @{}
     foreach ($entry in $envMap.GetEnumerator()) {
         $captureEnvMap[$entry.Key] = $entry.Value
@@ -199,13 +275,7 @@ try {
         '[System.IO.File]::WriteAllText($env:TMUX_CAPTURE, $env:TMUX, [System.Text.UTF8Encoding]::new($false))'
     ) -WorkingDirectory $caseDir -Environment $captureEnvMap | Out-Null
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
-    while (-not (Test-Path -LiteralPath $tmuxValuePath)) {
-        if ([DateTime]::UtcNow -gt $deadline) {
-            throw "timed out waiting for child TMUX capture from unicode-labeled server"
-        }
-        Start-Sleep -Milliseconds 100
-    }
+    Wait-ForPath -Path $tmuxValuePath -Description "child TMUX capture from unicode-labeled server"
 
     $showSocket = Invoke-Tmux -Arguments @("-L", $unicodeLabel, "display-message", "-p", "#{socket_path}") -WorkingDirectory $caseDir -Environment $envMap
     $socketPath = $showSocket.Output | Select-Object -First 1
