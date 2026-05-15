@@ -404,6 +404,10 @@ side of this failure from a real Windows PTY: forced direct mode duplicated
 stdin/stdout and sent size identify without relay, then the detached server
 failed direct console input with `ERROR_INVALID_HANDLE`.
 
+The quarantined relay path itself was also exercised from the same PTY and
+completed attach/detach successfully while logging
+`IDENTIFY_WIN32_TERMINAL` and the relay fallback debug line.
+
 Why it matters:
 
 Handle transfer alone is not enough to replace the client console relay for
@@ -661,6 +665,9 @@ Manual native-console direct-handle probing is tracked in
 console because redirected Codex or CI stdio is not a native console client
 shape. Current probe evidence shows duplicated console handles are
 transferable but not usable for detached server-side input.
+
+Native-console relay fallback smoke remains the supported compatibility path
+for that client shape.
 
 High-priority native PowerShell tests:
 

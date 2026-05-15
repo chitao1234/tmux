@@ -94,6 +94,10 @@ while the server is running in its normal detached process model.
   stdin duplicated and size identify succeeded, no relay was used, but the
   detached server failed direct console input with `ERROR_INVALID_HANDLE`.
   Native console remains the documented reason to keep the relay quarantined.
+- A native-console relay attach/detach smoke has also been run from the same
+  Windows PTY. The relay path attached and detached successfully, identified
+  with `MSG_IDENTIFY_WIN32_TERMINAL`, and did not use direct stdin/stdout
+  handle identify for the relay client.
 - `server-client.c` accepts `MSG_IDENTIFY_WIN32_STDIN` and
   `MSG_IDENTIFY_WIN32_STDOUT`, verifies that the claimed PID matches
   `MSG_IDENTIFY_CLIENTPID`, duplicates the handles from the client process,
@@ -429,6 +433,10 @@ Current result: the probe can transfer console stdin/stdout handles but fails
 server-side direct console input from the detached server with
 `ERROR_INVALID_HANDLE`. That is a usable-handle failure, so relay removal is
 not currently justified for native console clients.
+
+Current relay result: a real Windows PTY attach/detach smoke succeeds on the
+quarantined native-console relay path and logs `MSG_IDENTIFY_WIN32_TERMINAL`
+without direct stdin/stdout handle identify for the relay client.
 
 ### Baseline Regression
 
