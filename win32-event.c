@@ -386,7 +386,7 @@ win32_socketpair(SOCKET pair[2])
 			sun.sun_path[i] = '\\';
 	}
 
-	(void)unlink(path);
+	(void)win32_unlink_utf8(path);
 
 	listener = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listener == INVALID_SOCKET)
@@ -406,7 +406,7 @@ win32_socketpair(SOCKET pair[2])
 		goto fail;
 
 	closesocket(listener);
-	(void)unlink(path);
+	(void)win32_unlink_utf8(path);
 	free(path);
 	pair[0] = client;
 	pair[1] = server;
@@ -422,7 +422,7 @@ fail:
 	if (listener != INVALID_SOCKET)
 		closesocket(listener);
 	if (path != NULL) {
-		(void)unlink(path);
+		(void)win32_unlink_utf8(path);
 		free(path);
 	}
 	errno = saved_errno;
