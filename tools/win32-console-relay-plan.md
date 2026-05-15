@@ -2,7 +2,7 @@
 
 Date: 2026-05-15
 
-Status: Draft
+Status: In progress; Stage 2 output-abort semantics implemented
 
 Related docs:
 
@@ -408,27 +408,28 @@ under MSYS2.
 
 - `tools/win32-console-relay-smoke.ps1`
   Baseline attach and detach on the native-console relay path.
+- `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`
+  Relay output-loss coverage. It verifies that output failure sends explicit
+  abort accounting and that attach exits instead of hanging for an impossible
+  ACK.
 - `tools/win32-direct-handle-smoke.ps1`
   Regression coverage for non-console direct-handle mode.
 
 ### New relay-focused tests needed
 
-1. Lost output:
-   close or invalidate the native console while output bytes are pending and
-   verify the server exits or detaches without waiting forever.
-2. Large paste:
+1. Large paste:
    paste enough input to exceed the intended credit window and verify relay
    reading pauses and resumes without unbounded memory growth.
-3. Redraw-heavy output:
+2. Redraw-heavy output:
    generate steady output and verify incremental progress keeps redraw and
    status updates responsive.
-4. Detach under output backlog:
+3. Detach under output backlog:
    detach while output is still in flight and verify close completes with
    either progress or abort.
-5. Reader failure:
+4. Reader failure:
    lose console input while output remains healthy and verify explicit
    transport-lost handling.
-6. Resize during backlog:
+5. Resize during backlog:
    resize during heavy output and verify resize messages are not starved behind
    coarse output waiting.
 

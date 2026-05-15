@@ -1,6 +1,7 @@
 param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-console-relay-smoke",
+    [switch]$SimulateOutputLoss,
     [switch]$RemoveLogsOnSuccess
 )
 
@@ -83,7 +84,10 @@ function Invoke-Tmux {
 }
 
 function Invoke-TmuxInteractive {
-    param([string[]]$Arguments)
+    param(
+        [string[]]$Arguments,
+        [int]$TimeoutMs = 0
+    )
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $script:TmuxPath
@@ -92,7 +96,14 @@ function Invoke-TmuxInteractive {
     $psi.Arguments = Join-Win32Arguments $Arguments
 
     $process = [System.Diagnostics.Process]::Start($psi)
-    $process.WaitForExit()
+    if ($TimeoutMs -gt 0) {
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            $process.Kill()
+            throw "tmux $($Arguments -join ' ') did not exit within ${TimeoutMs}ms"
+        }
+    } else {
+        $process.WaitForExit()
+    }
     $process.ExitCode
 }
 
@@ -136,6 +147,7 @@ $savedEnv = @{
     TMUX = $env:TMUX
     TMUX_WIN32_HANDLE_TTY = $env:TMUX_WIN32_HANDLE_TTY
     TMUX_WIN32_CONSOLE_RELAY = $env:TMUX_WIN32_CONSOLE_RELAY
+    TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
 }
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-relay-smoke-" + [Guid]::NewGuid().ToString("N"))
@@ -148,6 +160,11 @@ try {
     $env:TMUX = $null
     $env:TMUX_WIN32_HANDLE_TTY = "0"
     $env:TMUX_WIN32_CONSOLE_RELAY = $null
+    if ($SimulateOutputLoss) {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = "1"
+    } else {
+        $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $null
+    }
 
     Push-Location $root
     try {
@@ -155,9 +172,32 @@ try {
         Invoke-Tmux -Arguments @("-f", $config, "-vv", "-L", $label, "new-session", "-d", "-s", "relay", "cmd.exe") | Out-Null
 
         Write-Host "Launching native-console relay attach."
-        Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
-
-        $attachCode = Invoke-TmuxInteractive -Arguments @("-f", $config, "-vv", "-L", $label, "attach-session", "-t", "relay")
+        if ($SimulateOutputLoss) {
+            Write-Host "Relay output loss is being simulated. Attach should fail automatically."
+            Write-Host "Logs will be checked afterward: $root"
+            $attachCode = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 10000
+        } else {
+            Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
+            $attachCode = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            )
+        }
 
         Invoke-Tmux -Arguments @("-f", $config, "-L", $label, "kill-server") -AllowFailure | Out-Null
     } finally {
@@ -168,6 +208,7 @@ try {
     $relayFallback = Test-AnyLogMatch $logs "using Win32 console relay fallback"
     $relayIdentify = Test-AnyLogMatch $logs "IDENTIFY_WIN32_TERMINAL"
     $directOutput = Test-AnyLogMatch $logs "using direct Win32 terminal output|IDENTIFY_WIN32_STDOUT duplicated|IDENTIFY_WIN32_STDIN duplicated"
+    $outputAbort = Test-AnyLogMatch $logs "Win32 output abort|dropping [0-9]+ pending bytes|simulating Win32 console relay output loss"
     $failures = @(Get-LogMatches $logs "rejected|ReadFile failed|WriteFile failed|output error")
 
     Write-Host ""
@@ -176,6 +217,9 @@ try {
     Write-Host "  relay fallback selected: $relayFallback"
     Write-Host "  relay terminal identify: $relayIdentify"
     Write-Host "  direct handle path used: $directOutput"
+    if ($SimulateOutputLoss) {
+        Write-Host "  output abort observed: $outputAbort"
+    }
     Write-Host "  logs: $root"
 
     if ($failures.Count -ne 0) {
@@ -184,11 +228,20 @@ try {
         $failures | ForEach-Object { Write-Host "  $_" }
     }
 
-    $passed = $attachCode -eq 0 -and $relayFallback -and $relayIdentify -and
-        -not $directOutput -and $failures.Count -eq 0
+    if ($SimulateOutputLoss) {
+        $passed = $attachCode -ne 0 -and $relayFallback -and $relayIdentify -and
+            -not $directOutput -and $outputAbort -and $failures.Count -eq 0
+    } else {
+        $passed = $attachCode -eq 0 -and $relayFallback -and $relayIdentify -and
+            -not $directOutput -and $failures.Count -eq 0
+    }
     if ($passed) {
         Write-Host ""
-        Write-Host "Native-console relay fallback smoke passed."
+        if ($SimulateOutputLoss) {
+            Write-Host "Native-console relay output-loss smoke passed."
+        } else {
+            Write-Host "Native-console relay fallback smoke passed."
+        }
         if ($RemoveLogsOnSuccess) {
             Remove-Item -LiteralPath $root -Recurse -Force
         }
@@ -196,10 +249,15 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Native-console relay fallback smoke failed."
+    if ($SimulateOutputLoss) {
+        Write-Host "Native-console relay output-loss smoke failed."
+    } else {
+        Write-Host "Native-console relay fallback smoke failed."
+    }
     exit 1
 } finally {
     $env:TMUX = $savedEnv.TMUX
     $env:TMUX_WIN32_HANDLE_TTY = $savedEnv.TMUX_WIN32_HANDLE_TTY
     $env:TMUX_WIN32_CONSOLE_RELAY = $savedEnv.TMUX_WIN32_CONSOLE_RELAY
+    $env:TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS = $savedEnv.TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS
 }

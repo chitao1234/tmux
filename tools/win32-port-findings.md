@@ -29,8 +29,8 @@ Unix-shaped contract while the underlying object is native Windows:
 2. Server startup has a normal-path lock, but foreground startup, path aliases,
    slash-root paths, and unconditional socket unlink still leave race and
    confusion windows.
-3. Console terminal relay still needs protocol-level flow control and abort
-   semantics, not just better handle I/O.
+3. Console terminal relay still needs protocol-level flow control and
+   finer-grained output progress, not just better handle I/O.
 4. Pane/job lifecycle still conflates process exit, output EOF, dead-pane
    state, passive cleanup, and forced termination.
 5. Native path, quoting, long-path, and Unicode environment support remains
@@ -105,41 +105,6 @@ Required direction:
   lower-integrity access path.
 - Decide a policy for reparse points and junctions before treating an existing
   directory as trusted.
-
-### P0: Lost console output can deadlock client exit
-
-Files:
-
-- [`client.c`](../client.c): `client_win32_output_error_callback()` clears the
-  client pending counter and sends only `MSG_EXITING`.
-- [`tty.c`](../tty.c): `tty_close_graceful()` waits while
-  `c->win32_tty_out_pending` is nonzero.
-- [`server-client.c`](../server-client.c):
-  `server_client_win32_tty_output_ack()` is the only path that decrements the
-  server pending counter.
-
-Problem:
-
-If the client console output writer fails while bytes are in flight, the client
-sets `client_win32_output_pending` to zero and sends `MSG_EXITING`, but it does
-not tell the server how many already-sent bytes were dropped. The server then
-tries graceful close, sees `c->win32_tty_out_pending != 0`, and waits for an
-ACK that cannot arrive.
-
-Why it matters:
-
-Console loss, terminal close, or output handle failure can strand a client in
-the detach/exit handshake. This is a protocol bug: the I/O service can report
-failure, but the tmux client/server protocol has no "abort these pending
-terminal bytes" message.
-
-Required direction:
-
-- Add an explicit Win32 terminal-output abort/drop message carrying the number
-  of bytes or a generation ID to invalidate outstanding output.
-- Alternatively, make server-side `MSG_EXITING` from a lost Win32 TTY discard
-  pending console output and complete close.
-- Keep normal ACK-on-drain behavior for successful output.
 
 ### P1: Win32 startup locking still has bypasses and aliasing
 
@@ -637,6 +602,10 @@ current implementation:
   endpoints rather than blocking the server indefinitely.
 - Terminal output ACKs now happen after client-side writer drain, not when the
   IPC message is merely received.
+- Native-console relay output loss now sends explicit
+  `MSG_WIN32_TTY_OUTPUT_ABORT`, and relay close no longer waits forever for an
+  ACK that cannot arrive. The tracked smoke entry point is
+  `tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`.
 - Terminal UTF-8 output decoding is incremental across client writer chunks.
 - Win32 console input is staged in `client_win32_input_pending` and is not
   silently discarded on `proc_send()` hard failure.
@@ -669,6 +638,11 @@ transferable but not usable for detached server-side input.
 Native-console relay fallback smoke remains the supported compatibility path
 for that client shape. The tracked manual smoke entry point is
 `tools/win32-console-relay-smoke.ps1`.
+
+Tracked native-console relay output-loss smoke is now also available through
+`tools/win32-console-relay-smoke.ps1 -SimulateOutputLoss`. It verifies that a
+relay output failure sends an explicit abort and that attach exits promptly
+instead of hanging for an impossible ACK.
 
 High-priority native PowerShell tests:
 

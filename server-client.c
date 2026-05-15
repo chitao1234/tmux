@@ -59,6 +59,8 @@ static void	server_client_report_theme(struct client *, enum client_theme);
 
 static int	server_client_win32_tty_output_ack(struct client *,
 		    struct imsg *);
+static int	server_client_win32_tty_output_abort(struct client *,
+		    struct imsg *);
 static int	server_client_win32_resize(struct client *, struct imsg *);
 static int	server_client_win32_tty_input(struct client *, struct imsg *);
 static int	server_client_win32_identify_handle(struct client *,
@@ -2349,6 +2351,10 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		if (server_client_win32_tty_output_ack(c, imsg) != 0)
 			goto bad;
 		break;
+	case MSG_WIN32_TTY_OUTPUT_ABORT:
+		if (server_client_win32_tty_output_abort(c, imsg) != 0)
+			goto bad;
+		break;
 	case MSG_WIN32_TTY_RESIZE:
 		if (server_client_win32_resize(c, imsg) != 0)
 			goto bad;
@@ -2553,6 +2559,37 @@ server_client_win32_tty_input(struct client *c, struct imsg *imsg)
 }
 
 static int
+server_client_win32_tty_output_update(struct client *c, size_t size,
+    const char *what, int schedule)
+{
+	if (size > c->win32_tty_out_pending)
+		return (-1);
+
+	c->win32_tty_out_pending -= size;
+	if (c->redraw > 0) {
+		if (size >= c->redraw)
+			c->redraw = 0;
+		else
+			c->redraw -= size;
+		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
+		    c->redraw);
+	}
+	log_debug("%s: Win32 output %s %zu bytes, %zu pending", c->name, what,
+	    size, c->win32_tty_out_pending);
+
+	if ((c->flags & CLIENT_TERMINAL) &&
+	    (c->tty.flags & TTY_OPENED)) {
+		if (schedule && EVBUFFER_LENGTH(c->tty.out) != 0)
+			tty_write_pending(&c->tty);
+		if ((c->tty.flags & TTY_CLOSEPENDING) &&
+		    c->win32_tty_out_pending == 0 &&
+		    tty_close_graceful(&c->tty) == 0)
+			proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
+	}
+	return (0);
+}
+
+static int
 server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
 {
 	struct msg_win32_tty_output_ack ack;
@@ -2567,31 +2604,24 @@ server_client_win32_tty_output_ack(struct client *c, struct imsg *imsg)
 		return (-1);
 	memcpy(&ack, imsg->data, sizeof ack);
 	size = ack.size;
-	if (size > c->win32_tty_out_pending)
+	return (server_client_win32_tty_output_update(c, size, "ack", 1));
+}
+
+static int
+server_client_win32_tty_output_abort(struct client *c, struct imsg *imsg)
+{
+	struct msg_win32_tty_output_abort abort;
+	ssize_t			       datalen;
+
+	if (!c->win32_console)
 		return (-1);
 
-	c->win32_tty_out_pending -= size;
-	if (c->redraw > 0) {
-		if (size >= c->redraw)
-			c->redraw = 0;
-		else
-			c->redraw -= size;
-		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
-		    c->redraw);
-	}
-	log_debug("%s: Win32 output ack %zu bytes, %zu pending", c->name,
-	    size, c->win32_tty_out_pending);
-
-	if ((c->flags & CLIENT_TERMINAL) &&
-	    (c->tty.flags & TTY_OPENED)) {
-		if (EVBUFFER_LENGTH(c->tty.out) != 0)
-			tty_write_pending(&c->tty);
-		if ((c->tty.flags & TTY_CLOSEPENDING) &&
-		    c->win32_tty_out_pending == 0 &&
-		    tty_close_graceful(&c->tty) == 0)
-			proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
-	}
-	return (0);
+	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+	if (datalen != sizeof abort)
+		return (-1);
+	memcpy(&abort, imsg->data, sizeof abort);
+	return (server_client_win32_tty_output_update(c, abort.size, "abort",
+	    0));
 }
 
 static int

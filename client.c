@@ -46,6 +46,8 @@ static int		 client_win32_handle_tty;
 static int		 client_win32_handle_tty_force;
 static int		 client_win32_direct_console;
 static int		 client_win32_handle_tty_input;
+static int		 client_win32_relay_test_output_loss;
+static int		 client_win32_relay_test_output_loss_fired;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static struct evbuffer	*client_win32_input_pending;
@@ -95,12 +97,14 @@ static void		 client_win32_input_send_failed(void);
 static void		 client_win32_input_start(void);
 static void		 client_win32_input_stop(void);
 static void		 client_win32_output_callback(void *);
+static void		 client_win32_output_abort(size_t);
 static void		 client_win32_output_error_callback(void *);
 static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_console_relay_enabled(void);
+static int		 client_win32_console_relay_test_output_loss_enabled(void);
 static int		 client_win32_handle_tty_enabled(void);
 static int		 client_win32_handle_tty_forced(void);
 static int		 client_win32_handle_tty_output_available(void);
@@ -382,6 +386,22 @@ client_win32_console_relay_enabled(void)
 	if (value != NULL && strcmp(value, "0") == 0)
 		return (0);
 	return (1);
+}
+
+static int
+client_win32_console_relay_test_output_loss_enabled(void)
+{
+	const char	*value;
+
+	if (client_win32_relay_test_output_loss != 0)
+		return (client_win32_relay_test_output_loss > 0);
+
+	value = getenv("TMUX_WIN32_CONSOLE_RELAY_TEST_OUTPUT_LOSS");
+	if (value != NULL && strcmp(value, "0") != 0)
+		client_win32_relay_test_output_loss = 1;
+	else
+		client_win32_relay_test_output_loss = -1;
+	return (client_win32_relay_test_output_loss > 0);
 }
 
 static int
@@ -693,16 +713,32 @@ client_win32_output_callback(__unused void *arg)
 }
 
 static void
-client_win32_output_error_callback(__unused void *arg)
+client_win32_output_abort(size_t dropped)
 {
-	log_debug("%s: console output failed", __func__);
+	struct msg_win32_tty_output_abort	abort;
+
+	log_debug("%s: dropping %zu pending bytes", __func__, dropped);
 	client_win32_output_pending = 0;
 	client_exitreason = CLIENT_EXIT_LOST_TTY;
 	client_exitval = 1;
+	if (client_peer != NULL && dropped != 0) {
+		if (dropped > UINT32_MAX)
+			fatalx("Win32 console relay abort too large");
+		abort.size = dropped;
+		proc_send(client_peer, MSG_WIN32_TTY_OUTPUT_ABORT, -1, &abort,
+		    sizeof abort);
+	}
 	if (client_peer != NULL)
 		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 	if (client_exitflag)
 		client_exit();
+}
+
+static void
+client_win32_output_error_callback(__unused void *arg)
+{
+	log_debug("%s: console output failed", __func__);
+	client_win32_output_abort(client_win32_output_pending);
 }
 
 static void
@@ -771,12 +807,20 @@ client_win32_tty_output(char *data, ssize_t datalen)
 		    sizeof ack);
 		return;
 	}
+	if (client_win32_console_relay_test_output_loss_enabled() &&
+	    !client_win32_relay_test_output_loss_fired) {
+		client_win32_relay_test_output_loss_fired = 1;
+		log_debug("%s: simulating Win32 console relay output loss",
+		    __func__);
+		client_win32_output_abort(client_win32_output_pending +
+		    (size_t)datalen);
+		return;
+	}
 	if (client_win32_output_start() != 0 ||
 	    win32_io_writer_write(client_win32_output, data,
 	    datalen) == -1) {
-		client_exitreason = CLIENT_EXIT_LOST_TTY;
-		client_exitval = 1;
-		proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
+		client_win32_output_abort(client_win32_output_pending +
+		    (size_t)datalen);
 		return;
 	}
 	client_win32_output_pending += datalen;
