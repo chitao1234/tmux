@@ -30,6 +30,8 @@ Current tree status:
 - endpoint resolution already produces a shared `struct ipc_endpoint`;
 - coordination and listener ownership now have backend-neutral shared APIs and
   backend-owned private state;
+- Win32 endpoint canonicalization now normalizes slash spelling and case
+  differences for endpoint identity;
 - shared code now calls backend operations for connect, probe, coordination,
   listener create, stale removal, listener destruction, and startup handoff;
 - `client.c` now calls one shared `connect-or-start` helper and no longer

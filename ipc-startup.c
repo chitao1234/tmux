@@ -638,6 +638,7 @@ ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 		goto fail;
 	}
 	free(wpath);
+	CharLowerBuffW(wfull, (DWORD)wcslen(wfull));
 
 	full = win32_wide_to_utf8(wfull);
 	free(wfull);

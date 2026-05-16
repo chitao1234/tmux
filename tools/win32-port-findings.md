@@ -390,8 +390,10 @@ current implementation:
   canonicalization, connect-or-start sequencing, stale probing, listener
   creation retries, and backend startup handoff behind one abstraction. Native
   PowerShell validation now covers baseline startup, relative/absolute `-S`
-  aliasing, stale detached autostart, stale foreground `-D`, concurrent
-  autostart, and `-D` versus client races.
+  aliasing, case-variant `-S` attach, stale detached autostart, stale
+  foreground `-D`, concurrent autostart, and `-D` versus client races.
+- Win32 detached startup no longer leaves stale `.lock` guard files behind
+  after successful startup or shutdown.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
   from process events and job checks.
 - Worker-backed I/O service notifications are coalesced, bounded, and no
