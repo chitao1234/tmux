@@ -99,10 +99,7 @@ static int		 client_identify_sent;
 static struct client_files client_files = RB_INITIALIZER(&client_files);
 
 static __dead void	 client_exec(const char *,const char *);
-#ifndef TMUX_WIN32
-static int		 client_get_lock(char *);
-#endif
-static int		 client_connect(struct event_base *, const char *,
+static int		 client_connect(struct event_base *, struct ipc_endpoint *,
 			     uint64_t);
 #ifdef TMUX_WIN32
 static void		 client_win32_resize_timer_callback(tmux_event_fd,
@@ -154,47 +151,16 @@ static void		 client_send_environ(void);
 static int		 client_send_win32_auth_bind(struct imsg *);
 #endif
 
-#ifndef TMUX_WIN32
-/*
- * Get server create lock. If already held then server start is happening in
- * another client, so block until the lock is released and return -2 to
- * retry. Return -1 on failure to continue and start the server anyway.
- */
-static int
-client_get_lock(char *lockfile)
-{
-	int lockfd;
-
-	log_debug("lock file is %s", lockfile);
-
-	if ((lockfd = open(lockfile, O_WRONLY|O_CREAT, 0600)) == -1) {
-		log_debug("open failed: %s", strerror(errno));
-		return (-1);
-	}
-
-	if (flock(lockfd, LOCK_EX|LOCK_NB) == -1) {
-		log_debug("flock failed: %s", strerror(errno));
-		if (errno != EAGAIN)
-			return (lockfd);
-		while (flock(lockfd, LOCK_EX) == -1 && errno == EINTR)
-			/* nothing */;
-		close(lockfd);
-		return (-2);
-	}
-	log_debug("flock succeeded");
-
-	return (lockfd);
-}
-#endif
-
 /* Connect client to server. */
 static int
-client_connect(struct event_base *base, const char *path, uint64_t flags)
+client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
+    uint64_t flags)
 {
 #ifdef TMUX_WIN32
+	const char	*path = ipc_endpoint_path(endpoint);
 	char	*cause = NULL;
 	int	 fd, i, saved_errno;
-	HANDLE	 startup_lock;
+	struct ipc_startup_guard *startup_guard = NULL;
 
 	fd = win32_ipc_client_connect(path, flags, &cause);
 	if (fd != -1) {
@@ -210,10 +176,7 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 		return (-1);
 	if (~flags & CLIENT_STARTSERVER)
 		return (-1);
-	if (flags & CLIENT_NOFORK)
-		return (server_start(client_proc, flags, base, -1, NULL));
-	startup_lock = win32_ipc_startup_lock(path, &cause);
-	if (startup_lock == NULL) {
+	if (ipc_startup_guard_acquire(endpoint, &startup_guard, &cause) != 0) {
 		if (cause != NULL) {
 			log_debug("%s", cause);
 			free(cause);
@@ -227,7 +190,7 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 	 */
 	fd = win32_ipc_client_connect(path, flags, &cause);
 	if (fd != -1) {
-		win32_ipc_startup_unlock(startup_lock);
+		ipc_startup_guard_release(startup_guard);
 		setblocking(fd, 0);
 		return (fd);
 	}
@@ -237,24 +200,28 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 		cause = NULL;
 	}
 	saved_errno = errno;
-	if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
-		win32_ipc_startup_unlock(startup_lock);
+	if (saved_errno != ENOENT && saved_errno != ECONNREFUSED &&
+	    saved_errno != ETIMEDOUT) {
+		ipc_startup_guard_release(startup_guard);
 		errno = saved_errno;
 		return (-1);
 	}
+
+	if (flags & CLIENT_NOFORK)
+		return (server_start(client_proc, flags, base, startup_guard));
 
 	if (win32_server_spawn(path, flags, &cause) != 0) {
 		if (cause != NULL) {
 			log_debug("%s", cause);
 			free(cause);
 		}
-		win32_ipc_startup_unlock(startup_lock);
+		ipc_startup_guard_release(startup_guard);
 		return (-1);
 	}
 	for (i = 0; i < 100; i++) {
 		fd = win32_ipc_client_connect(path, flags, &cause);
 		if (fd != -1) {
-			win32_ipc_startup_unlock(startup_lock);
+			ipc_startup_guard_release(startup_guard);
 			setblocking(fd, 0);
 			return (fd);
 		}
@@ -264,21 +231,23 @@ client_connect(struct event_base *base, const char *path, uint64_t flags)
 			cause = NULL;
 		}
 		saved_errno = errno;
-		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED) {
-			win32_ipc_startup_unlock(startup_lock);
+		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED &&
+		    saved_errno != ETIMEDOUT) {
+			ipc_startup_guard_release(startup_guard);
 			errno = saved_errno;
 			return (-1);
 		}
 		Sleep(50);
 	}
-	win32_ipc_startup_unlock(startup_lock);
+	ipc_startup_guard_finish(startup_guard);
 	errno = ETIMEDOUT;
 	return (-1);
 #else
+	const char		*path = ipc_endpoint_path(endpoint);
 	struct sockaddr_un	sa;
 	size_t			size;
-	int			fd, lockfd = -1, locked = 0;
-	char		       *lockfile = NULL;
+	int			fd, locked = 0;
+	struct ipc_startup_guard *startup_guard = NULL;
 
 	memset(&sa, 0, sizeof sa);
 	sa.sun_family = AF_UNIX;
@@ -305,17 +274,11 @@ retry:
 		close(fd);
 
 		if (!locked) {
-			xasprintf(&lockfile, "%s.lock", path);
-			if ((lockfd = client_get_lock(lockfile)) < 0) {
-				log_debug("didn't get lock (%d)", lockfd);
-
-				free(lockfile);
-				lockfile = NULL;
-
-				if (lockfd == -2)
+			if (ipc_startup_guard_acquire(endpoint, &startup_guard,
+			    NULL) != 0) {
+				if (errno == EAGAIN)
 					goto retry;
 			}
-			log_debug("got lock (%d)", lockfd);
 
 			/*
 			 * Always retry at least once, even if we got the lock,
@@ -327,26 +290,17 @@ retry:
 			goto retry;
 		}
 
-		if (lockfd >= 0 && unlink(path) != 0 && errno != ENOENT) {
-			free(lockfile);
-			close(lockfd);
-			return (-1);
-		}
-		fd = server_start(client_proc, flags, base, lockfd, lockfile);
+		fd = server_start(client_proc, flags, base, startup_guard);
 	}
 
-	if (locked && lockfd >= 0) {
-		free(lockfile);
-		close(lockfd);
-	}
+	if (locked)
+		ipc_startup_guard_release(startup_guard);
 	setblocking(fd, 0);
 	return (fd);
 
 failed:
-	if (locked) {
-		free(lockfile);
-		close(lockfd);
-	}
+	if (locked)
+		ipc_startup_guard_release(startup_guard);
 	close(fd);
 	return (-1);
 #endif
@@ -1255,13 +1209,18 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	log_debug("flags are %#llx", (unsigned long long)client_flags);
 
 	/* Initialize the client socket and start the server. */
+#ifdef TMUX_WIN32
+	if (flags & CLIENT_SPAWNEDSERVER) {
+		fd = server_start(client_proc, flags, base, NULL);
+	} else
+#endif
 #ifdef HAVE_SYSTEMD
 	if (systemd_activated()) {
 		/* socket-based activation, do not even try to be a client. */
-		fd = server_start(client_proc, flags, base, 0, NULL);
+		fd = server_start(client_proc, flags, base, NULL);
 	} else
 #endif
-	fd = client_connect(base, socket_path, client_flags);
+	fd = client_connect(base, socket_endpoint, client_flags);
 	if (fd == -1) {
 		if (errno == ECONNREFUSED) {
 			fprintf(stderr, "no server running on %s\n",

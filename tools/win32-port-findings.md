@@ -38,8 +38,8 @@ The remaining problems are the second-order gaps around that progress:
    semantics, so authenticated same-user clients still bypass the Unix-shaped
    read-only and deny model.
 2. Socket-path policy is still weak for explicit `-S` and inherited `$TMUX`
-   paths, and startup locking still has a `CLIENT_NOFORK` bypass plus raw-path
-   aliasing.
+   paths, and the new startup abstraction still exposes too much backend detail
+   and too much raw-path identity to shared code.
 3. Native Windows command/path policy is still inconsistent with tmux's
    Unix-shaped assumptions, especially around `cmd.exe` quoting, `/foo` vs
    `\foo`, `~\`, drive-letter path lists, and basename parsing.
@@ -127,42 +127,51 @@ Required direction:
 - If explicit custom paths remain supported, validate parent ownership,
   reparse-point behavior, and endpoint cleanup rules before bind/unlink.
 
-### P1: Win32 startup locking still has a foreground bypass and raw-path aliasing
+### P1: Endpoint startup coordination is still Unix-shaped in the shared layer
 
 Files:
 
-- [`client.c`](../client.c): `CLIENT_NOFORK` still returns
-  `server_start(...)` before taking `win32_ipc_startup_lock()`.
-- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_path_hash()` only folds slash
-  direction and ASCII case.
-- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_startup_lock()` still waits with
-  `WaitForSingleObject(..., INFINITE)`.
-- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_server_create()` still
-  unconditionally unlinks the normalized socket path before `bind()`.
+- [`ipc-startup.c`](../ipc-startup.c): shared code still manufactures
+  `"%s.lock"` itself and acquires coordination by raw path string.
+- [`client.c`](../client.c): startup flow is moving into the shared helper, but
+  detached-helper versus foreground ownership is still visible in call-site
+  control flow.
+- [`server.c`](../server.c): listener creation is centralized, but listener
+  ownership is still represented mostly as an `fd` and `socket_path`.
+- [`win32-ipc.c`](../win32-ipc.c): backend normalization and cleanup tracking
+  still live beside shared policy rather than behind a complete endpoint
+  backend contract.
 
 Problem:
 
-The normal autostart path is now locked, but `tmux -D` / `CLIENT_NOFORK`
-still bypasses that lock entirely. The lock key is based on a raw path
-spelling rather than a canonical object path, so equivalent paths can still
-produce distinct mutexes. Server create still removes the endpoint before it
-proves the old socket is stale.
+The tree is no longer primarily suffering from the old hashed-mutex design. The
+more important remaining weakness is that the shared startup layer is still
+structured around Unix assumptions and path strings rather than around a fully
+abstract endpoint service. Recent work moved sequencing into `ipc-startup.c`,
+but that file still knows about `.lock` suffixes, still accepts raw path text
+instead of an endpoint object, and still leaves listener ownership and path
+canonicalization split across shared and Win32-specific code.
 
 Why it matters:
 
-Foreground starts or path aliases can still race server creation for the same
-endpoint. The unconditional unlink keeps the old "loser can delete the live
-endpoint" failure mode alive.
+As long as shared code keeps backend naming and identity rules, every further
+Win32 fix in this area remains fragile. Path aliasing, helper handoff,
+foreground/detached differences, stale cleanup, and future backend changes all
+continue to leak through call sites because the abstraction boundary is still
+too weak.
 
 Required direction:
 
-- Route every Win32 server-creation path, including `CLIENT_NOFORK`, through
-  one startup-lock helper.
-- Canonicalize socket paths before hashing and before connect/bind decisions.
-  `GetFullPathNameW()` is the minimum; stronger final-object resolution may be
-  needed if reparse-point aliases matter.
-- Replace unconditional unlink with stale-endpoint validation.
-- Bound or at least diagnose long startup-lock waits.
+- Replace path-based startup helpers with a backend-neutral endpoint service
+  that owns path resolution, coordination, stale probing, and listener
+  ownership.
+- Make shared call sites use opaque endpoint, coordination, and listener
+  objects rather than `.lock` suffixes, pathname strings, or backend cleanup
+  rules.
+- Canonicalize endpoint identity once, then reuse it for connect, coordination,
+  bind, stale cleanup, and listener destruction.
+- Keep backend choice hidden so the same shared code works whether the backend
+  uses `flock`, `LockFileEx`, a mutex, or another primitive.
 - The broader cross-platform redesign for this area is tracked in
   [`tools/platform-ipc-startup-plan.md`](platform-ipc-startup-plan.md).
 
@@ -425,9 +434,10 @@ current implementation:
 - The earlier `SIO_AF_UNIX_GETPEERPID` direction was dropped and is no longer
   part of the active design.
 - Managed socket-root failure no longer falls back to `C:/Temp`.
-- Normal Win32 autostart now has a startup mutex. The remaining startup issues
-  are the `CLIENT_NOFORK` bypass, raw-path aliasing, infinite wait, and stale
-  unlink behavior.
+- The tree now has a shared `ipc-startup.c` layer and Win32 endpoint-scoped
+  file locking. The remaining startup issue is that the abstraction boundary is
+  still incomplete and still leaks Unix-shaped/backend-specific concepts into
+  shared code.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
   from process events and job checks.
 - Worker-backed I/O service notifications are coalesced, bounded, and no

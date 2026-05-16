@@ -113,56 +113,7 @@ server_check_marked(void)
 int
 server_create_socket(uint64_t flags, char **cause)
 {
-#ifdef TMUX_WIN32
-	(void)flags;
-	return (win32_ipc_server_create(socket_path, cause));
-#else
-	struct sockaddr_un	sa;
-	size_t			size;
-	mode_t			mask;
-	int			fd, saved_errno;
-
-	memset(&sa, 0, sizeof sa);
-	sa.sun_family = AF_UNIX;
-	size = strlcpy(sa.sun_path, socket_path, sizeof sa.sun_path);
-	if (size >= sizeof sa.sun_path) {
-		errno = ENAMETOOLONG;
-		goto fail;
-	}
-	unlink(sa.sun_path);
-
-	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
-		goto fail;
-
-	if (flags & CLIENT_DEFAULTSOCKET)
-		mask = umask(S_IXUSR|S_IXGRP|S_IRWXO);
-	else
-		mask = umask(S_IXUSR|S_IRWXG|S_IRWXO);
-	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) == -1) {
-		saved_errno = errno;
-		close(fd);
-		errno = saved_errno;
-		goto fail;
-	}
-	umask(mask);
-
-	if (listen(fd, 128) == -1) {
-		saved_errno = errno;
-		close(fd);
-		errno = saved_errno;
-		goto fail;
-	}
-	setblocking(fd, 0);
-
-	return (fd);
-
-fail:
-	if (cause != NULL) {
-		xasprintf(cause, "error creating %s (%s)", socket_path,
-		    strerror(errno));
-	}
-	return (-1);
-#endif
+	return (ipc_server_create(socket_endpoint, flags, cause));
 }
 
 /* Tidy up every hour. */
@@ -186,7 +137,7 @@ server_tidy_event(__unused tmux_event_fd fd, __unused short events, __unused voi
 /* Fork new server. */
 int
 server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
-    int lockfd, char *lockfile)
+    struct ipc_startup_guard *startup_guard)
 {
 	int		 fd;
 #ifndef TMUX_WIN32
@@ -206,6 +157,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 #ifndef TMUX_WIN32
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
 #endif
+			ipc_startup_guard_release(startup_guard);
 			return (fd);
 		}
 	}
@@ -260,11 +212,8 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 		options_set_number(global_options, "exit-empty", 0);
 #endif
 
-	if (lockfd >= 0) {
-		unlink(lockfile);
-		free(lockfile);
-		close(lockfd);
-	}
+	if (startup_guard != NULL)
+		ipc_startup_guard_finish(startup_guard);
 
 	if (cause != NULL) {
 		if (c != NULL) {

@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: Design
+Status: Redesign
 
 Related docs:
 
@@ -13,17 +13,21 @@ Related docs:
 ## Goal
 
 Replace the current Unix-owned startup policy plus Win32 add-ons with one
-cross-platform abstraction for:
+cross-platform endpoint service abstraction for:
 
 - socket-path resolution;
 - endpoint identity;
-- startup coordination;
+- startup coordination and synchronization;
 - stale endpoint recovery;
 - listener creation and cleanup.
 
 The shared tmux call sites should use one abstract API. They must not care
 whether the backend uses `flock`, `LockFileEx`, a mutex, or any other
 platform-specific primitive.
+
+This is not a request for "a better Win32 lock." It is a request to stop
+letting the Unix startup model define the shared control flow and then bolting
+Win32 behavior onto its side.
 
 ## Why the Current Structure Is Wrong
 
@@ -39,15 +43,22 @@ Today the product policy is fragmented:
   normalization, directory preparation, and unlink-before-bind behavior.
 
 That means Unix currently defines the shape of tmux startup, while Win32 tries
-to imitate pieces of it out of band. The result is exactly the drift the port is
-showing now:
+to imitate pieces of it out of band. Even the new shared
+[`ipc-startup.c`](../ipc-startup.c) is only a halfway step: it centralizes some
+startup sequencing, but it still hardcodes Unix-shaped concepts such as
+`path.lock` naming and path-string-based guard acquisition into the shared
+layer.
+
+The result is exactly the drift the port is showing now:
 
 - raw path strings are used as identity in one place and filesystem objects in
   another;
-- `CLIENT_NOFORK` is coordinated on Unix but bypasses coordination on Win32;
+- coordination object naming still leaks into shared code;
+- `CLIENT_NOFORK` semantics and detached helper semantics remain awkward because
+  startup ownership is not modeled explicitly;
 - listener creation and stale cleanup are not part of one shared state machine;
-- the Win32 startup lock is not attached to the endpoint namespace it protects;
-- shared code still knows too much about lock implementation details.
+- platform code still decides too much policy rather than only supplying
+  mechanics.
 
 This is not a "Win32 needs one more fix" problem. It is a layering problem.
 
@@ -55,7 +66,8 @@ This is not a "Win32 needs one more fix" problem. It is a layering problem.
 
 - Shared policy, platform backend.
 - Resolve endpoint identity once, then reuse it everywhere.
-- Shared code must not manipulate lock files, mutex names, or raw unlink rules.
+- Shared code must not manipulate lock files, mutex names, guard file suffixes,
+  or raw unlink rules.
 - `CLIENT_NOFORK` must not bypass startup coordination.
 - No unconditional endpoint delete before bind.
 - The loser must not be able to delete the winner's live endpoint.
@@ -87,13 +99,14 @@ This plan does not cover:
 
 ## Core Model
 
-Introduce a shared "endpoint startup" layer with two opaque concepts:
+Introduce one shared "endpoint service" layer with three opaque concepts:
 
 - `struct ipc_endpoint`
-- `struct ipc_startup_guard`
+- `struct ipc_coordination`
+- `struct ipc_listener`
 
-The shared layer owns the state machine. Platform code only supplies backend
-operations.
+The shared layer owns the state machine and the ownership rules. Platform code
+only supplies backend operations.
 
 ### `struct ipc_endpoint`
 
@@ -114,7 +127,7 @@ Important rule:
 - connect, startup coordination, bind, and cleanup all use the same canonical
   endpoint identity.
 
-### `struct ipc_startup_guard`
+### `struct ipc_coordination`
 
 This is an opaque lease over startup coordination for one endpoint.
 
@@ -130,7 +143,23 @@ Shared code must not know whether the backend uses:
 - Unix `path.lock` plus `flock`;
 - Win32 `CreateFileW` plus `LockFileEx`;
 - a named mutex;
+- a directory lease;
 - or something else.
+
+Important rule:
+
+- the coordination object is a backend implementation detail;
+- the shared layer talks only in terms of "acquire coordination for endpoint X"
+  and "release or finish coordination for endpoint X".
+
+### `struct ipc_listener`
+
+This is an opaque listener ownership record.
+
+Shared code should not assume that successful listener creation is represented
+only by an `fd` plus a pathname string. The backend may need extra ownership
+state for cleanup, stale probing, or lifetime rules. The shared layer should
+hold that ownership token and ask the backend to destroy it cleanly.
 
 ## Shared Backend Contract
 
@@ -141,18 +170,27 @@ The shared layer needs backend operations with this shape:
 
 1. Resolve a requested socket path into a canonical endpoint path.
 2. Prepare the default socket root if the path came from `-L` / default label.
-3. Acquire startup coordination for the canonical endpoint.
-4. Release startup coordination.
+3. Acquire coordination for the canonical endpoint.
+4. Release or finish coordination.
 5. Attempt one client `connect`.
 6. Attempt one raw listener create without deleting an existing endpoint first.
-7. Detect whether an existing endpoint is stale enough to remove.
+7. Probe whether an existing endpoint is live, dead, or indeterminate.
 8. Remove a stale endpoint once the shared policy authorizes it.
-9. Register cleanup ownership for a successfully created listener.
+9. Return listener ownership state for successful create.
+10. Destroy listener ownership state during cleanup.
 
 The important separation is:
 
 - backend answers "how do I do this on this OS?"
 - shared layer answers "when is this action allowed, and in what order?"
+
+The backend contract should be explicit enough that Unix and Win32 implement
+the same conceptual operations even when their mechanics differ. For example:
+
+- Unix may implement coordination with `open(path.lock)` plus `flock`.
+- Win32 may implement coordination with `CreateFileW(path.lock)` plus
+  `LockFileEx`, or with a named mutex during a transition period.
+- Shared code should not know or care which backend was selected.
 
 ## Shared Startup State Machine
 
@@ -188,7 +226,7 @@ Target flow:
 1. Attempt `connect(endpoint)`.
 2. If it succeeds, return the connected fd.
 3. If server start is not allowed, fail.
-4. Acquire `startup_guard(endpoint)`.
+4. Acquire `coordination(endpoint)`.
 5. Retry `connect(endpoint)` while holding the guard.
 6. If it succeeds, release the guard and return the fd.
 7. Start the server:
@@ -202,9 +240,10 @@ This becomes the only place where startup races are resolved.
 
 Consequences:
 
-- `client_get_lock()` stops being a Unix-only special case in `client.c`;
-- `win32_ipc_startup_lock()` stops being called directly from `client.c`;
-- `CLIENT_NOFORK` no longer bypasses coordination on Win32.
+- `client_get_lock()` disappears into the endpoint service backend;
+- no Win32 startup primitive is called directly from `client.c`;
+- `CLIENT_NOFORK` and detached helper startup both become policy cases inside
+  the same shared state machine.
 
 ### 3. Server listener creation
 
@@ -214,9 +253,10 @@ Listener creation also needs one shared flow instead of raw platform branches in
 Target flow:
 
 1. The server already has an `ipc_endpoint`.
-2. The server already holds the startup guard for that endpoint.
+2. The server already holds the coordination lease for that endpoint.
 3. Shared code asks the backend to try one raw listener create.
-4. If the backend reports success, register cleanup ownership and continue.
+4. If the backend reports success, keep the returned listener ownership token
+   and continue.
 5. If the backend reports "address already in use", shared code probes for a
    live server.
 6. Only if the endpoint is proven stale does shared code authorize backend
@@ -241,44 +281,49 @@ should be:
 - a failed or losing startup attempt must not remove the winner's endpoint;
 - cleanup must use the same canonical identity that startup used.
 
-## Recommended Win32 Backend Change
+## Synchronization Design
 
-The abstraction may support either a mutex backend or a file-lock backend, but
-the final Win32 implementation should not keep the current hashed global mutex
-as the long-term startup primitive.
+The important redesign is not "choose file lock or mutex first." The important
+redesign is:
 
-### Why the current mutex is weak
+- define one coordination API;
+- make shared code use only that API;
+- make the backend responsible for its own coordination naming and lifetime.
 
-The current Win32 mutex is weak for structural reasons:
+### Why the current shape is weak
 
-- it is named from a path string hash, not from a filesystem object;
-- equivalent path aliases can map to different mutexes;
-- it is not naturally tied to endpoint cleanup or stale detection;
-- detached-server handoff is awkward because the mutex lease lives in the
-  spawning client, not in the endpoint namespace.
+The current tree is weak even after the recent cleanup because the shared layer
+still bakes in backend-specific concepts:
 
-That is the opposite of why the Unix side is strong.
+- `ipc-startup.c` still manufactures `.lock` paths itself;
+- coordination is still keyed by raw endpoint text passed down from callers
+  rather than by a fully resolved endpoint object;
+- listener lifetime is still represented mostly as "an fd plus a pathname";
+- backend policy and shared policy are still interleaved.
 
-### Recommended direction
+That means we have improved the primitive, but not yet the abstraction.
 
-For the final redesign, Win32 should move to a filesystem-backed startup lease
-derived from the endpoint path, for example:
+### What the final abstraction should allow
 
-- canonical endpoint path `X`
-- startup lease path `X.lock`
-- backend primitive `CreateFileW` plus `LockFileEx`
+The backend-neutral coordination contract should permit any of these without
+shared-call-site changes:
 
-This gives Win32 the same structural strengths Unix already benefits from:
+- Unix file lock backend;
+- Win32 file lock backend;
+- Win32 named mutex backend, if temporarily needed for transition or testing;
+- any future endpoint-scoped lease primitive.
 
-- the coordination object lives in the same namespace as the endpoint;
-- aliasing pressure is reduced once canonical path resolution is shared;
-- startup ownership and cleanup become easier to reason about;
-- server-start handoff becomes possible without exposing raw lock details at the
-  call site.
+The shared layer should call the same API in every case.
 
-If a compatibility stage temporarily wraps the current mutex under the new
-guard API, that is acceptable as a transition only. It should not be the final
-model.
+### Recommended Win32 backend preference
+
+The abstraction should not force the decision, but the current Win32 preference
+should remain endpoint-scoped file locking rather than a global named mutex,
+because it lines up better with endpoint identity, stale handling, and cleanup
+ownership.
+
+That is a backend choice under the abstraction, not something the rest of tmux
+should know about.
 
 ## Canonicalization Rules
 
@@ -366,7 +411,8 @@ Exact names may change, but the layering should look like this:
 
 ```c
 struct ipc_endpoint;
-struct ipc_startup_guard;
+struct ipc_coordination;
+struct ipc_listener;
 
 struct ipc_endpoint *ipc_endpoint_resolve(const char *, const char *, uint64_t *,
     char **);
@@ -376,68 +422,74 @@ void ipc_endpoint_free(struct ipc_endpoint *);
 int ipc_client_connect_or_start(struct event_base *, struct tmuxproc *,
     struct ipc_endpoint *, uint64_t);
 
-int ipc_startup_guard_acquire(struct ipc_endpoint *,
-    struct ipc_startup_guard **, char **);
-void ipc_startup_guard_release(struct ipc_startup_guard *);
+int ipc_coordination_acquire(struct ipc_endpoint *,
+    struct ipc_coordination **, char **);
+void ipc_coordination_release(struct ipc_coordination *);
+void ipc_coordination_finish(struct ipc_coordination *);
 
-int ipc_server_listener_create(struct ipc_endpoint *,
-    struct ipc_startup_guard *, uint64_t, int *, char **);
+int ipc_listener_create(struct ipc_endpoint *, struct ipc_coordination *,
+    uint64_t, struct ipc_listener **, int *, char **);
+void ipc_listener_destroy(struct ipc_listener *);
 ```
 
 The exact exported surface should stay small. The important rule is that the
 shared callers do not work with:
 
-- `.lock` paths;
-- `HANDLE` mutexes;
+- `.lock` paths or any guard-path suffix policy;
+- `HANDLE` mutexes or file-lock handles;
 - manual `unlink`;
 - path hashes;
 - or backend-specific retry rules.
 
 ## Implementation Stages
 
-### Stage 1: Introduce the abstraction
+### Stage 1: Introduce the endpoint service boundary
 
-- Add a new shared module for endpoint resolution and startup policy.
+- Replace raw path-based startup helpers with endpoint objects and opaque
+  coordination/listener objects.
 - Keep behavior as close to current as possible while moving call sites behind
   the abstraction.
 - Preserve current auth and path-security behavior.
 
 Success condition:
 
-- `tmux.c`, `client.c`, and `server.c` call the new layer instead of open-coding
-  platform-specific startup policy.
+- `tmux.c`, `client.c`, and `server.c` call the endpoint service instead of
+  open-coding platform-specific startup policy.
 
-### Stage 2: Unify path identity
+### Stage 2: Unify path identity and endpoint ownership
 
 - Make all socket-path sources create one `ipc_endpoint`.
-- Remove raw-path hashing and raw-path retry decisions from shared callers.
+- Remove raw-path coordination naming and raw-path retry decisions from shared
+  callers.
 - Populate `socket_path` from the endpoint object only.
+- Represent successful listener creation with an ownership token, not just a
+  pathname string.
 
 Success condition:
 
 - connect, startup guard, bind, and cleanup all use one canonical path.
 
-### Stage 3: Remove startup bypasses
+### Stage 3: Unify startup control flow
 
-- Route `CLIENT_NOFORK` through the same guard flow.
+- Route `CLIENT_NOFORK` through the same coordination flow.
 - Make detached and foreground startup use the same connect/retry state machine.
-- Add bounded wait or at least explicit timeout diagnostics for startup guard
+- Add bounded wait or at least explicit timeout diagnostics for coordination
   waits.
 
 Success condition:
 
 - there is no special startup path that skips coordination on Win32.
 
-### Stage 4: Replace Win32 mutex backend
+### Stage 4: Finalize backend implementations
 
-- Move Win32 startup coordination behind a filesystem-backed lease derived from
-  the endpoint path.
-- Keep the guard opaque at the shared call sites.
+- Implement Unix and Win32 coordination only behind the backend contract.
+- Remove any remaining backend naming policy from shared code.
+- Keep coordination opaque at the shared call sites.
 
 Success condition:
 
-- Win32 endpoint ownership is anchored to the endpoint namespace rather than a
-  global string hash.
+- shared code no longer knows whether the backend used a file lock, mutex, or
+  anything else.
 
 ### Stage 5: Shared stale-endpoint policy
 
@@ -483,7 +535,9 @@ After this redesign:
 - socket-path resolution, startup coordination, stale cleanup, and listener
   creation are one cross-platform subsystem;
 - call sites use one abstract API;
-- backend choice stays hidden behind the abstraction.
+- backend choice stays hidden behind the abstraction;
+- the same shared code path drives startup whether the backend used `flock`,
+  `LockFileEx`, a mutex, or another endpoint-scoped lease primitive.
 
 That is the bar this port needs before smaller Win32 fixes in this area are
 worth continuing.

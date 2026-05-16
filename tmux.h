@@ -49,6 +49,7 @@ extern char   **environ;
 struct args;
 struct args_command_state;
 struct client;
+struct ipc_endpoint;
 struct cmd;
 struct cmd_find_state;
 struct cmdq_item;
@@ -85,6 +86,7 @@ struct tty_code;
 struct tty_key;
 struct tmuxpeer;
 struct tmuxproc;
+struct ipc_startup_guard;
 struct winlink;
 #ifdef TMUX_WIN32
 struct win32_ipc_peer_identity;
@@ -2146,6 +2148,7 @@ struct client {
 #define CLIENT_REDRAWSCROLLBARS 0x4000000000ULL
 #define CLIENT_NO_DETACH_ON_DESTROY 0x8000000000ULL
 #define CLIENT_WIN32_HELPER 0x10000000000ULL
+#define CLIENT_SPAWNEDSERVER 0x20000000000ULL
 #define CLIENT_ALLREDRAWFLAGS		\
 	(CLIENT_REDRAWWINDOW|		\
 	 CLIENT_REDRAWSTATUS|		\
@@ -2415,6 +2418,7 @@ extern struct options	*global_s_options;
 extern struct options	*global_w_options;
 extern struct environ	*global_environ;
 extern struct timeval	 start_time;
+extern struct ipc_endpoint *socket_endpoint;
 extern const char	*socket_path;
 extern const char	*shell_command;
 extern int		 ptm_fd;
@@ -3083,12 +3087,22 @@ void	 server_clear_marked(void);
 int	 server_is_marked(struct session *, struct winlink *,
 	     struct window_pane *);
 int	 server_check_marked(void);
-int	 server_start(struct tmuxproc *, uint64_t, struct event_base *, int,
-	     char *);
+int	 server_start(struct tmuxproc *, uint64_t, struct event_base *,
+	     struct ipc_startup_guard *);
 void	 server_update_socket(void);
 void	 server_add_accept(int);
 void printflike(1, 2) server_add_message(const char *, ...);
 int	 server_create_socket(uint64_t, char **);
+
+/* ipc-startup.c */
+struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
+const char	*ipc_endpoint_path(struct ipc_endpoint *);
+void		 ipc_endpoint_free(struct ipc_endpoint *);
+int	 ipc_startup_guard_acquire(struct ipc_endpoint *,
+	     struct ipc_startup_guard **, char **);
+int	 ipc_server_create(struct ipc_endpoint *, uint64_t, char **);
+void	 ipc_startup_guard_finish(struct ipc_startup_guard *);
+void	 ipc_startup_guard_release(struct ipc_startup_guard *);
 
 /* server-client.c */
 RB_PROTOTYPE(client_windows, client_window, entry, server_client_window_cmp);

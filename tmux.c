@@ -39,6 +39,7 @@ struct options	*global_w_options;	/* window options */
 struct environ	*global_environ;
 
 struct timeval	 start_time;
+struct ipc_endpoint *socket_endpoint;
 const char	*socket_path;
 int		 ptm_fd = -1;
 const char	*shell_command;
@@ -594,7 +595,7 @@ main(int argc, char **argv)
 		environ_set(global_environ, "PWD", 0, "%s", cwd);
 	expand_paths(TMUX_CONF, &cfg_files, &cfg_nfiles, 1);
 
-	while ((opt = getopt(argc, argv, "2c:CDdf:hlL:NqS:T:uUvVw")) != -1) {
+	while ((opt = getopt(argc, argv, "2c:CDdf:hlL:NqS:T:uUvVwW")) != -1) {
 		switch (opt) {
 		case '2':
 			tty_add_features(&feat, "256", ":,");
@@ -656,6 +657,9 @@ main(int argc, char **argv)
 #ifdef TMUX_WIN32
 		case 'w':
 			flags |= CLIENT_WIN32_HELPER;
+			break;
+		case 'W':
+			flags |= CLIENT_SPAWNEDSERVER;
 			break;
 #endif
 		default:
@@ -758,7 +762,16 @@ main(int argc, char **argv)
 		}
 		flags |= CLIENT_DEFAULTSOCKET;
 	}
-	socket_path = path;
+	socket_endpoint = ipc_endpoint_create(path, &cause);
+	free(path);
+	if (socket_endpoint == NULL) {
+		if (cause != NULL) {
+			fprintf(stderr, "%s\n", cause);
+			free(cause);
+		}
+		exit(1);
+	}
+	socket_path = ipc_endpoint_path(socket_endpoint);
 	free(label);
 
 	/* Pass control to the client. */

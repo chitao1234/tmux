@@ -102,8 +102,6 @@ void		 win32_log_handle(const char *, HANDLE);
 
 const char	*win32_default_socket_dir(void);
 int		 win32_ipc_ensure_socket_dir(const char *, char **);
-HANDLE		 win32_ipc_startup_lock(const char *, char **);
-void		 win32_ipc_startup_unlock(HANDLE);
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);

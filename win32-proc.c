@@ -36,12 +36,13 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	}
 	log_level = log_get_level();
 	cfg_args = (cfg_quiet ? 0 : 2 * cfg_nfiles);
-	argc = 5 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0) +
+	argc = 6 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0) +
 	    cfg_args;
 	argv = xcalloc((size_t)argc, sizeof *argv);
 	i = 0;
 	argv[i++] = exe_utf8;
 	argv[i++] = xstrdup("-D");
+	argv[i++] = xstrdup("-W");
 	while (log_level-- > 0)
 		argv[i++] = xstrdup("-v");
 	argv[i++] = xstrdup("-S");

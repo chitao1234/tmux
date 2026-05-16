@@ -62,7 +62,6 @@ static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
 static char    *win32_ipc_normalize_path(const char *);
 static int	win32_ipc_path_is_root(const char *);
-static uint64_t	win32_ipc_path_hash(const char *);
 
 static int
 win32_ipc_save_socket(SOCKET socket)
@@ -248,102 +247,6 @@ win32_ipc_path_is_root(const char *path)
 	if (p == NULL || p[1] == '\0')
 		return (1);
 	return (0);
-}
-
-static uint64_t
-win32_ipc_path_hash(const char *path)
-{
-	uint64_t	hash = 1469598103934665603ULL;
-	u_char		ch;
-
-	while (*path != '\0') {
-		ch = (u_char)*path++;
-		if (ch == '\\')
-			ch = '/';
-		else if (ch >= 'A' && ch <= 'Z')
-			ch = ch - 'A' + 'a';
-		hash ^= ch;
-		hash *= 1099511628211ULL;
-	}
-	return (hash);
-}
-
-HANDLE
-win32_ipc_startup_lock(const char *path, char **cause)
-{
-	char		*name = NULL;
-	wchar_t		*wname = NULL;
-	HANDLE		 lock = NULL;
-	DWORD		 error, wait;
-
-	if (path == NULL || *path == '\0') {
-		if (cause != NULL)
-			xasprintf(cause, "invalid socket path");
-		errno = EINVAL;
-		return (NULL);
-	}
-
-	xasprintf(&name, "Global\\tmux4win-start-%016llx",
-	    (unsigned long long)win32_ipc_path_hash(path));
-	wname = win32_utf8_to_wide(name);
-	if (wname == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't build IPC startup lock name");
-		free(name);
-		errno = EINVAL;
-		return (NULL);
-	}
-
-	lock = CreateMutexW(NULL, FALSE, wname);
-	if (lock == NULL) {
-		error = GetLastError();
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't create IPC startup lock: %s",
-			    win32_strerror(error));
-		}
-		free(wname);
-		free(name);
-		errno = EACCES;
-		return (NULL);
-	}
-
-	log_debug("%s: waiting for %s", __func__, name);
-	wait = WaitForSingleObject(lock, INFINITE);
-	if (wait == WAIT_OBJECT_0) {
-		log_debug("%s: got %s", __func__, name);
-		free(wname);
-		free(name);
-		return (lock);
-	}
-	if (wait == WAIT_ABANDONED) {
-		log_debug("%s: got abandoned %s", __func__, name);
-		free(wname);
-		free(name);
-		return (lock);
-	}
-
-	error = GetLastError();
-	if (cause != NULL) {
-		xasprintf(cause, "couldn't wait for IPC startup lock: %s",
-		    win32_strerror(error));
-	}
-	CloseHandle(lock);
-	free(wname);
-	free(name);
-	errno = EACCES;
-	return (NULL);
-}
-
-void
-win32_ipc_startup_unlock(HANDLE lock)
-{
-	if (lock == NULL)
-		return;
-	if (!ReleaseMutex(lock)) {
-		log_debug("%s: ReleaseMutex failed: %s", __func__,
-		    win32_strerror(GetLastError()));
-	}
-	CloseHandle(lock);
 }
 
 static char *
@@ -1022,8 +925,6 @@ win32_ipc_server_create(const char *path, char **cause)
 		}
 	}
 	free(parent);
-
-	(void)win32_unlink_utf8(normalized);
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd == INVALID_SOCKET) {
