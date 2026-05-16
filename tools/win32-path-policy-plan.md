@@ -2,13 +2,40 @@
 
 Date: 2026-05-16
 
-Status: Planned
+Status: In progress
 
 Related docs:
 
 - [`tools/win32-port-findings.md`](win32-port-findings.md)
 - [`tools/platform-ipc-startup-plan.md`](platform-ipc-startup-plan.md)
 - [`tools/win32-auth-plan.md`](win32-auth-plan.md)
+
+## Progress Snapshot
+
+Completed in tree:
+
+- shared Win32 path helpers now exist in the generic path layer instead of
+  being split across unrelated call sites;
+- generic filesystem consumers were migrated to the shared Win32 path policy
+  for rooted paths, home and environment expansion, basename/dirname handling,
+  and drive-relative rejection;
+- Win32 path-list parsing no longer relies on naive Unix `:` splitting for
+  filesystem path lists.
+
+In progress in the current worktree:
+
+- IPC endpoint resolution now tracks endpoint source and endpoint class, and
+  Win32 endpoint canonicalization preserves user-visible path spelling instead
+  of lowercasing it unconditionally;
+- the next IPC slice still needs to turn that groundwork into a real split
+  between display spelling, comparison identity, and startup-time trust policy.
+
+Still pending after that:
+
+- explicit `-S` and inherited `$TMUX` parent-path validation before startup
+  mutation;
+- any coordination redesign needed if sibling `.lock` files remain incompatible
+  with the final explicit-endpoint trust policy.
 
 ## Goal
 
@@ -357,6 +384,8 @@ The important point is not the exact signature. The important point is that:
 
 ### Stage 1: Introduce the shared path layer
 
+Status: completed
+
 Create a path service boundary used by both Unix and Win32, with the Win32
 backend carrying the real policy and the Unix backend staying minimal.
 
@@ -374,6 +403,8 @@ Success condition:
   directly.
 
 ### Stage 2: Migrate generic Win32 filesystem consumers
+
+Status: completed
 
 Replace local Win32 path special cases in:
 
@@ -399,6 +430,8 @@ Success condition:
 
 ### Stage 3: Replace Win32 path-list splitting
 
+Status: completed
+
 Move `expand_paths()` and similar path-list consumers to a Win32-aware parser.
 
 This stage must cover:
@@ -413,6 +446,8 @@ Success condition:
 
 ### Stage 4: Split IPC display, comparison, and trust identity
 
+Status: in progress
+
 Refactor IPC endpoint resolution so it carries:
 
 - display spelling;
@@ -422,11 +457,23 @@ Refactor IPC endpoint resolution so it carries:
 
 Do not rely on unconditional lowercasing as the only stored form.
 
+Current state:
+
+- endpoint resolution now knows whether the path came from default `-L`,
+  explicit `-S`, or inherited `$TMUX`;
+- endpoint resolution now distinguishes managed versus explicit endpoint class;
+- Win32 canonicalization now uses the shared path layer and rejects
+  drive-relative socket paths;
+- display spelling is preserved, but comparison identity is still just the
+  same stored text and is not yet a distinct alias-collapsing representation.
+
 Success condition:
 
 - IPC endpoint equality and IPC endpoint trust are no longer the same thing.
 
 ### Stage 5: Harden explicit `-S` and inherited `$TMUX`
+
+Status: pending
 
 Add explicit-path validation before tmux performs startup-side mutation for
 non-managed endpoints.
@@ -444,6 +491,8 @@ Success condition:
   text paths as implicitly safe to mutate.
 
 ### Stage 6: Decouple coordination from sibling `.lock` when needed
+
+Status: pending
 
 If explicit endpoint policy shows that sibling `.lock` files force unnecessary
 directory mutation outside trusted roots, move coordination into a backend-owned
@@ -509,6 +558,21 @@ Verify:
 - slash and case aliases resolve to one comparison identity;
 - unsafe explicit parents are rejected before startup-side mutation;
 - live endpoints are never stale-unlinked by a loser in a race.
+
+### Immediate next slice
+
+The next implementation step should stay narrowly scoped:
+
+1. finish Stage 4 by giving IPC endpoints a real comparison identity distinct
+   from display spelling;
+2. make explicit `-S` startup work on Win32 without reintroducing unconditional
+   lowercasing or broad "treat `EACCES` as dead" logic;
+3. only after that, layer Stage 5 trust validation onto explicit and inherited
+   endpoint startup paths.
+
+This keeps the current path-policy work coherent: first make endpoint identity
+correct, then decide which startup-side mutations are allowed for each endpoint
+class.
 
 ### Case behavior
 
