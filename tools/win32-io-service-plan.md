@@ -784,6 +784,16 @@ saturated after the job has exited.
 
 ## Pipe Pane Helper Ownership Slice
 
+This slice fixed a real leak in the current tree, but its temporary
+kill-on-detach policy is not the intended final lifecycle model. The dedicated
+follow-up in
+[`tools/win32-pane-job-lifecycle-plan.md`](win32-pane-job-lifecycle-plan.md)
+supersedes that narrow policy and separates:
+
+- ordinary pane destruction;
+- explicit pipe close; and
+- explicit forced termination.
+
 Win32 `pipe-pane` teardown now owns the helper job until cleanup is complete:
 
 - `window_pane_close_pipe()` centralizes pipe close logic for both Unix pipe
