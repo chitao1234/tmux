@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: Implementation In Progress
+Status: Windows implementation complete; Unix runtime validation pending
 
 Related docs:
 
@@ -36,6 +36,8 @@ Current tree status:
   differences for endpoint identity;
 - shared code now calls backend operations for connect, probe, coordination,
   listener create, stale removal, listener destruction, and startup handoff;
+- detached server startup now receives the resolved endpoint through the shared
+  abstraction instead of consulting ambient `socket_path` state;
 - `client.c` now calls one shared `connect-or-start` helper and no longer
   branches on Win32 startup mechanics directly;
 - native PowerShell validation now covers default `-L` startup, explicit `-S`
@@ -552,7 +554,8 @@ Unix validation:
 - run the normal startup path and explicit `-S` path flow;
 - verify lock-and-retry behavior still works under concurrent autostart.
 - a Unix-oriented shared regression now exists in `regress/ipc-startup.sh`;
-  it still needs execution on a Unix host.
+  `regress/Makefile` picks it up automatically through the existing `*.sh`
+  driver, but it still needs execution on a Unix host.
 - Status on 2026-05-16: still pending because this host is Windows-only under
   the active toolchain policy.
 
