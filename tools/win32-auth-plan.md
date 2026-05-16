@@ -3,432 +3,367 @@
 ## Objective
 
 Define the Win32 authentication model for tmux while keeping AF_UNIX as the
-control transport.
+control transport and staying close to the Unix tmux model.
 
-This plan is about authenticated client admission. It is not a transport
-redesign, not a relay/direct terminal I/O redesign, and not the full custom
-socket-path hardening pass.
+This plan is about client admission on Win32. It is not a transport redesign,
+not a terminal I/O redesign, and not a general-purpose Windows security system.
+
+## Design Goal
+
+The Win32 auth model should match Unix tmux in spirit:
+
+- socket/path security is the first barrier;
+- peer identity is the second barrier;
+- tmux should not grow durable secrets, persistent auth databases, or mutual
+  server-authentication policy just to compensate for Windows API differences.
+
+Unix tmux relies on filesystem/socket ownership plus peer credentials. Win32
+should do the same, with one small platform-specific addition: Windows AF_UNIX
+does not give tmux a usable `getpeereid()` equivalent, so tmux needs a minimal
+peer-credential replacement.
 
 ## Product Model
 
-The Win32 product model for tmux should be:
+The Win32 product behavior should be:
 
-- the authorization principal is the Windows user SID, not the logon session;
-- later attaches from other logon sessions of the same Windows user must work,
-  including later SSH logons;
-- different Windows users must not be able to act as tmux clients;
-- lower-integrity clients must not be able to attach to a higher-integrity
-  server;
-- the client must authenticate the server before it sends identify data,
-  environment data, terminal handle claims, or commands.
+- the authorization principal is the Windows user SID;
+- later attaches from a different logon session of the same Windows user are
+  allowed, including later SSH logons;
+- different Windows users are not allowed;
+- lower-integrity clients must not attach to a higher-integrity server;
+- tmux should not try to solve "did the user intentionally connect to this
+  socket path?" beyond normal socket-path trust.
 
-This means the auth model must allow same-user multi-logon attach while still
-rejecting cross-user and lower-integrity attach.
+This keeps the policy small and matches the way tmux already behaves on Unix.
 
-## Current State
+## Current Problem
 
-Today the Win32 port has partial socket and handle security, but not real client
-authentication:
+Today the Win32 port has only the first barrier and not the second:
 
+- socket reachability and directory security are doing most of the work;
 - [`server-acl.c`](../server-acl.c) accepts every Win32 client in
-  `server_acl_join()`.
-- [`server.c`](../server.c) creates the `struct client` and calls
-  `server_acl_join()` immediately after `accept()`.
-- [`server-client.c`](../server-client.c) then accepts unauthenticated
-  `MSG_IDENTIFY_*` traffic.
-- [`client.c`](../client.c) sends `MSG_IDENTIFY_CLIENTPID` and Win32 direct
-  handle claims before there is any authenticated peer identity.
-- [`win32-ipc.c`](../win32-ipc.c) can validate a claimed client process token
-  and duplicate handles from that process, but only after the server trusts the
-  claimed PID.
+  `server_acl_join()`;
+- [`server-client.c`](../server-client.c) accepts unauthenticated
+  `MSG_IDENTIFY_*` traffic;
+- [`client.c`](../client.c) sends `MSG_IDENTIFY_CLIENTPID` and direct-handle
+  claims before the server has a trustworthy peer identity;
+- [`win32-ipc.c`](../win32-ipc.c) can inspect a claimed client process token,
+  but only after trusting the client's claimed PID.
 
-This is backwards for Win32. The server currently trusts the connection first
-and only later inspects claimed client process information.
+So Win32 currently trusts a connection too early and trusts identify messages
+that should only be accepted after peer identity is established.
 
 ## Requirements
 
-The auth design must satisfy all of the following:
+The Win32 auth model must:
 
-1. Keep AF_UNIX as the transport.
-2. Work for same-user later attaches from different logon sessions.
-3. Stop trusting socket reachability as the only auth boundary.
-4. Stop trusting pre-auth `MSG_IDENTIFY_*` traffic.
-5. Let the client verify that it is talking to the real tmux server before it
-   discloses terminal handles or environment data.
-6. Bind Win32 handle duplication to the authenticated client process, not just
-   to an untrusted PID field.
-7. Continue to work for both first-class console relay clients and direct-handle
-   non-console clients.
-8. Fail closed on missing or invalid auth state.
+1. Keep AF_UNIX as the control transport.
+2. Stay conceptually close to Unix tmux auth.
+3. Add only the smallest Win32-specific mechanism needed to replace missing peer
+   credentials.
+4. Allow same-user attach across different logon sessions.
+5. Reject different-user attach.
+6. Reject lower-integrity attach to a higher-integrity server.
+7. Reject normal identify and handle-claim traffic until peer identity is
+   established.
+8. Reuse the authenticated peer/process identity for later direct-handle
+   duplication.
+
+## Non-Goals
+
+This plan does not do any of the following:
+
+- no persistent server secret;
+- no auth metadata database;
+- no mutual client/server authentication;
+- no attempt to protect users from intentionally or accidentally connecting to a
+  rogue socket path beyond normal tmux path trust;
+- no redesign of relay versus direct terminal-handle transport;
+- no full `server-access` redesign on Windows.
+
+Those would move too far away from what tmux normally owns.
 
 ## Threat Model
 
-The design should defend against:
+This plan is meant to stop:
 
-- a different Windows user connecting to the AF_UNIX socket;
-- a different Windows user placing a fake socket at a weak custom `-S` path;
-- a client connecting to a rogue server and disclosing identify or handle data;
+- a different Windows user connecting to the tmux socket and being accepted as a
+  client;
+- an unauthenticated client sending `MSG_IDENTIFY_*` traffic and being trusted;
 - an unauthenticated client claiming an arbitrary PID and asking the server to
   duplicate handles from it;
-- a lower-integrity client attaching to a higher-integrity server.
+- a lower-integrity client attaching to a higher-integrity same-user server.
 
-The design does not try to isolate malicious processes running as the same
-Windows user. Same-user is the intended authorization boundary for tmux on
-Win32.
+This plan does not try to isolate malicious processes running as the same
+Windows user. Same-user remains the tmux trust boundary, just as Unix tmux uses
+same-uid style trust.
 
 ## Core Design
 
-The auth model has two layers:
+Add one Win32-specific peer-bind step immediately after AF_UNIX connect and
+before normal identify traffic.
 
-1. durable same-user mutual authentication;
-2. authenticated process binding for Win32 handle claims and integrity checks.
+That step gives tmux the Win32 equivalent of peer credentials:
 
-Both layers are required.
+- it proves that the client really owns the claimed PID;
+- it lets the server read the token from that exact process;
+- it lets the server apply the same-user plus integrity-floor policy;
+- it gives the server a trusted process binding that later direct-handle
+  duplication can reuse.
 
-Same-user mutual authentication is what allows later attach from another logon
-session. Process binding is what keeps Win32 handle duplication tied to the
-actual connecting client process instead of an untrusted PID string.
+This is the only missing primitive. Everything else should stay tmux-shaped.
 
-## Durable Server Auth State
+## Peer-Bind Handshake
 
-Each server instance needs a durable auth record that any later client of the
-same Windows user can read.
+### Overview
 
-The auth record should live in a managed tmux metadata root under the user
-profile, not beside the socket path:
-
-- keep socket endpoints where tmux already places them;
-- keep auth metadata in a managed tmux auth directory under the user profile;
-- do not store the auth secret inside arbitrary custom `-S` directories.
-
-The auth record should be keyed by the canonical socket path, not by the raw
-spelling the client used. This auth plan therefore depends on the IPC/path pass
-using one shared canonical socket-path function for:
-
-- startup locking;
-- server socket creation;
-- client connect;
-- auth record lookup.
-
-The auth record should contain:
-
-- a format version;
-- the canonical socket path;
-- the server owner user SID string;
-- the server integrity level;
-- a random 32-byte server secret;
-- a server instance identifier or generation nonce;
-- creation time for diagnostics.
-
-The record should be written atomically and overwritten on every fresh server
-startup. Clean shutdown may remove it, but correct startup must not depend on
-successful cleanup of old files.
-
-## Mutual Auth Handshake
-
-The Win32 client and server should perform an auth handshake before any normal
-identify traffic.
-
-### Transport Rules
-
-Before auth succeeds:
-
-- the server must accept only version traffic and Win32 auth messages;
-- the client must accept only version traffic and Win32 auth messages;
-- any `MSG_IDENTIFY_*`, `MSG_COMMAND`, relay traffic, file traffic, or handle
-  claims before auth completes is a protocol error and closes the connection.
-
-This is the key change that stops the current Win32 flow from trusting
-unauthenticated identify data.
-
-### Proposed Message Flow
-
-1. Client connects over AF_UNIX.
-2. Server sends `MSG_WIN32_AUTH_CHALLENGE` with:
-   - auth protocol version;
-   - random server nonce;
-   - server instance identifier;
-   - canonical socket-path digest or identifier used by the auth record.
-3. Client loads the auth record for the canonical socket path.
-4. Client verifies that the record socket path matches the path it intended to
-   reach.
-5. Client sends `MSG_WIN32_AUTH_RESPONSE` with:
-   - random client nonce;
-   - proof of knowledge of the server secret.
-6. Server verifies the client proof using its in-memory auth record.
-7. Server sends `MSG_WIN32_AUTH_SERVER_PROOF`.
-8. Client verifies the server proof.
-9. Only after server proof succeeds does the client continue to process any
-   normal tmux handshake.
-
-The proof should be HMAC-SHA256 over a fixed transcript that includes:
-
-- a domain-separation label such as `tmux-win32-auth-v1`;
-- the canonical socket-path identity;
-- the server instance identifier;
-- the server nonce;
-- the client nonce.
-
-The client and server should use different labels for client proof and server
-proof so that one message cannot be replayed as the other.
-
-This gives mutual authentication. A rogue server without the secret cannot
-convince the client to continue into identify or handle-transfer state.
-
-## Authenticated PID Binding
-
-Same-user auth alone is not enough for Win32 direct-handle claims. The server
-still needs to know which client process it is allowed to duplicate handles
-from.
-
-After mutual auth succeeds, the client must bind a live process identity to the
-connection.
-
-### Proposed PID-Bind Flow
-
-1. Client creates a small proof object in its own process.
-2. Client sends `MSG_WIN32_AUTH_BIND_PID` with:
+1. Client connects to the AF_UNIX socket.
+2. Server puts the connection in `auth-pending` state.
+3. Server sends a fresh random nonce to the client.
+4. Client creates a small unnamed kernel object in its own process and writes
+   the nonce into it.
+5. Client sends:
    - its PID;
-   - a handle value for the proof object.
-3. Server opens the claimed process.
-4. Server duplicates the proof handle from that process.
-5. Server verifies the proof object contents against the authenticated
-   connection transcript.
-6. Server opens the process token and captures:
-   - user SID;
-   - integrity level;
-   - optional logon SID and session id for diagnostics.
-7. Server checks the token against admission policy.
-8. Server replies with `MSG_WIN32_AUTH_OK` or `MSG_WIN32_AUTH_ERROR`.
+   - the handle value for that proof object.
+6. Server opens the claimed process.
+7. Server duplicates the proof handle from that process.
+8. Server reads back the nonce from the duplicated object.
+9. If the nonce matches, the server treats that process as the authenticated
+   peer process for the connection.
+10. Server opens the token from that same process and applies admission policy.
+11. Only then does normal tmux identify traffic continue.
 
-The proof object should be an unnamed file mapping or another kernel object
-whose contents the server can read after `DuplicateHandle()`. Its contents
-should be derived from the authenticated transcript so it is per-connection and
-non-replayable.
+This is not "extra auth policy." It is only a peer-credential substitute for
+Win32 AF_UNIX.
 
-The purpose of PID binding is:
+### Why A Nonce
 
-- to tie later direct-handle duplication to the authenticated client process;
-- to capture the real client token and integrity level;
-- to stop unauthenticated or mismatched PID claims from reaching the existing
-  handle-duplication path.
+The nonce prevents a client from only naming some PID and relying on the server
+to trust it. The server must prove to itself that the connecting client can send
+both:
 
-This does not try to stop malicious same-user processes from impersonating each
-other. Same-user remains the product boundary. It does stop the current
-cross-user and pre-auth trust problem.
+- a PID;
+- a handle that really lives inside that process and contains the server's
+  challenge value.
+
+That is the minimum shape of a trustworthy process bind.
+
+### Proof Object
+
+The proof object should be simple and local:
+
+- unnamed file mapping is a reasonable default;
+- another small readable kernel object would also work.
+
+The object only needs to carry the server nonce for this one connection. It does
+not need to be durable or reusable.
 
 ## Admission Policy
 
-Once PID binding succeeds, the server should make the real Win32 admission
-decision.
+Once the server has an authenticated peer process, it should open that process
+token and capture:
 
-The policy should be:
+- user SID;
+- integrity level.
 
-- authenticated client token user SID must equal the server owner SID;
-- authenticated client token integrity must not be lower than the server
-  integrity floor;
-- logon SID mismatch is allowed;
-- session id mismatch is allowed.
+The admission rule should be:
 
-This is the rule that preserves the desired tmux model:
+- client user SID must equal server owner SID;
+- client integrity must not be lower than the server integrity level.
 
-- same Windows user across multiple logon sessions may attach;
-- different user may not attach;
-- lower-integrity client may not attach to higher-integrity server.
+What is intentionally not part of admission:
 
-Higher-integrity attach to a lower-integrity server may be allowed if the client
-can reach the socket path and authenticate. That is consistent with same-user as
-the principal plus integrity as a floor, not an exact-match requirement.
+- logon SID equality;
+- session id equality.
 
-## Server ACL Integration
+Those must not be required, because later attach from another same-user logon
+session is a core tmux use case.
 
-The Win32 auth pass should not keep the current unconditional
-`server_acl_join()` behavior.
+## Relation To Unix tmux
 
-Instead:
+This design is deliberately small:
 
-- `accept()` should create the client in an auth-pending state;
-- the server should not call final Win32 admission at raw `accept()` time;
-- after PID binding succeeds, the server should apply Win32 admission policy and
-  only then allow the normal identify flow to continue.
+- Unix tmux asks the kernel who the peer is.
+- Win32 tmux asks the peer to prove which process it is, then asks the kernel
+  for that process token.
 
-`server-access` does not need to be fully redesigned in this pass.
+That is the whole model. No durable secret, no separate auth store, no
+general-purpose trust system.
 
-For the first complete Win32 auth model:
+## Pre-Auth Protocol Rules
 
-- keep the Windows policy same-user only;
-- keep `server-access` limited on Win32 rather than forcing the Unix UID ACL
-  model onto SID-based identities;
-- once authenticated SID metadata exists, a later policy pass may decide whether
-  Windows should support a readonly same-user mode or richer per-principal
-  policy.
+Before peer bind succeeds, the server must accept only:
 
-## Direct Handle Transfer After Auth
+- version/protocol negotiation traffic;
+- Win32 auth messages for the peer-bind step.
 
-The current Win32 direct-handle path in
-[`server-client.c`](../server-client.c) should only run after PID binding
-completes.
+Before peer bind succeeds, the server must reject:
 
-That implies the handle duplication helper in [`win32-ipc.c`](../win32-ipc.c)
-should be refactored away from the current:
+- all `MSG_IDENTIFY_*` traffic;
+- `MSG_COMMAND`;
+- relay traffic;
+- file traffic;
+- direct-handle claims.
 
-- `pid + handle value + same-user token check`
+This is the structural fix for the current Win32 bug. Right now tmux trusts the
+client too early.
 
-toward:
+## Direct Handle Transfer
 
-- `authenticated peer/process + handle value + access check`.
+The current Win32 direct-handle path should be gated on the authenticated peer
+process, not on a raw claimed PID from identify traffic.
 
-The server should store the authenticated process handle or authenticated PID in
-peer state and refuse to duplicate from any other process for that connection.
+That means:
 
-Relay clients use the same auth handshake even though they do not need direct
-terminal handle duplication. Auth is a client-admission property, not a
-direct-handle-only feature.
+- the peer-bind step establishes the trusted client process for the connection;
+- later direct stdin/stdout handle claims must come from that same process;
+- [`win32-ipc.c`](../win32-ipc.c) should stop treating a claimed PID as
+  sufficient authority on its own.
+
+This keeps direct-handle transfer small and consistent with the peer-credential
+model.
+
+Relay clients still go through the same admission step. Authentication is about
+who may become a tmux client, not just who may transfer direct terminal handles.
 
 ## Custom Socket Paths
 
-This auth model intentionally reduces the damage from weak custom `-S` paths,
-but it does not replace socket-path hardening.
+This auth model does not replace socket-path hardening.
 
-What auth fixes:
+It helps with one thing:
 
-- a rogue socket path endpoint without the auth secret cannot impersonate the
-  tmux server to the client;
-- a different user that can connect to a weak path still cannot authenticate as
-  a client.
+- reaching a socket is no longer enough to become a trusted tmux client.
 
-What auth does not fix:
+It does not help with:
 
-- denial of service on weak custom paths;
-- stale-path aliasing;
-- reparse-point/junction trust decisions;
-- unlinking or replacing a live endpoint.
+- a weak custom `-S` path being a denial-of-service target;
+- reparse-point or aliasing issues;
+- a user intentionally connecting to the wrong socket path.
 
-Those remain part of the IPC/path hardening track.
+That is acceptable because tmux on Unix also does not grow a separate
+server-authentication system to solve those cases. The correct place for those
+issues is the IPC/path hardening track.
 
-## Failure Behavior
+## Server ACL Integration
 
-Fail closed on:
+Win32 should stop doing unconditional success in
+[`server-acl.c`](../server-acl.c).
 
-- missing auth record;
-- malformed auth record;
-- socket-path mismatch between the connection target and the auth record;
-- client auth proof mismatch;
-- server proof mismatch;
-- PID bind proof mismatch;
-- token SID mismatch;
-- client integrity below server floor.
+The Win32 admission flow should become:
 
-The client should surface explicit user-facing failures instead of a generic
-`access not allowed` whenever possible. Auth failures should be diagnosable from
-tmux logs without needing a debugger.
+1. `accept()` creates the client object.
+2. The client starts in auth-pending state.
+3. Win32 peer-bind succeeds or fails.
+4. Same-user plus integrity-floor policy is applied.
+5. Only then is the client treated as admitted and allowed to continue with
+   normal identify traffic.
 
-## Implementation Slices
+This pass does not need to redesign the user-visible `server-access` command.
+For now, Windows policy remains effectively "current user only," but now backed
+by a real authenticated peer identity instead of unconditional trust.
 
-### Slice 1: Shared Auth Metadata
+## Code Changes Required
 
-- Add a managed Win32 auth-metadata directory.
-- Add one canonical socket-path function shared by startup lock, connect, bind,
-  and auth lookup.
-- Add auth-record read/write helpers.
-- Generate a fresh random server secret on startup and publish the record
-  atomically.
+### 1. Protocol
 
-### Slice 2: Protocol Messages And State Machine
+Add a small Win32 auth message set to [`tmux-protocol.h`](../tmux-protocol.h),
+for example:
 
-- Add Win32 auth protocol messages to [`tmux-protocol.h`](../tmux-protocol.h).
-- Add client and server auth-pending state.
-- Reject all normal identify and command traffic before auth completion.
-- Bump protocol version; mixed old/new Win32 auth behavior should not be
-  supported silently.
+- `MSG_WIN32_AUTH_CHALLENGE`
+- `MSG_WIN32_AUTH_BIND`
+- `MSG_WIN32_AUTH_RESULT`
 
-### Slice 3: Mutual Same-User Auth
+Exact naming can change, but the protocol should stay minimal.
 
-- Add server challenge generation.
-- Add client HMAC proof generation.
-- Add server proof generation.
-- Teach the client to stop and report an auth failure before sending identify
-  traffic.
+### 2. Client State
 
-### Slice 4: PID Binding And Token Capture
+[`client.c`](../client.c) should:
 
-- Add the proof object helper on the client.
-- Add server-side proof-handle duplication and verification.
-- Capture authenticated token metadata from the bound process.
-- Store SID, integrity, PID, and optional logon/session diagnostics on the
-  peer/client.
+- wait for the server challenge after connect;
+- create the proof object;
+- send the bind message before normal identify traffic;
+- only send normal `MSG_IDENTIFY_*` messages after bind success.
 
-### Slice 5: Admission And Handle Gating
+### 3. Server State
 
-- Move Win32 admission decision to post-auth state.
-- Replace unconditional Win32 `server_acl_join()` success with authenticated
-  same-user admission.
-- Gate `win32_ipc_duplicate_client_handle()` on authenticated peer process
-  identity.
+[`server-client.c`](../server-client.c) should:
 
-### Slice 6: Cleanup And Recovery
+- keep Win32 clients in auth-pending state initially;
+- accept only auth messages pre-bind;
+- verify the proof object against the server nonce;
+- capture token identity and integrity from the authenticated process;
+- reject everything else before auth completion.
 
-- Rewrite the auth record when the server detects it is missing or stale while
-  still running.
-- Remove or invalidate the record on clean shutdown where practical.
-- Ensure stale record replacement on next startup is always safe.
+### 4. ACL / Admission
+
+[`server-acl.c`](../server-acl.c) and [`server.c`](../server.c) should stop
+treating Win32 `accept()` as admission-complete. Win32 admission must happen
+after the peer-bind step.
+
+### 5. Handle Duplication
+
+[`win32-ipc.c`](../win32-ipc.c) should be reshaped from:
+
+- "duplicate from whatever PID the client claimed"
+
+toward:
+
+- "duplicate only from the process already authenticated for this peer."
+
+That is a small but important tightening.
 
 ## Test Plan
 
 Native Windows tests should cover at least:
 
 1. Same user, same logon session:
-   - create server;
-   - attach successfully;
-   - verify normal identify flow still works.
+   - connect and attach successfully;
+   - verify identify and terminal startup still work.
 
-2. Same user, later logon session:
-   - create session in one logon;
-   - attach in a later same-user logon;
-   - verify auth succeeds without sharing a logon SID.
+2. Same user, different logon session:
+   - create a session from one logon;
+   - attach from a later same-user logon;
+   - verify admission succeeds.
 
 3. Different user:
-   - connect to the same socket path;
-   - verify the client cannot complete auth;
-   - verify the server never accepts identify data.
+   - connect to the socket;
+   - verify bind/admission fails before identify completes.
 
-4. Rogue server at weak custom `-S` path:
-   - client reaches the endpoint;
-   - client rejects the server before identify or handle transfer.
+4. Lower-integrity same-user client to higher-integrity server:
+   - verify admission fails.
 
-5. Lower-integrity client to higher-integrity server:
-   - same user SID;
-   - auth secret may be readable;
-   - server rejects at PID/token validation.
+5. Higher-integrity same-user client to lower-integrity server:
+   - verify it follows the chosen integrity-floor policy.
 
-6. High-integrity client to lower-integrity server:
-   - verify the chosen floor policy is enforced as designed.
-
-7. Direct-handle path:
-   - authenticated direct stdout/stdin duplication succeeds only for the bound
-     client process.
-
-8. Relay path:
-   - authenticated relay client still completes attach and interactive use.
-
-9. Pre-auth protocol abuse:
-   - send `MSG_IDENTIFY_*` or `MSG_COMMAND` before auth;
+6. Pre-auth identify abuse:
+   - send `MSG_IDENTIFY_*` before bind success;
    - verify disconnect and log evidence.
 
-10. Stale metadata:
-    - remove or corrupt the auth record while the server is stopped and while it
-      is running;
-    - verify startup rewrite and failure behavior are deterministic.
+7. Direct-handle path:
+   - verify direct stdin/stdout duplication succeeds only when the claiming
+     process is the authenticated peer process.
 
-## Explicit Non-Goals
+8. Relay path:
+   - verify relay clients still attach after the new auth step.
 
-- Do not redesign tmux away from AF_UNIX here.
-- Do not redesign relay versus direct-handle terminal transport here.
-- Do not solve all custom socket-path security issues here.
-- Do not force the Unix `server-access` UX onto Windows in this pass.
+## Recommended Implementation Order
 
-## Recommended Order Relative To Other Win32 Work
+1. Add protocol messages and auth-pending connection state.
+2. Implement nonce challenge and process bind.
+3. Capture token SID and integrity from the authenticated process.
+4. Move Win32 admission to post-bind state.
+5. Gate direct-handle duplication on authenticated peer process identity.
+6. Add native Windows regression coverage.
 
-Do this before broader custom path policy and before authenticated direct-handle
-frontend work. The relay and direct-handle paths both need a trustworthy Win32
-client identity model underneath them.
+## Summary
+
+The right Win32 auth model is:
+
+- keep AF_UNIX;
+- keep socket/path security as the first barrier;
+- add one small process-bind step to replace missing peer credentials;
+- authorize by same-user SID plus integrity floor;
+- then continue with normal tmux identify and terminal setup.
+
+That stays close to Unix tmux instead of turning tmux into a separate Windows
+authentication system.
