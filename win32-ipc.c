@@ -51,6 +51,7 @@ static int	win32_ipc_errno(int);
 static int	win32_ipc_set_blocking(SOCKET, int, char **);
 static int	win32_ipc_path_to_sockaddr(const char *, struct sockaddr_un *,
 		    char **);
+static int	win32_ipc_path_missing(const char *);
 static char    *win32_ipc_sid_to_string(PSID);
 static int	win32_ipc_capture_token_identity(HANDLE, char **, char **);
 static char    *win32_ipc_integrity_level_to_name(DWORD);
@@ -128,6 +129,12 @@ win32_ipc_errno(int error)
 	case WSAECONNRESET:
 	case WSAENETRESET:
 		return (ECONNRESET);
+	case WSAENETDOWN:
+		return (ENETDOWN);
+	case WSAENETUNREACH:
+		return (ENETUNREACH);
+	case WSAEHOSTUNREACH:
+		return (EHOSTUNREACH);
 	case WSAENOTCONN:
 		return (ENOTCONN);
 	case WSAETIMEDOUT:
@@ -247,6 +254,31 @@ win32_ipc_path_is_root(const char *path)
 	if (p == NULL || p[1] == '\0')
 		return (1);
 	return (0);
+}
+
+static int
+win32_ipc_path_missing(const char *path)
+{
+	wchar_t	*wpath;
+	DWORD	 attr, error;
+	int	 missing;
+
+	if (path == NULL)
+		return (0);
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL)
+		return (0);
+	attr = GetFileAttributesW(wpath);
+	if (attr != INVALID_FILE_ATTRIBUTES) {
+		free(wpath);
+		return (0);
+	}
+	error = GetLastError();
+	free(wpath);
+
+	missing = (error == ERROR_FILE_NOT_FOUND ||
+	    error == ERROR_PATH_NOT_FOUND);
+	return (missing);
 }
 
 static char *
@@ -894,13 +926,36 @@ win32_ipc_ensure_socket_dir(const char *path, char **cause)
 }
 
 int
+win32_ipc_ensure_parent_dir(const char *path, char **cause)
+{
+	char	*normalized, *slash;
+	int	 retval;
+
+	normalized = win32_ipc_normalize_path(path);
+	if (normalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid socket path");
+		errno = EINVAL;
+		return (-1);
+	}
+	slash = strrchr(normalized, '/');
+	if (slash == NULL) {
+		free(normalized);
+		return (0);
+	}
+	*slash = '\0';
+	retval = win32_ipc_ensure_dir(normalized, cause);
+	free(normalized);
+	return (retval);
+}
+
+int
 win32_ipc_server_create(const char *path, char **cause)
 {
 	struct sockaddr_un	 sun;
-	char			*normalized, *parent;
-	char			*slash;
+	char			*normalized;
 	SOCKET			 fd;
-	int			 saved_errno, wrapped_fd;
+	int			 error, saved_errno, wrapped_fd;
 
 	normalized = win32_ipc_normalize_path(path);
 	if (normalized == NULL) {
@@ -913,22 +968,14 @@ win32_ipc_server_create(const char *path, char **cause)
 		free(normalized);
 		return (-1);
 	}
-
-	parent = xstrdup(normalized);
-	slash = strrchr(parent, '/');
-	if (slash != NULL) {
-		*slash = '\0';
-		if (win32_ipc_ensure_dir(parent, cause) != 0) {
-			free(parent);
-			free(normalized);
-			return (-1);
-		}
+	if (win32_ipc_ensure_parent_dir(normalized, cause) != 0) {
+		free(normalized);
+		return (-1);
 	}
-	free(parent);
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd == INVALID_SOCKET) {
-		int error = WSAGetLastError();
+		error = WSAGetLastError();
 
 		if (cause != NULL) {
 			xasprintf(cause, "socket failed: %s",
@@ -938,7 +985,7 @@ win32_ipc_server_create(const char *path, char **cause)
 		return (-1);
 	}
 	if (bind(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
-		int error = WSAGetLastError();
+		error = WSAGetLastError();
 
 		if (cause != NULL) {
 			xasprintf(cause, "error creating %s (%s)", normalized,
@@ -950,7 +997,7 @@ win32_ipc_server_create(const char *path, char **cause)
 		return (-1);
 	}
 	if (listen(fd, 128) != 0) {
-		int error = WSAGetLastError();
+		error = WSAGetLastError();
 
 		if (cause != NULL) {
 			xasprintf(cause, "error listening on %s (%s)", normalized,
@@ -987,7 +1034,7 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 	struct sockaddr_un	 sun;
 	char			*normalized;
 	SOCKET			 fd;
-	int			 wrapped_fd;
+	int			 error, saved_errno, wrapped_fd;
 
 	normalized = win32_ipc_normalize_path(path);
 	if (normalized == NULL) {
@@ -1003,7 +1050,7 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd == INVALID_SOCKET) {
-		int error = WSAGetLastError();
+		error = WSAGetLastError();
 
 		if (cause != NULL) {
 			xasprintf(cause, "socket failed: %s",
@@ -1014,15 +1061,18 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 		return (-1);
 	}
 	if (connect(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
-		int error = WSAGetLastError();
+		error = WSAGetLastError();
+		saved_errno = win32_ipc_errno(error);
+		if (win32_ipc_path_missing(normalized))
+			saved_errno = ENOENT;
 
-		log_debug("%s: connect(%s) failed with WSA %d", __func__,
-		    normalized, error);
+		log_debug("%s: connect(%s) failed with WSA %d -> errno %d",
+		    __func__, normalized, error, saved_errno);
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't connect to %s: %s", normalized,
-			    win32_strerror(error));
+			    strerror(saved_errno));
 		}
-		errno = win32_ipc_errno(error);
+		errno = saved_errno;
 		closesocket(fd);
 		free(normalized);
 		return (-1);

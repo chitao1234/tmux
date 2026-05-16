@@ -457,6 +457,21 @@ function Test-ExplicitSocketAliasing {
     return "explicit -S aliasing and case folding"
 }
 
+function Test-ExplicitMissingParentStartup {
+    $socketPath = Join-Path $script:ArtifactRoot "Nest\Sock"
+
+    Invoke-Tmux -Arguments @("-S", $socketPath, "start-server") | Out-Null
+    $socketResult = Invoke-Tmux -Arguments @("-S", $socketPath, "display-message", "-p", "#{socket_path}")
+    $resolved = ($socketResult.Output | Select-Object -Last 1).Trim()
+
+    Assert-True (Test-ComparablePathEquals $resolved $socketPath) "resolved socket path '$resolved' did not match expected '$socketPath'"
+    Assert-True (Test-Path -LiteralPath $socketPath) "explicit missing-parent startup did not create socket path: $socketPath"
+
+    Invoke-Tmux -Arguments @("-S", $socketPath, "kill-server") | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath ($socketPath + ".lock"))) "explicit missing-parent startup left a .lock file: $socketPath.lock"
+    return "explicit -S startup with missing parent"
+}
+
 function Test-StaleDetachedStartup {
     $socketPath = Join-Path $script:ArtifactRoot "stale-detached.sock"
     Set-Content -LiteralPath $socketPath -Value "stale" -NoNewline
@@ -567,6 +582,7 @@ $skipped = New-Object System.Collections.Generic.List[string]
 try {
     $results.Add((Test-DefaultLabelStartup))
     $results.Add((Test-ExplicitSocketAliasing))
+    $results.Add((Test-ExplicitMissingParentStartup))
     $results.Add((Test-StaleDetachedStartup))
     $results.Add((Test-ConcurrentAutostart))
     $results.Add((Test-ConcurrentStartServer))
