@@ -184,6 +184,10 @@ server_kill_pane(struct window_pane *wp)
 {
 	struct window	*w = wp->window;
 
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL)
+		win32_pane_terminate(wp);
+#endif
 	if (window_count_panes(w) == 1) {
 		server_kill_window(w, 1);
 		recalculate_sizes();
@@ -334,7 +338,7 @@ server_destroy_pane(struct window_pane *wp, int notify)
 	}
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL)
-		win32_pane_close(wp);
+		win32_pane_cleanup(wp);
 #endif
 
 	remain_on_exit = options_get_number(wp->options, "remain-on-exit");

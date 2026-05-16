@@ -1221,8 +1221,8 @@ win32_pane_resize(struct window_pane *wp, u_int sx, u_int sy)
 	ResizePseudoConsole(wp->win32->hpcon, size);
 }
 
-void
-win32_pane_close(struct window_pane *wp)
+static void
+win32_pane_release(struct window_pane *wp, int terminate)
 {
 	struct win32_pane	*pw = wp->win32;
 	struct bufferevent	*event;
@@ -1232,7 +1232,8 @@ win32_pane_close(struct window_pane *wp)
 	wp->win32 = NULL;
 	event = wp->event;
 	wp->event = NULL;
-	win32_child_kill("pane", pw->process_id, pw->job, pw->process);
+	if (terminate)
+		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
 	win32_pane_disconnect(pw);
 	if (pw->process_event != NULL)
 		win32_io_endpoint_free(pw->process_event);
@@ -1245,6 +1246,18 @@ win32_pane_close(struct window_pane *wp)
 	win32_close_handle(&pw->thread);
 	win32_close_handle(&pw->process);
 	free(pw);
+}
+
+void
+win32_pane_cleanup(struct window_pane *wp)
+{
+	win32_pane_release(wp, 0);
+}
+
+void
+win32_pane_terminate(struct window_pane *wp)
+{
+	win32_pane_release(wp, 1);
 }
 
 int

@@ -941,6 +941,10 @@ window_destroy_panes(struct window *w)
 
 	while (!TAILQ_EMPTY(&w->panes)) {
 		wp = TAILQ_FIRST(&w->panes);
+#ifdef TMUX_WIN32
+		if (wp->win32 != NULL)
+			win32_pane_terminate(wp);
+#endif
 		TAILQ_REMOVE(&w->panes, wp, entry);
 		window_pane_destroy(wp);
 	}
@@ -1075,7 +1079,7 @@ window_pane_destroy(struct window_pane *wp)
 
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL)
-		win32_pane_close(wp);
+		win32_pane_cleanup(wp);
 #endif
 	window_pane_close_pipe(wp);
 
