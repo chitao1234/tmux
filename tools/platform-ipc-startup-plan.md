@@ -533,6 +533,8 @@ Build:
 Windows runtime validation:
 
 - run natively from PowerShell, not under MSYS2;
+- checked-in native smoke now lives in
+  `tools/win32-ipc-startup-smoke.ps1`;
 - smoke `start-server`, `list-commands`, `kill-server`;
 - race `tmux -D` against ordinary client autostart on the same socket;
 - run many concurrent `start-server` or `list-commands` processes against one
@@ -549,6 +551,8 @@ Unix validation:
 
 - run the normal startup path and explicit `-S` path flow;
 - verify lock-and-retry behavior still works under concurrent autostart.
+- a Unix-oriented shared regression now exists in `regress/ipc-startup.sh`;
+  it still needs execution on a Unix host.
 - Status on 2026-05-16: still pending because this host is Windows-only under
   the active toolchain policy.
 

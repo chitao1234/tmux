@@ -418,6 +418,8 @@ current implementation:
 
 Tracked native smoke coverage now exists for:
 
+- IPC startup, stale recovery, and startup races:
+  `tools/win32-ipc-startup-smoke.ps1`
 - non-console direct-handle I/O:
   `tools/win32-direct-handle-smoke.ps1`
 - native-console relay:
