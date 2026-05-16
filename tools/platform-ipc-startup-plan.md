@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: Redesign
+Status: Implementation In Progress
 
 Related docs:
 
@@ -25,6 +25,15 @@ The shared tmux call sites should use one abstract API. They must not care
 whether the backend uses `flock`, `LockFileEx`, a mutex, or any other
 platform-specific primitive.
 
+Current tree status:
+
+- endpoint resolution already produces a shared `struct ipc_endpoint`;
+- coordination and listener ownership now have backend-neutral shared APIs;
+- shared code now calls backend operations for connect, coordination, listener
+  create, stale removal, and listener destruction;
+- the remaining work is to finish collapsing the last split startup control
+  flow and to validate stale-endpoint recovery and race cases.
+
 This is not a request for "a better Win32 lock." It is a request to stop
 letting the Unix startup model define the shared control flow and then bolting
 Win32 behavior onto its side.
@@ -43,17 +52,15 @@ Today the product policy is fragmented:
   normalization, directory preparation, and unlink-before-bind behavior.
 
 That means Unix currently defines the shape of tmux startup, while Win32 tries
-to imitate pieces of it out of band. Even the new shared
-[`ipc-startup.c`](../ipc-startup.c) is only a halfway step: it centralizes some
-startup sequencing, but it still hardcodes Unix-shaped concepts such as
-`path.lock` naming and path-string-based guard acquisition into the shared
-layer.
+to imitate pieces of it out of band. The recent shared
+[`ipc-startup.c`](../ipc-startup.c) work fixed part of that by introducing a
+common endpoint, coordination, and listener contract, but the startup state
+machine is still only partially unified at the call-site level.
 
 The result is exactly the drift the port is showing now:
 
 - raw path strings are used as identity in one place and filesystem objects in
   another;
-- coordination object naming still leaks into shared code;
 - `CLIENT_NOFORK` semantics and detached helper semantics remain awkward because
   startup ownership is not modeled explicitly;
 - listener creation and stale cleanup are not part of one shared state machine;

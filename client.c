@@ -160,9 +160,9 @@ client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
 	const char	*path = ipc_endpoint_path(endpoint);
 	char	*cause = NULL;
 	int	 fd, i, saved_errno;
-	struct ipc_startup_guard *startup_guard = NULL;
+	struct ipc_coordination *coordination = NULL;
 
-	fd = win32_ipc_client_connect(path, flags, &cause);
+	fd = ipc_endpoint_connect(endpoint, flags, &cause);
 	if (fd != -1) {
 		setblocking(fd, 0);
 		return (fd);
@@ -176,7 +176,7 @@ client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
 		return (-1);
 	if (~flags & CLIENT_STARTSERVER)
 		return (-1);
-	if (ipc_startup_guard_acquire(endpoint, &startup_guard, &cause) != 0) {
+	if (ipc_coordination_acquire(endpoint, &coordination, &cause) != 0) {
 		if (cause != NULL) {
 			log_debug("%s", cause);
 			free(cause);
@@ -188,9 +188,9 @@ client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
 	 * Another client may have started the server while this client was
 	 * waiting for the startup lock.
 	 */
-	fd = win32_ipc_client_connect(path, flags, &cause);
+	fd = ipc_endpoint_connect(endpoint, flags, &cause);
 	if (fd != -1) {
-		ipc_startup_guard_release(startup_guard);
+		ipc_coordination_release(coordination);
 		setblocking(fd, 0);
 		return (fd);
 	}
@@ -200,28 +200,27 @@ client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
 		cause = NULL;
 	}
 	saved_errno = errno;
-	if (saved_errno != ENOENT && saved_errno != ECONNREFUSED &&
-	    saved_errno != ETIMEDOUT) {
-		ipc_startup_guard_release(startup_guard);
+	if (!ipc_endpoint_connect_dead(endpoint, saved_errno)) {
+		ipc_coordination_release(coordination);
 		errno = saved_errno;
 		return (-1);
 	}
 
 	if (flags & CLIENT_NOFORK)
-		return (server_start(client_proc, flags, base, startup_guard));
+		return (server_start(client_proc, flags, base, coordination));
 
 	if (win32_server_spawn(path, flags, &cause) != 0) {
 		if (cause != NULL) {
 			log_debug("%s", cause);
 			free(cause);
 		}
-		ipc_startup_guard_release(startup_guard);
+		ipc_coordination_release(coordination);
 		return (-1);
 	}
 	for (i = 0; i < 100; i++) {
-		fd = win32_ipc_client_connect(path, flags, &cause);
+		fd = ipc_endpoint_connect(endpoint, flags, &cause);
 		if (fd != -1) {
-			ipc_startup_guard_release(startup_guard);
+			ipc_coordination_release(coordination);
 			setblocking(fd, 0);
 			return (fd);
 		}
@@ -231,54 +230,38 @@ client_connect(struct event_base *base, struct ipc_endpoint *endpoint,
 			cause = NULL;
 		}
 		saved_errno = errno;
-		if (saved_errno != ENOENT && saved_errno != ECONNREFUSED &&
-		    saved_errno != ETIMEDOUT) {
-			ipc_startup_guard_release(startup_guard);
+		if (!ipc_endpoint_connect_dead(endpoint, saved_errno)) {
+			ipc_coordination_release(coordination);
 			errno = saved_errno;
 			return (-1);
 		}
 		Sleep(50);
 	}
-	ipc_startup_guard_finish(startup_guard);
+	ipc_coordination_finish(coordination);
 	errno = ETIMEDOUT;
 	return (-1);
 #else
-	const char		*path = ipc_endpoint_path(endpoint);
-	struct sockaddr_un	sa;
-	size_t			size;
 	int			fd, locked = 0;
-	struct ipc_startup_guard *startup_guard = NULL;
+	struct ipc_coordination *coordination = NULL;
 
-	memset(&sa, 0, sizeof sa);
-	sa.sun_family = AF_UNIX;
-	size = strlcpy(sa.sun_path, path, sizeof sa.sun_path);
-	if (size >= sizeof sa.sun_path) {
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
-	log_debug("socket is %s", path);
+	log_debug("socket is %s", ipc_endpoint_path(endpoint));
 
 retry:
-	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
-		return (-1);
-
 	log_debug("trying connect");
-	if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == -1) {
+	fd = ipc_endpoint_connect(endpoint, flags, NULL);
+	if (fd == -1) {
 		log_debug("connect failed: %s", strerror(errno));
-		if (errno != ECONNREFUSED && errno != ENOENT)
+		if (!ipc_endpoint_connect_dead(endpoint, errno))
 			goto failed;
 		if (flags & CLIENT_NOSTARTSERVER)
 			goto failed;
 		if (~flags & CLIENT_STARTSERVER)
 			goto failed;
-		close(fd);
 
 		if (!locked) {
-			if (ipc_startup_guard_acquire(endpoint, &startup_guard,
-			    NULL) != 0) {
-				if (errno == EAGAIN)
-					goto retry;
-			}
+			if (ipc_coordination_acquire(endpoint, &coordination,
+			    NULL) != 0)
+				goto failed;
 
 			/*
 			 * Always retry at least once, even if we got the lock,
@@ -290,18 +273,17 @@ retry:
 			goto retry;
 		}
 
-		fd = server_start(client_proc, flags, base, startup_guard);
+		fd = server_start(client_proc, flags, base, coordination);
 	}
 
 	if (locked)
-		ipc_startup_guard_release(startup_guard);
+		ipc_coordination_release(coordination);
 	setblocking(fd, 0);
 	return (fd);
 
 failed:
 	if (locked)
-		ipc_startup_guard_release(startup_guard);
-	close(fd);
+		ipc_coordination_release(coordination);
 	return (-1);
 #endif
 }

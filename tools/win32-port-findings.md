@@ -38,8 +38,8 @@ The remaining problems are the second-order gaps around that progress:
    semantics, so authenticated same-user clients still bypass the Unix-shaped
    read-only and deny model.
 2. Socket-path policy is still weak for explicit `-S` and inherited `$TMUX`
-   paths, and the new startup abstraction still exposes too much backend detail
-   and too much raw-path identity to shared code.
+   paths, and startup control flow is still not fully unified across detached
+   helper and foreground cases.
 3. Native Windows command/path policy is still inconsistent with tmux's
    Unix-shaped assumptions, especially around `cmd.exe` quoting, `/foo` vs
    `\foo`, `~\`, drive-letter path lists, and basename parsing.
@@ -127,49 +127,44 @@ Required direction:
 - If explicit custom paths remain supported, validate parent ownership,
   reparse-point behavior, and endpoint cleanup rules before bind/unlink.
 
-### P1: Endpoint startup coordination is still Unix-shaped in the shared layer
+### P1: Endpoint startup control flow is still only partially unified
 
 Files:
 
-- [`ipc-startup.c`](../ipc-startup.c): shared code still manufactures
-  `"%s.lock"` itself and acquires coordination by raw path string.
-- [`client.c`](../client.c): startup flow is moving into the shared helper, but
-  detached-helper versus foreground ownership is still visible in call-site
-  control flow.
-- [`server.c`](../server.c): listener creation is centralized, but listener
-  ownership is still represented mostly as an `fd` and `socket_path`.
-- [`win32-ipc.c`](../win32-ipc.c): backend normalization and cleanup tracking
-  still live beside shared policy rather than behind a complete endpoint
-  backend contract.
+- [`ipc-startup.c`](../ipc-startup.c): now owns a backend-neutral endpoint,
+  coordination, and listener contract, but it still does not fully own the
+  entire connect-or-start state machine.
+- [`client.c`](../client.c): detached-helper spawn versus foreground server
+  startup is still visible in platform branches.
+- [`server.c`](../server.c): server start still receives coordination from the
+  caller rather than entering through one shared startup service.
+- [`win32-proc.c`](../win32-proc.c): detached helper startup remains a distinct
+  product path that the shared IPC layer does not yet hide.
 
 Problem:
 
-The tree is no longer primarily suffering from the old hashed-mutex design. The
-more important remaining weakness is that the shared startup layer is still
-structured around Unix assumptions and path strings rather than around a fully
-abstract endpoint service. Recent work moved sequencing into `ipc-startup.c`,
-but that file still knows about `.lock` suffixes, still accepts raw path text
-instead of an endpoint object, and still leaves listener ownership and path
-canonicalization split across shared and Win32-specific code.
+The tree is no longer primarily suffering from the old hashed-mutex design, and
+the shared layer no longer manufactures coordination names or cleanup policy
+directly. The remaining weakness is that startup sequencing is still split
+between the shared endpoint service and platform-shaped call-site control flow,
+especially around detached helper startup, foreground startup, and the final
+connect-or-timeout loop.
 
 Why it matters:
 
-As long as shared code keeps backend naming and identity rules, every further
-Win32 fix in this area remains fragile. Path aliasing, helper handoff,
-foreground/detached differences, stale cleanup, and future backend changes all
-continue to leak through call sites because the abstraction boundary is still
-too weak.
+As long as callers still own visible pieces of the startup state machine, every
+further Win32 fix in this area remains fragile. Helper handoff,
+foreground-versus-detached differences, stale cleanup retries, and future
+backend changes can still leak through call sites because the abstraction
+boundary is improved but not complete.
 
 Required direction:
 
-- Replace path-based startup helpers with a backend-neutral endpoint service
-  that owns path resolution, coordination, stale probing, and listener
-  ownership.
-- Make shared call sites use opaque endpoint, coordination, and listener
-  objects rather than `.lock` suffixes, pathname strings, or backend cleanup
-  rules.
-- Canonicalize endpoint identity once, then reuse it for connect, coordination,
-  bind, stale cleanup, and listener destruction.
+- Finish moving client connect-or-start sequencing into the shared endpoint
+  service so callers do not branch on backend startup mechanics.
+- Keep callers on opaque endpoint, coordination, and listener objects only.
+- Validate stale-endpoint recovery and concurrent startup behavior under the new
+  backend contract.
 - Keep backend choice hidden so the same shared code works whether the backend
   uses `flock`, `LockFileEx`, a mutex, or another primitive.
 - The broader cross-platform redesign for this area is tracked in

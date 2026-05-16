@@ -147,7 +147,7 @@ server_tidy_event(__unused tmux_event_fd fd, __unused short events, __unused voi
 /* Fork new server. */
 int
 server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
-    struct ipc_startup_guard *startup_guard)
+    struct ipc_coordination *coordination)
 {
 	int		 fd;
 #ifndef TMUX_WIN32
@@ -167,7 +167,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 #ifndef TMUX_WIN32
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
 #endif
-			ipc_startup_guard_release(startup_guard);
+			ipc_coordination_release(coordination);
 			return (fd);
 		}
 	}
@@ -222,8 +222,8 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 		options_set_number(global_options, "exit-empty", 0);
 #endif
 
-	if (startup_guard != NULL)
-		ipc_startup_guard_finish(startup_guard);
+	if (coordination != NULL)
+		ipc_coordination_finish(coordination);
 
 	if (cause != NULL) {
 		if (c != NULL) {

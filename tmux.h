@@ -50,6 +50,7 @@ struct args;
 struct args_command_state;
 struct client;
 struct ipc_endpoint;
+struct ipc_coordination;
 struct ipc_listener;
 struct cmd;
 struct cmd_find_state;
@@ -87,7 +88,6 @@ struct tty_code;
 struct tty_key;
 struct tmuxpeer;
 struct tmuxproc;
-struct ipc_startup_guard;
 struct winlink;
 #ifdef TMUX_WIN32
 struct win32_ipc_peer_identity;
@@ -3089,7 +3089,7 @@ int	 server_is_marked(struct session *, struct winlink *,
 	     struct window_pane *);
 int	 server_check_marked(void);
 int	 server_start(struct tmuxproc *, uint64_t, struct event_base *,
-	     struct ipc_startup_guard *);
+	     struct ipc_coordination *);
 void	 server_update_socket(void);
 void	 server_add_accept(int);
 void printflike(1, 2) server_add_message(const char *, ...);
@@ -3099,13 +3099,15 @@ int	 server_create_socket(uint64_t, char **);
 struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
 const char	*ipc_endpoint_path(struct ipc_endpoint *);
 void		 ipc_endpoint_free(struct ipc_endpoint *);
-int	 ipc_startup_guard_acquire(struct ipc_endpoint *,
-	     struct ipc_startup_guard **, char **);
+int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
+int	 ipc_endpoint_connect_dead(struct ipc_endpoint *, int);
+int	 ipc_coordination_acquire(struct ipc_endpoint *,
+	     struct ipc_coordination **, char **);
 int	 ipc_server_create(struct ipc_endpoint *, uint64_t,
 	     struct ipc_listener **, char **);
 void		 ipc_listener_destroy(struct ipc_listener *);
-void	 ipc_startup_guard_finish(struct ipc_startup_guard *);
-void	 ipc_startup_guard_release(struct ipc_startup_guard *);
+void	 ipc_coordination_finish(struct ipc_coordination *);
+void	 ipc_coordination_release(struct ipc_coordination *);
 
 /* server-client.c */
 RB_PROTOTYPE(client_windows, client_window, entry, server_client_window_cmp);

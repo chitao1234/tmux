@@ -1016,6 +1016,8 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause
 	if (connect(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
 		int error = WSAGetLastError();
 
+		log_debug("%s: connect(%s) failed with WSA %d", __func__,
+		    normalized, error);
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't connect to %s: %s", normalized,
 			    win32_strerror(error));
