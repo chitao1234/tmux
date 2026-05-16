@@ -1,6 +1,17 @@
 name: IPC Startup Regress
 
 on:
+  push:
+    paths:
+      - .github/workflows/ipc-startup-regress.yml
+      - client.c
+      - ipc-startup.c
+      - proc.c
+      - regress/ipc-startup.sh
+      - server.c
+      - tmux.c
+      - tmux.h
+      - win32-ipc.c
   pull_request:
     paths:
       - .github/workflows/ipc-startup-regress.yml
