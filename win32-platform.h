@@ -104,6 +104,7 @@ const char	*win32_default_socket_dir(void);
 int		 win32_ipc_ensure_socket_dir(const char *, char **);
 int		 win32_ipc_ensure_parent_dir(const char *, char **);
 int		 win32_ipc_validate_socket_parent(const char *, char **);
+char		*win32_ipc_startup_guard_path(const char *, char **);
 int		 win32_ipc_server_create(const char *, char **);
 int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);

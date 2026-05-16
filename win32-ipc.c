@@ -36,6 +36,7 @@ static TAILQ_HEAD(, win32_ipc_socket_entry) win32_ipc_sockets =
     TAILQ_HEAD_INITIALIZER(win32_ipc_sockets);
 static int win32_ipc_next_id = 3;
 static char *win32_ipc_socket_dir;
+static char *win32_ipc_shared_dir;
 static char *win32_ipc_current_user_sid_value;
 static char *win32_ipc_current_integrity_value;
 static DWORD win32_ipc_current_integrity_rid;
@@ -61,10 +62,17 @@ static int	win32_ipc_cache_current_identity(void);
 static int	win32_ipc_get_path_attributes(const char *, DWORD *, DWORD *,
 		    char **);
 static int	win32_ipc_make_managed_root(char **, char **);
+static int	win32_ipc_make_shared_root(char **, char **);
 static int	win32_ipc_path_owner_is_current_user(const char *, int *,
 		    char **);
+static int	win32_ipc_hash_text_hex(const char *, char **, char **);
+static const char *win32_ipc_shared_coordination_dir(char **);
+static int	win32_ipc_set_path_security_with_label(const char *,
+		    const char *, char **);
 static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
+static int	win32_ipc_ensure_secured_dir(const char *, const char *,
+		    char **);
 static char    *win32_ipc_normalize_path(const char *);
 static int	win32_ipc_path_is_root(const char *);
 
@@ -849,7 +857,137 @@ win32_ipc_make_managed_root(char **path, char **cause)
 }
 
 static int
-win32_ipc_set_path_security(const char *path, char **cause)
+win32_ipc_make_shared_root(char **path, char **cause)
+{
+	char		*localappdata;
+	char		*base = NULL, *normalized;
+
+	*path = NULL;
+	localappdata = win32_getenv_utf8("LOCALAPPDATA");
+	if (localappdata == NULL || *localappdata == '\0' ||
+	    !path_is_absolute(localappdata)) {
+		if (cause != NULL)
+			xasprintf(cause, "LOCALAPPDATA is unavailable");
+		free(localappdata);
+		errno = ENOENT;
+		return (-1);
+	}
+
+	xasprintf(&base, "%s/tmux-shared", localappdata);
+	free(localappdata);
+	normalized = win32_ipc_normalize_path(base);
+	free(base);
+	if (normalized == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't normalize shared IPC path");
+		errno = EINVAL;
+		return (-1);
+	}
+	*path = normalized;
+	return (0);
+}
+
+static int
+win32_ipc_hash_text_hex(const char *text, char **digest, char **cause)
+{
+	BCRYPT_ALG_HANDLE	 alg = NULL;
+	BCRYPT_HASH_HANDLE	 hash = NULL;
+	UCHAR			*object = NULL;
+	UCHAR			*sum = NULL;
+	DWORD			 objectlen = 0, hashlen = 0, datalen;
+	NTSTATUS		 status;
+	char			*hex = NULL;
+	u_int			 i;
+	int			 retval = -1;
+
+	*digest = NULL;
+	if (text == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL,
+	    0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptOpenAlgorithmProvider failed:"
+			    " %#lx", (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+	status = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objectlen,
+	    sizeof objectlen, &datalen, 0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptGetProperty(ObjectLength)"
+			    " failed: %#lx", (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+	status = BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, (PUCHAR)&hashlen,
+	    sizeof hashlen, &datalen, 0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptGetProperty(HashLength)"
+			    " failed: %#lx", (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+
+	object = xmalloc(objectlen);
+	sum = xmalloc(hashlen);
+	status = BCryptCreateHash(alg, &hash, object, objectlen, NULL, 0, 0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptCreateHash failed: %#lx",
+			    (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+	status = BCryptHashData(hash, (PUCHAR)text, (ULONG)strlen(text), 0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptHashData failed: %#lx",
+			    (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+	status = BCryptFinishHash(hash, sum, hashlen, 0);
+	if (status != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "BCryptFinishHash failed: %#lx",
+			    (unsigned long)status);
+		}
+		errno = EACCES;
+		goto out;
+	}
+
+	hex = xmalloc(hashlen * 2 + 1);
+	for (i = 0; i < hashlen; i++)
+		snprintf(hex + i * 2, 3, "%02x", sum[i]);
+	*digest = hex;
+	hex = NULL;
+	retval = 0;
+
+out:
+	free(hex);
+	if (hash != NULL)
+		BCryptDestroyHash(hash);
+	free(sum);
+	free(object);
+	if (alg != NULL)
+		BCryptCloseAlgorithmProvider(alg, 0);
+	return (retval);
+}
+
+static int
+win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
+    char **cause)
 {
 	PSECURITY_DESCRIPTOR	 sd = NULL;
 	PACL			 dacl = NULL, sacl = NULL;
@@ -861,10 +999,17 @@ win32_ipc_set_path_security(const char *path, char **cause)
 	int			 retval = -1;
 
 	if (win32_ipc_cache_current_identity() != 0 ||
-	    win32_ipc_current_user_sid_value == NULL ||
-	    win32_ipc_current_integrity_value == NULL) {
+	    win32_ipc_current_user_sid_value == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't determine current token");
+		errno = EACCES;
+		return (-1);
+	}
+	if (integrity == NULL)
+		integrity = win32_ipc_current_integrity_value;
+	if (integrity == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine current integrity");
 		errno = EACCES;
 		return (-1);
 	}
@@ -876,15 +1021,15 @@ win32_ipc_set_path_security(const char *path, char **cause)
 		goto out;
 	}
 
-	if (strcmp(win32_ipc_current_integrity_value, "l") == 0) {
+	if (strcmp(integrity, "l") == 0) {
 		xasprintf(&sddl,
 		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;LW)",
 		    win32_ipc_current_user_sid_value);
-	} else if (strcmp(win32_ipc_current_integrity_value, "h") == 0) {
+	} else if (strcmp(integrity, "h") == 0) {
 		xasprintf(&sddl,
 		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;HI)",
 		    win32_ipc_current_user_sid_value);
-	} else if (strcmp(win32_ipc_current_integrity_value, "s") == 0) {
+	} else if (strcmp(integrity, "s") == 0) {
 		xasprintf(&sddl,
 		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;SI)",
 		    win32_ipc_current_user_sid_value);
@@ -952,6 +1097,46 @@ out:
 	if (sd != NULL)
 		LocalFree(sd);
 	return (retval);
+}
+
+static const char *
+win32_ipc_shared_coordination_dir(char **cause)
+{
+	if (win32_ipc_shared_dir == NULL &&
+	    win32_ipc_make_shared_root(&win32_ipc_shared_dir, cause) != 0)
+		return (NULL);
+	if (win32_ipc_ensure_secured_dir(win32_ipc_shared_dir, "l", cause) != 0)
+		return (NULL);
+	return (win32_ipc_shared_dir);
+}
+
+char *
+win32_ipc_startup_guard_path(const char *compare_path, char **cause)
+{
+	const char	*dir;
+	char		*digest = NULL, *path;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (compare_path == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+
+	dir = win32_ipc_shared_coordination_dir(cause);
+	if (dir == NULL)
+		return (NULL);
+	if (win32_ipc_hash_text_hex(compare_path, &digest, cause) != 0)
+		return (NULL);
+	xasprintf(&path, "%s/startup-%s.lock", dir, digest);
+	free(digest);
+	return (path);
+}
+
+static int
+win32_ipc_set_path_security(const char *path, char **cause)
+{
+	return (win32_ipc_set_path_security_with_label(path, NULL, cause));
 }
 
 static int
@@ -1027,14 +1212,23 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 	return (0);
 }
 
+static int
+win32_ipc_ensure_secured_dir(const char *path, const char *integrity,
+    char **cause)
+{
+	if (win32_ipc_ensure_dir(path, cause) != 0)
+		return (-1);
+	if (win32_ipc_set_path_security_with_label(path, integrity, cause) != 0)
+		return (-1);
+	return (0);
+}
+
 int
 win32_ipc_ensure_socket_dir(const char *path, char **cause)
 {
 	if (win32_ipc_ensure_dir(path, cause) != 0)
 		return (-1);
-	if (win32_ipc_set_path_security(path, cause) != 0)
-		return (-1);
-	return (0);
+	return (win32_ipc_set_path_security(path, cause));
 }
 
 int

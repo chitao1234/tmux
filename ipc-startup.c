@@ -989,14 +989,9 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 	coordination->backend = &ipc_backend;
 	coordination->data = data;
 	data->handle = INVALID_HANDLE_VALUE;
-	if (win32_ipc_ensure_parent_dir(ipc_endpoint_path(endpoint), cause) != 0) {
-		free(data);
-		free(coordination);
-		return (-1);
-	}
-	xasprintf(&data->path, "%s.lock", ipc_endpoint_compare_path(endpoint));
-	if (win32_ipc_ensure_parent_dir(data->path, cause) != 0) {
-		free(data->path);
+	data->path = win32_ipc_startup_guard_path(
+	    ipc_endpoint_compare_path(endpoint), cause);
+	if (data->path == NULL) {
 		free(data);
 		free(coordination);
 		return (-1);

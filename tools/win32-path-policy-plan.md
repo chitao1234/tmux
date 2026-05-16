@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: In progress
+Status: Completed
 
 Related docs:
 
@@ -30,14 +30,14 @@ Completed in tree:
 - explicit `-S` and inherited `$TMUX` now validate the parent chain before any
   startup-side mutation for non-managed endpoints, including parent creation,
   `.lock` acquisition, stale cleanup, and listener recovery;
+- Win32 startup coordination now uses a backend-owned shared guard namespace
+  under `LOCALAPPDATA`, keyed by endpoint comparison identity, so explicit
+  endpoints no longer require sibling `.lock` creation beside the socket path;
 - the checked-in native PowerShell startup smoke now covers inherited `$TMUX`
   startup on an explicit path and unsafe explicit `-S` rejection, and it
   passes again when invoked directly from native PowerShell.
 
-Still pending after that:
-
-- any coordination redesign needed if sibling `.lock` files remain incompatible
-  with the final explicit-endpoint trust policy.
+No remaining implementation stages are left in this plan.
 
 ## Goal
 
@@ -580,7 +580,7 @@ Completed outcome:
 
 ### Stage 6: Decouple coordination from sibling `.lock` when needed
 
-Status: pending
+Status: completed
 
 If explicit endpoint policy shows that sibling `.lock` files force unnecessary
 directory mutation outside trusted roots, move coordination into a backend-owned
@@ -597,6 +597,15 @@ Success condition:
 
 - startup coordination no longer weakens explicit endpoint policy merely because
   the current lock representation lives next to the socket path.
+
+Completed outcome:
+
+- Win32 startup coordination now maps each endpoint comparison identity to a
+  shared guard path under `LOCALAPPDATA/tmux-shared`;
+- the coordination artifact remains behind the shared `ipc-startup.c`
+  abstraction and is no longer materialized beside explicit socket paths;
+- native PowerShell startup smoke still passes, and a targeted explicit-path
+  repro now shows shared guard creation without a sibling `<socket>.lock`.
 
 ## Testing Plan
 
@@ -649,14 +658,10 @@ Verify:
 
 ### Immediate next slice
 
-The next implementation step should stay narrowly scoped:
+No further implementation slice remains inside this plan.
 
-1. decide whether Stage 6 should keep sibling `.lock` files for validated
-   explicit endpoints or move coordination into a backend-private namespace.
-
-Stage 5 now proves that explicit startup mutation can be gated correctly, so
-the next remaining path-policy question is whether adjacent `.lock` files are
-still an acceptable product constraint for validated explicit endpoints.
+Follow-on Win32 work now belongs to separate areas such as auth and ACL
+semantics, command quoting, glob semantics, and broader regression coverage.
 
 ### Case behavior
 

@@ -37,16 +37,12 @@ The remaining problems are the second-order gaps around that progress:
 1. Win32 auth is not yet integrated into tmux's ACL and `server-access`
    semantics, so authenticated same-user clients still bypass the Unix-shaped
    read-only and deny model.
-2. Explicit socket-path mutation is now validated, but startup coordination
-   still depends on adjacent `.lock` files and startup control flow is still
-   not fully unified across detached helper and foreground cases.
-3. Native Windows command/path policy is still inconsistent with tmux's
-   Unix-shaped assumptions, especially around `cmd.exe` quoting, `/foo` vs
-   `\foo`, `~\`, drive-letter path lists, and basename parsing.
-4. Pane/job lifecycle still conflates passive cleanup, forced termination,
+2. Native Windows command launch is still fragile around `cmd.exe` quoting and
+   popup editor argv handling.
+3. Pane/job lifecycle still conflates passive cleanup, forced termination,
    helper-job teardown, and the distinction between process exit and drained
    output EOF.
-5. Relay is now explicitly a first-class transport for native console clients,
+4. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
 
@@ -89,42 +85,6 @@ Required direction:
   tmux behavior.
 - Define what `server-access -r/-w` should mean for same-user multi-logon
   attaches.
-
-### P2: Explicit Win32 socket coordination still depends on adjacent `.lock`
-
-Files:
-
-- [`ipc-startup.c`](../ipc-startup.c): `ipc_endpoint_resolve()` now owns
-  default `-L` resolution, shared canonical endpoint identity, and startup
-  coordination for all socket-path sources.
-- [`ipc-startup.c`](../ipc-startup.c): Win32 coordination still materializes
-  `path.lock` beside the endpoint, keyed by the comparison identity.
-- [`win32-ipc.c`](../win32-ipc.c): explicit `-S` and inherited `$TMUX`
-  startup-side mutation is now parent-validated before directory creation,
-  stale cleanup, or listener recovery.
-
-Problem:
-
-The managed default socket root under `LOCALAPPDATA` still has the strongest
-policy, but explicit `-S` and inherited `$TMUX` paths are no longer untrusted
-text. The current tree now validates the parent chain before any startup-side
-mutation for non-managed endpoints. The remaining gap is that startup
-coordination still creates a sibling `.lock` file beside the endpoint rather
-than using a backend-private coordination namespace.
-
-Why it matters:
-
-The current policy is now safe enough for validated user-owned directories, but
-the `.lock` placement is still coupled to the endpoint filesystem layout. That
-keeps explicit endpoint policy and startup coordination more tightly coupled
-than they need to be and leaves Stage 6 path-policy work open.
-
-Required direction:
-
-- Decide whether validated explicit endpoints should continue using adjacent
-  `.lock` coordination or move to a backend-private namespace keyed by the
-  comparison identity.
-- Keep any redesign behind the shared `ipc-startup.c` abstraction.
 
 ### P1: `cmd.exe` command building and popup editor launch are still fragile
 
@@ -281,43 +241,6 @@ Required direction:
 - Treat future relay replacement as gated on usable detached-server console
   handles, not merely on handle transfer.
 
-### P2: Win32 path policy is still inconsistent across tmux
-
-Files:
-
-- [`tmux.c`](../tmux.c): `path_is_absolute()` accepts `/foo` but not single
-  leading `\foo`.
-- [`win32-error.c`](../win32-error.c): `win32_resolve_cwd()` rejects `/foo`
-  as an invalid Win32 working directory.
-- [`tmux.c`](../tmux.c): `expand_path()` only expands `~/`, not `~\`.
-- [`cfg.c`](../cfg.c), [`file.c`](../file.c), [`status.c`](../status.c):
-  home-style path handling still assumes `~/`.
-- [`tmux.c`](../tmux.c): `areshell()` only strips `/`, not `\`.
-- [`tmux.c`](../tmux.c): `expand_paths()` still splits on `:`, which collides
-  with drive letters.
-- [`win32-ipc.c`](../win32-ipc.c): socket-path normalization still differs
-  from general cwd/path policy.
-
-Problem:
-
-Win32 path policy is still split across multiple incompatible assumptions:
-Unix-style absolute `/foo`, Windows drive paths, UNC paths, `\foo`, `~/`,
-`~\`, Unix basename splitting, and Unix path-list separators.
-
-Why it matters:
-
-Socket paths, cwd resolution, config lookup, recursion checks, path-list
-parsing, and user-visible command behavior can disagree about what path the
-user actually asked for.
-
-Required direction:
-
-- Pick one explicit Win32 policy for `/foo`, `\foo`, `~/`, and `~\`.
-- Use basename logic that understands both `/` and `\`.
-- Use a Win32-native path-list separator where path lists are meant to accept
-  Windows drive paths.
-- Keep socket-path canonicalization aligned with the general Win32 path policy.
-
 ### P3: Win32 glob and case folding remain incomplete
 
 Files:
@@ -397,6 +320,11 @@ current implementation:
   creation, `.lock` acquisition, stale cleanup, or bind recovery, and native
   PowerShell smoke now covers safe inherited startup plus unsafe explicit
   rejection without parent creation.
+- Win32 startup coordination no longer depends on sibling `.lock` files beside
+  explicit endpoints. Startup guards now live in a backend-owned shared root
+  under `LOCALAPPDATA`, keyed by endpoint comparison identity, and native
+  validation confirms explicit paths no longer leave adjacent `<socket>.lock`
+  files behind.
 - Win32 detached startup no longer leaves stale `.lock` guard files behind
   after successful startup or shutdown.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
@@ -412,8 +340,14 @@ current implementation:
   and directory-creation path.
 - The wide/UTF-8 boundary work now covers environment import, cwd discovery,
   module path discovery, active config/history/buffer/log paths, and process
-  creation entry points. The remaining issues are path-policy and quoting
-  mismatches rather than narrow-CRT boundary leaks.
+  creation entry points. The remaining issues are now command quoting, glob
+  semantics, and regression-coverage gaps rather than narrow-CRT boundary
+  leaks.
+- The earlier broad "Win32 path policy is still inconsistent across tmux"
+  finding is no longer accurate for the concrete gaps it named. The current
+  tree now shares rooted-path handling, `~\` and `$VAR\` expansion,
+  basename/dirname separator handling, drive-relative rejection, and
+  drive-safe path-list parsing across the main filesystem consumers.
 
 ## Missing Tests
 
@@ -442,7 +376,7 @@ The main gaps that still matter are:
 
 3. Custom socket path policy:
    validated user-owned `-S` parents, reparse-point parents, inherited `$TMUX`
-   paths, aliased paths, and any future Stage 6 coordination redesign all
+   paths, aliased paths, and the backend-private startup coordination path all
    behave according to the chosen Win32 policy.
 
 4. Startup races:
@@ -470,9 +404,10 @@ The main gaps that still matter are:
    run popup editors and shell commands containing spaces, quotes, `&`, `|`,
    `^`, and parentheses under `cmd.exe`.
 
-10. Win32 path policy:
-    verify `/foo`, `\foo`, drive-qualified paths, UNC paths, `~/...`, `~\...`,
-    and drive-letter path lists all behave consistently.
+10. Win32 path-policy regression matrix:
+    keep verifying `/foo`, `\foo`, drive-qualified paths, UNC paths, `~/...`,
+    `~\...`, and drive-letter path lists so future changes do not regress the
+    now-shared Win32 path grammar.
 
 11. Long and Unicode path shapes:
     start tmux from long and non-ASCII cwd / executable / config paths and
@@ -493,9 +428,9 @@ The main gaps that still matter are:
    split passive close from forced kill, separate process-exit from
    output-drained state, and add `pipe-pane` helper readiness.
 
-3. Native command/path cleanup:
-   fix `cmd.exe` quoting, popup editor argv handling, and the remaining
-   Unix-shaped Win32 path-policy mismatches.
+3. Native command and remaining path-surface cleanup:
+   fix `cmd.exe` quoting, popup editor argv handling, Win32 glob semantics,
+   and add broader regression coverage for the shared path policy.
 
 4. Relay-first terminal consolidation:
    keep relay as the supported native-console mode, continue native coverage,
