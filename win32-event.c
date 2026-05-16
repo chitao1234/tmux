@@ -332,6 +332,8 @@ static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_console_handle(HANDLE);
 static int	win32_handle_write_file(HANDLE, const void *, size_t, DWORD *);
 static int	win32_handle_write_console(HANDLE, const u_char *, size_t);
+static int	win32_handle_write_console_sanitized(HANDLE, const u_char *,
+		     size_t);
 static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
 		     HANDLE, const void *, size_t);
 static int	win32_console_test_env_enabled(const char *);
@@ -2816,6 +2818,83 @@ win32_handle_write_console(HANDLE handle, const u_char *data, size_t size)
 }
 
 static int
+win32_handle_write_console_sanitized(HANDLE handle, const u_char *data,
+    size_t size)
+{
+	static const wchar_t replacement = 0xfffd;
+	DWORD		 written, total;
+	wchar_t		*wdata;
+	size_t		 i, remaining, wlen, wcap;
+	int		 needed;
+
+	if (size == 0)
+		return (0);
+
+	wcap = size;
+	wdata = xcalloc(wcap, sizeof *wdata);
+	wlen = 0;
+
+	for (i = 0; i < size; ) {
+		needed = win32_utf8_expected(data[i]);
+		if (needed == 0) {
+			wdata[wlen++] = replacement;
+			i++;
+			continue;
+		}
+		remaining = size - i;
+		if (remaining < (size_t)needed) {
+			wdata[wlen++] = replacement;
+			break;
+		}
+		if (needed > 1) {
+			size_t j;
+
+			for (j = 1; j < (size_t)needed; j++) {
+				if ((data[i + j] & 0xc0) != 0x80)
+					break;
+			}
+			if (j != (size_t)needed) {
+				wdata[wlen++] = replacement;
+				i++;
+				continue;
+			}
+		}
+		total = (DWORD)MultiByteToWideChar(CP_UTF8, 0, data + i, needed,
+		    wdata + wlen, (int)(wcap - wlen));
+		if (total == 0) {
+			wdata[wlen++] = replacement;
+			i++;
+			continue;
+		}
+		wlen += total;
+		i += (size_t)needed;
+	}
+
+	total = 0;
+	while (total < wlen) {
+		if (!WriteConsoleW(handle, wdata + total, (DWORD)(wlen - total),
+		    &written, NULL)) {
+			log_debug("%s: WriteConsoleW failed: %s", __func__,
+			    win32_strerror(GetLastError()));
+			free(wdata);
+			errno = EIO;
+			return (-1);
+		}
+		if (written == 0) {
+			log_debug("%s: WriteConsoleW wrote nothing", __func__);
+			free(wdata);
+			errno = EIO;
+			return (-1);
+		}
+		total += written;
+	}
+	free(wdata);
+	log_debug("%s: sanitized %zu UTF-8 bytes for console output", __func__,
+	    size);
+	return ((int)size);
+}
+
+static int
 win32_handle_write_console_utf8(struct win32_handle_writer *whw, HANDLE handle,
     const void *data, size_t size)
 {
@@ -2853,8 +2932,18 @@ win32_handle_write_console_utf8(struct win32_handle_writer *whw, HANDLE handle,
 	if (complete != 0) {
 		written = win32_handle_write_console(handle, buf, complete);
 		if (written == -1) {
-			free(buf);
-			return (-1);
+			if (errno != EILSEQ) {
+				free(buf);
+				return (-1);
+			}
+			log_debug("%s: invalid UTF-8 reached console boundary; "
+			    "sanitizing output", __func__);
+			written = win32_handle_write_console_sanitized(handle,
+			    buf, complete);
+			if (written == -1) {
+				free(buf);
+				return (-1);
+			}
 		}
 		if ((size_t)written != complete) {
 			free(buf);

@@ -775,7 +775,7 @@ try {
                 ) | Out-Null
             }
         } elseif ($ExerciseInvalidUtf8) {
-            Write-Host "Relay invalid UTF-8 exercise is enabled. Attach should fail after the console writer rejects invalid bytes."
+            Write-Host "Relay invalid UTF-8 exercise is enabled. The console writer should log the boundary bug, sanitize the invalid bytes, and keep the relay attached."
             Write-Host "Logs will be checked afterward: $root"
             Clear-Host
             $attach = Invoke-TmuxInteractive -Arguments @(
@@ -787,7 +787,23 @@ try {
                 "attach-session",
                 "-t",
                 "relay"
-            ) -TimeoutMs 15000
+            ) -TimeoutMs 15000 -AfterStart {
+                param([int]$AttachPid)
+
+                if (-not (Wait-ConsoleVisibleText -Needle $script:invalidUtf8Prefix -TimeoutMs 5000)) {
+                    throw "timed out waiting for invalid UTF-8 output in visible console output"
+                }
+                $script:invalidUtf8PrefixVisible = $true
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
         } elseif ($SimulateOutputLoss) {
             Write-Host "Relay output loss is being simulated. Attach should fail automatically."
             Write-Host "Logs will be checked afterward: $root"
@@ -1091,7 +1107,7 @@ try {
                 $utf8SplitVisible = $utf8SplitVisible -or
                     $visibleText.Contains($utf8SplitMarker)
             } else {
-                $invalidUtf8PrefixVisible =
+                $invalidUtf8PrefixVisible = $invalidUtf8PrefixVisible -or
                     $visibleText.Contains($invalidUtf8Prefix)
             }
         }
@@ -1225,10 +1241,11 @@ try {
             $utf8SplitCarryLogged -and
             -not $invalidUtf8Failure -and $failures.Count -eq 0
     } elseif ($ExerciseInvalidUtf8) {
-        $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and
-            $invalidUtf8Failure -and
-            $outputAbort -and $transportLost -and $failures.Count -eq 0
+            $invalidUtf8PrefixVisible -and
+            $invalidUtf8Failure -and -not $outputAbort -and
+            -not $transportLost -and $failures.Count -eq 0
     } elseif ($SimulateOutputLoss) {
         $passed = $attachCode -ne 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $outputAbort -and
