@@ -31,6 +31,11 @@ struct ipc_endpoint {
 	char	*path;
 };
 
+struct ipc_listener {
+	int	 fd;
+	char	*path;
+};
+
 struct ipc_startup_guard {
 #ifdef TMUX_WIN32
 	HANDLE	 handle;
@@ -47,7 +52,6 @@ static int	 ipc_server_create_backend(struct ipc_endpoint *, uint64_t,
 static int	 ipc_server_connect_probe(struct ipc_endpoint *, char **);
 static int	 ipc_server_remove_stale(struct ipc_endpoint *, char **);
 static int	 ipc_server_connect_dead_errno(int);
-static char	*ipc_startup_lock_path(struct ipc_endpoint *);
 
 struct ipc_endpoint *
 ipc_endpoint_create(const char *path, char **cause)
@@ -163,25 +167,18 @@ ipc_endpoint_canonicalize(const char *path, char **cause)
 }
 #endif
 
-static char *
-ipc_startup_lock_path(struct ipc_endpoint *endpoint)
-{
-	char	*lockfile;
-
-	xasprintf(&lockfile, "%s.lock", ipc_endpoint_path(endpoint));
-	return (lockfile);
-}
-
 #ifndef TMUX_WIN32
 static int
 ipc_startup_guard_acquire_unix(struct ipc_endpoint *endpoint,
     struct ipc_startup_guard **guardp, char **cause)
 {
 	struct ipc_startup_guard	*guard;
+	char				*lockfile;
 
 	*guardp = NULL;
 	guard = xcalloc(1, sizeof *guard);
-	guard->lockfile = ipc_startup_lock_path(endpoint);
+	xasprintf(&lockfile, "%s.lock", ipc_endpoint_path(endpoint));
+	guard->lockfile = lockfile;
 	log_debug("lock file is %s", guard->lockfile);
 
 	guard->fd = open(guard->lockfile, O_WRONLY|O_CREAT, 0600);
@@ -362,10 +359,12 @@ ipc_startup_guard_acquire(struct ipc_endpoint *endpoint,
 #ifdef TMUX_WIN32
 	struct ipc_startup_guard	*guard;
 	wchar_t				*wlockfile;
+	char				*lockfile;
 
 	*guardp = NULL;
 	guard = xcalloc(1, sizeof *guard);
-	guard->lockfile = ipc_startup_lock_path(endpoint);
+	xasprintf(&lockfile, "%s.lock", ipc_endpoint_path(endpoint));
+	guard->lockfile = lockfile;
 	wlockfile = win32_utf8_to_wide(guard->lockfile);
 	if (wlockfile == NULL) {
 		if (cause != NULL) {
@@ -419,14 +418,19 @@ ipc_startup_guard_acquire(struct ipc_endpoint *endpoint,
 }
 
 int
-ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
+ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags,
+    struct ipc_listener **listenerp, char **cause)
 {
 	char	*probe_cause = NULL;
+	struct ipc_listener *listener;
 	int	 fd, probe_fd;
+
+	if (listenerp != NULL)
+		*listenerp = NULL;
 
 	fd = ipc_server_create_backend(endpoint, flags, cause);
 	if (fd != -1 || errno != EADDRINUSE)
-		return (fd);
+		goto success;
 
 	probe_fd = ipc_server_connect_probe(endpoint, &probe_cause);
 	if (probe_fd != -1) {
@@ -448,7 +452,39 @@ ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
 
 	if (ipc_server_remove_stale(endpoint, cause) != 0)
 		return (-1);
-	return (ipc_server_create_backend(endpoint, flags, cause));
+	fd = ipc_server_create_backend(endpoint, flags, cause);
+	if (fd == -1)
+		return (-1);
+
+success:
+	listener = xcalloc(1, sizeof *listener);
+	listener->fd = fd;
+	listener->path = xstrdup(ipc_endpoint_path(endpoint));
+	if (listenerp != NULL)
+		*listenerp = listener;
+	else {
+		free(listener->path);
+		free(listener);
+	}
+	return (fd);
+}
+
+void
+ipc_listener_destroy(struct ipc_listener *listener)
+{
+	if (listener == NULL)
+		return;
+#ifdef TMUX_WIN32
+	if (listener->fd != -1)
+		(void)win32_ipc_close(listener->fd);
+#else
+	if (listener->fd != -1)
+		(void)close(listener->fd);
+	if (listener->path != NULL)
+		(void)unlink(listener->path);
+#endif
+	free(listener->path);
+	free(listener);
 }
 
 void

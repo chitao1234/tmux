@@ -50,6 +50,7 @@ struct args;
 struct args_command_state;
 struct client;
 struct ipc_endpoint;
+struct ipc_listener;
 struct cmd;
 struct cmd_find_state;
 struct cmdq_item;
@@ -3100,7 +3101,9 @@ const char	*ipc_endpoint_path(struct ipc_endpoint *);
 void		 ipc_endpoint_free(struct ipc_endpoint *);
 int	 ipc_startup_guard_acquire(struct ipc_endpoint *,
 	     struct ipc_startup_guard **, char **);
-int	 ipc_server_create(struct ipc_endpoint *, uint64_t, char **);
+int	 ipc_server_create(struct ipc_endpoint *, uint64_t,
+	     struct ipc_listener **, char **);
+void		 ipc_listener_destroy(struct ipc_listener *);
 void	 ipc_startup_guard_finish(struct ipc_startup_guard *);
 void	 ipc_startup_guard_release(struct ipc_startup_guard *);
 

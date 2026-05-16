@@ -43,6 +43,7 @@ struct clients		 clients;
 
 struct tmuxproc		*server_proc;
 static int		 server_fd = -1;
+static struct ipc_listener *server_listener;
 static uint64_t		 server_client_flags;
 static int		 server_exit;
 static struct event	 server_ev_accept;
@@ -113,7 +114,16 @@ server_check_marked(void)
 int
 server_create_socket(uint64_t flags, char **cause)
 {
-	return (ipc_server_create(socket_endpoint, flags, cause));
+	struct ipc_listener	*listener = NULL;
+	int			 fd;
+
+	fd = ipc_server_create(socket_endpoint, flags, &listener, cause);
+	if (fd == -1)
+		return (-1);
+
+	ipc_listener_destroy(server_listener);
+	server_listener = listener;
+	return (fd);
 }
 
 /* Tidy up every hour. */
@@ -233,12 +243,9 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	server_add_accept(0);
 	proc_loop(server_proc, server_loop);
 
-#ifdef TMUX_WIN32
-	if (server_fd != -1) {
-		win32_ipc_close(server_fd);
-		server_fd = -1;
-	}
-#endif
+	ipc_listener_destroy(server_listener);
+	server_listener = NULL;
+	server_fd = -1;
 	job_kill_all();
 	status_prompt_save_history();
 	tty_close_log();
@@ -519,7 +526,6 @@ server_signal(int sig)
 		event_del(&server_ev_accept);
 		fd = server_create_socket(server_client_flags, NULL);
 		if (fd != -1) {
-			close(server_fd);
 			server_fd = fd;
 			server_update_socket();
 		}
