@@ -219,10 +219,11 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	char			**argvp, *argv0;
 	char			  path[PATH_MAX];
 	const char		 *cmd, *tmp, *home = find_home();
+	const char		 *actual_cwd = NULL;
 #else
 	const char		 *cmd, *tmp;
-#endif
 	char			 *cwd_target = NULL;
+#endif
 	int			  argc;
 	u_int			  idx;
 	u_int			  hlimit;

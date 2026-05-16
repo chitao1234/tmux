@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup 0 1 15
 
 $TMUX kill-server 2>/dev/null
-$TMUX start-server || exit 1
+$TMUX new -ds defaultcheck || exit 1
 SOCKET=$($TMUX display-message -p '#{socket_path}') || exit 1
 [ -n "$SOCKET" ] || exit 1
 [ ! -e "$SOCKET.lock" ] || exit 1
@@ -42,6 +42,11 @@ $TMUX kill-server 2>/dev/null || exit 1
 ) || exit 1
 $TEST_TMUX -f/dev/null -S "$SOCKET_ABS" kill-server 2>/dev/null || exit 1
 
+printf stale >"$SOCKET_ABS"
+$TEST_TMUX -f/dev/null -S "$SOCKET_ABS" new -ds stalecheck || exit 1
+$TEST_TMUX -f/dev/null -S "$SOCKET_ABS" kill-server 2>/dev/null || exit 1
+[ ! -e "$SOCKET_ABS.lock" ] || exit 1
+
 i=0
 pids=
 while [ $i -lt 8 ]; do
@@ -52,6 +57,7 @@ done
 for pid in $pids; do
 	wait $pid || exit 1
 done
+$TMUX_RACE new -ds racecheck || exit 1
 $TMUX_RACE kill-server 2>/dev/null || exit 1
 
 i=0
@@ -64,6 +70,7 @@ done
 for pid in $pids; do
 	wait $pid || exit 1
 done
+$TMUX_START new -ds startcheck || exit 1
 $TMUX_START kill-server 2>/dev/null || exit 1
 
 exit 0
