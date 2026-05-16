@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #include "tmux.h"
 
@@ -63,6 +64,7 @@ struct ipc_coordination {
 struct ipc_backend {
 	char	*(*default_path)(const char *, char **);
 	char	*(*canonicalize)(const char *, char **);
+	char	*(*compare_path)(const char *, char **);
 	int	 (*connect)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*probe)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*coordination_acquire)(struct ipc_endpoint *,
@@ -81,6 +83,7 @@ struct ipc_backend {
 static void	 ipc_log_and_free_cause(char **);
 static struct ipc_endpoint *ipc_endpoint_create(const char *,
 		    enum ipc_endpoint_source, enum ipc_endpoint_class, char **);
+static const char *ipc_endpoint_compare_path(struct ipc_endpoint *);
 static int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
 static int	 ipc_coordination_acquire(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
@@ -98,6 +101,7 @@ struct ipc_listener_unix {
 
 static char	*ipc_default_path_unix(const char *, char **);
 static char	*ipc_endpoint_canonicalize_unix(const char *, char **);
+static char	*ipc_endpoint_compare_unix(const char *, char **);
 static int	 ipc_endpoint_connect_unix(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_unix(int);
@@ -122,6 +126,7 @@ struct ipc_coordination_win32 {
 
 static char	*ipc_default_path_win32(const char *, char **);
 static char	*ipc_endpoint_canonicalize_win32(const char *, char **);
+static char	*ipc_endpoint_compare_win32(const char *, char **);
 static int	 ipc_endpoint_connect_win32(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_win32(int);
@@ -144,6 +149,7 @@ static int	 ipc_server_start_win32(struct event_base *, struct tmuxproc *,
 static const struct ipc_backend ipc_backend = {
 	.default_path = ipc_default_path_win32,
 	.canonicalize = ipc_endpoint_canonicalize_win32,
+	.compare_path = ipc_endpoint_compare_win32,
 	.connect = ipc_endpoint_connect_win32,
 	.probe = ipc_endpoint_probe_win32,
 	.coordination_acquire = ipc_coordination_acquire_win32,
@@ -158,6 +164,7 @@ static const struct ipc_backend ipc_backend = {
 static const struct ipc_backend ipc_backend = {
 	.default_path = ipc_default_path_unix,
 	.canonicalize = ipc_endpoint_canonicalize_unix,
+	.compare_path = ipc_endpoint_compare_unix,
 	.connect = ipc_endpoint_connect_unix,
 	.probe = ipc_endpoint_probe_unix,
 	.coordination_acquire = ipc_coordination_acquire_unix,
@@ -220,7 +227,13 @@ ipc_endpoint_create(const char *path, enum ipc_endpoint_source source,
 		free(endpoint);
 		return (NULL);
 	}
-	endpoint->compare_path = xstrdup(endpoint->path);
+	endpoint->compare_path = endpoint->backend->compare_path(endpoint->path,
+	    cause);
+	if (endpoint->compare_path == NULL) {
+		free(endpoint->path);
+		free(endpoint);
+		return (NULL);
+	}
 	return (endpoint);
 }
 
@@ -230,6 +243,14 @@ ipc_endpoint_path(struct ipc_endpoint *endpoint)
 	if (endpoint == NULL)
 		return (NULL);
 	return (endpoint->path);
+}
+
+static const char *
+ipc_endpoint_compare_path(struct ipc_endpoint *endpoint)
+{
+	if (endpoint == NULL)
+		return (NULL);
+	return (endpoint->compare_path);
 }
 
 void
@@ -476,6 +497,18 @@ ipc_endpoint_canonicalize_unix(const char *path, char **cause)
 	return (full);
 }
 
+static char *
+ipc_endpoint_compare_unix(const char *path, char **cause)
+{
+	if (cause != NULL)
+		*cause = NULL;
+	if (path == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	return (xstrdup(path));
+}
+
 static int
 ipc_endpoint_connect_unix(struct ipc_endpoint *endpoint, __unused uint64_t flags,
     char **cause)
@@ -555,7 +588,7 @@ ipc_coordination_acquire_unix(struct ipc_endpoint *endpoint,
 	coordination->backend = &ipc_backend;
 	coordination->data = data;
 	data->fd = -1;
-	xasprintf(&data->path, "%s.lock", ipc_endpoint_path(endpoint));
+	xasprintf(&data->path, "%s.lock", ipc_endpoint_compare_path(endpoint));
 	log_debug("lock file is %s", data->path);
 
 	data->fd = open(data->path, O_WRONLY|O_CREAT, 0600);
@@ -784,6 +817,52 @@ ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 	return (NULL);
 }
 
+static char *
+ipc_endpoint_compare_win32(const char *path, char **cause)
+{
+	wchar_t		*wpath;
+	char		*compare;
+	size_t		 i, len;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (path == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert socket path: %s", path);
+		errno = EINVAL;
+		return (NULL);
+	}
+	(void)CharLowerBuffW(wpath, wcslen(wpath));
+
+	compare = win32_wide_to_utf8(wpath);
+	free(wpath);
+	if (compare == NULL) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "couldn't build socket comparison path: %s", path);
+		}
+		errno = EINVAL;
+		return (NULL);
+	}
+
+	for (i = 0; compare[i] != '\0'; i++) {
+		if (compare[i] == '\\')
+			compare[i] = '/';
+	}
+	len = strlen(compare);
+	while (len > 3 && compare[len - 1] == '/') {
+		compare[len - 1] = '\0';
+		len--;
+	}
+	return (compare);
+}
+
 static int
 ipc_endpoint_connect_win32(struct ipc_endpoint *endpoint, uint64_t flags,
     char **cause)
@@ -841,7 +920,7 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 	coordination->backend = &ipc_backend;
 	coordination->data = data;
 	data->handle = INVALID_HANDLE_VALUE;
-	xasprintf(&data->path, "%s.lock", ipc_endpoint_path(endpoint));
+	xasprintf(&data->path, "%s.lock", ipc_endpoint_compare_path(endpoint));
 	if (win32_ipc_ensure_parent_dir(data->path, cause) != 0) {
 		free(data->path);
 		free(data);

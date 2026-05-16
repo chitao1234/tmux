@@ -27,8 +27,9 @@ In progress in the current worktree:
 - IPC endpoint resolution now tracks endpoint source and endpoint class, and
   Win32 endpoint canonicalization preserves user-visible path spelling instead
   of lowercasing it unconditionally;
-- the next IPC slice still needs to turn that groundwork into a real split
-  between display spelling, comparison identity, and startup-time trust policy.
+- Win32 IPC endpoints now derive a distinct comparison identity, and startup
+  coordination now keys off that identity instead of the preserved display
+  spelling;
 - explicit `-S` startup from a missing parent directory now works on Win32, but
   the checked-in native smoke still has a concurrency verification gap in
   `Test-ConcurrentAutostart` that needs to be resolved before it can become a
@@ -468,8 +469,9 @@ Current state:
 - endpoint resolution now distinguishes managed versus explicit endpoint class;
 - Win32 canonicalization now uses the shared path layer and rejects
   drive-relative socket paths;
-- display spelling is preserved, but comparison identity is still just the
-  same stored text and is not yet a distinct alias-collapsing representation.
+- display spelling is preserved, and Win32 comparison identity is now a
+  distinct alias-collapsing representation used by startup coordination;
+- startup-time trust validation is still separate pending work.
 
 Success condition:
 
@@ -481,6 +483,8 @@ The remaining Stage 4 work should be done in narrow commits with separate
 verification, not as one blended "path hardening" patch.
 
 #### Slice 4A: give endpoints a real comparison identity
+
+Status: completed
 
 Current gap:
 
@@ -496,30 +500,30 @@ Required work:
 - do not reopen the generic filesystem path layer unless a missing primitive is
   required for IPC identity.
 
-Success condition:
+Completed outcome:
 
-- one endpoint object carries both preserved display spelling and a distinct
-  compare identity.
+- one endpoint object now carries both preserved display spelling and a
+  distinct compare identity.
 
 #### Slice 4B: route alias-sensitive startup logic through compare identity
 
+Status: completed for startup coordination
+
 Current gap:
 
-- startup coordination and later trust policy still do not have a fully
-  separated endpoint identity to key on.
+- startup coordination now uses the comparison identity;
+- later trust policy still does not, because that belongs to Stage 5.
 
-Required work:
+Completed outcome:
 
-- audit every startup-side decision that depends on endpoint identity;
-- make alias-sensitive equality and coordination use the comparison identity
-  rather than the display spelling;
-- keep bind and connect behavior compatible with the accepted display spelling
+- alias-sensitive startup coordination now uses the comparison identity rather
+  than the display spelling;
+- bind, connect, and `#{socket_path}` still use the accepted display spelling
   that the user selected.
 
-Success condition:
+Remaining boundary:
 
-- case or slash aliases do not produce divergent internal endpoint identity,
-  while user-visible path spelling remains stable.
+- trust validation and any later mutation policy still belong to Stage 5.
 
 #### Slice 4C: stabilize the native startup smoke as a real gate
 
@@ -635,18 +639,15 @@ Verify:
 
 The next implementation step should stay narrowly scoped:
 
-1. finish Stage 4 by giving IPC endpoints a real comparison identity distinct
-   from display spelling;
-2. route alias-sensitive startup coordination and equality through that
-   comparison identity while keeping user-visible endpoint spelling unchanged;
-3. resolve the `Test-ConcurrentAutostart` smoke discrepancy so the checked-in
+1. resolve the `Test-ConcurrentAutostart` smoke discrepancy so the checked-in
    native harness can become a reliable gate again;
-4. only after that, layer Stage 5 trust validation onto explicit and inherited
+2. only after that, layer Stage 5 trust validation onto explicit and inherited
    endpoint startup paths.
 
-This keeps the current path-policy work coherent: first make endpoint identity
-correct, then make the checked-in concurrency coverage trustworthy again, then
-decide which startup-side mutations are allowed for each endpoint class.
+This keeps the current path-policy work coherent: endpoint identity is now
+split correctly, so the next requirement is trustworthy checked-in concurrency
+coverage before deciding which startup-side mutations are allowed for each
+endpoint class.
 
 ### Case behavior
 
