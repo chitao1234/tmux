@@ -20,26 +20,22 @@ Completed in tree:
   for rooted paths, home and environment expansion, basename/dirname handling,
   and drive-relative rejection;
 - Win32 path-list parsing no longer relies on naive Unix `:` splitting for
-  filesystem path lists.
-
-In progress in the current worktree:
-
+  filesystem path lists;
 - IPC endpoint resolution now tracks endpoint source and endpoint class, and
   Win32 endpoint canonicalization preserves user-visible path spelling instead
   of lowercasing it unconditionally;
 - Win32 IPC endpoints now derive a distinct comparison identity, and startup
   coordination now keys off that identity instead of the preserved display
   spelling;
-- explicit `-S` startup from a missing parent directory now works on Win32, but
-  the checked-in native PowerShell smoke now passes again when invoked
-  directly; a nested `powershell.exe -File` wrapper under the current
-  automation host can still reproduce a `Test-ConcurrentAutostart`
-  false-negative and should not be treated as a product signal.
+- explicit `-S` and inherited `$TMUX` now validate the parent chain before any
+  startup-side mutation for non-managed endpoints, including parent creation,
+  `.lock` acquisition, stale cleanup, and listener recovery;
+- the checked-in native PowerShell startup smoke now covers inherited `$TMUX`
+  startup on an explicit path and unsafe explicit `-S` rejection, and it
+  passes again when invoked directly from native PowerShell.
 
 Still pending after that:
 
-- explicit `-S` and inherited `$TMUX` parent-path validation before startup
-  mutation;
 - any coordination redesign needed if sibling `.lock` files remain incompatible
   with the final explicit-endpoint trust policy.
 
@@ -452,7 +448,7 @@ Success condition:
 
 ### Stage 4: Split IPC display, comparison, and trust identity
 
-Status: in progress
+Status: completed
 
 Refactor IPC endpoint resolution so it carries:
 
@@ -553,7 +549,7 @@ Remaining caveat:
 
 ### Stage 5: Harden explicit `-S` and inherited `$TMUX`
 
-Status: pending
+Status: completed
 
 Add explicit-path validation before tmux performs startup-side mutation for
 non-managed endpoints.
@@ -569,6 +565,18 @@ Success condition:
 
 - explicit paths remain supported, but tmux no longer treats arbitrary accepted
   text paths as implicitly safe to mutate.
+
+Completed outcome:
+
+- explicit `-S` and inherited `$TMUX` paths now validate the nearest existing
+  parent chain before any startup-side mutation;
+- validation rejects non-directory ancestors, reparse points in the validated
+  chain, and parents whose nearest existing directory is not owned by the
+  current user;
+- startup-side failures now surface the trust-policy cause back through the
+  client instead of collapsing to generic `Permission denied`;
+- native PowerShell startup smoke now verifies safe inherited startup and
+  unsafe explicit rejection without parent creation.
 
 ### Stage 6: Decouple coordination from sibling `.lock` when needed
 
@@ -643,13 +651,12 @@ Verify:
 
 The next implementation step should stay narrowly scoped:
 
-1. layer Stage 5 trust validation onto explicit and inherited
-   endpoint startup paths.
+1. decide whether Stage 6 should keep sibling `.lock` files for validated
+   explicit endpoints or move coordination into a backend-private namespace.
 
-This keeps the current path-policy work coherent: endpoint identity is now
-split correctly and the direct native PowerShell smoke is trustworthy again, so
-the next requirement is deciding which startup-side mutations are allowed for
-each endpoint class.
+Stage 5 now proves that explicit startup mutation can be gated correctly, so
+the next remaining path-policy question is whether adjacent `.lock` files are
+still an acceptable product constraint for validated explicit endpoints.
 
 ### Case behavior
 

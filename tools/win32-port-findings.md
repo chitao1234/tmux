@@ -37,9 +37,9 @@ The remaining problems are the second-order gaps around that progress:
 1. Win32 auth is not yet integrated into tmux's ACL and `server-access`
    semantics, so authenticated same-user clients still bypass the Unix-shaped
    read-only and deny model.
-2. Socket-path policy is still weak for explicit `-S` and inherited `$TMUX`
-   paths, and startup control flow is still not fully unified across detached
-   helper and foreground cases.
+2. Explicit socket-path mutation is now validated, but startup coordination
+   still depends on adjacent `.lock` files and startup control flow is still
+   not fully unified across detached helper and foreground cases.
 3. Native Windows command/path policy is still inconsistent with tmux's
    Unix-shaped assumptions, especially around `cmd.exe` quoting, `/foo` vs
    `\foo`, `~\`, drive-letter path lists, and basename parsing.
@@ -90,45 +90,41 @@ Required direction:
 - Define what `server-access -r/-w` should mean for same-user multi-logon
   attaches.
 
-### P1: Custom `-S` and inherited `$TMUX` socket paths are still weak on Win32
+### P2: Explicit Win32 socket coordination still depends on adjacent `.lock`
 
 Files:
 
 - [`ipc-startup.c`](../ipc-startup.c): `ipc_endpoint_resolve()` now owns
-  default `-L` resolution and shared canonical endpoint identity for all
-  socket-path sources.
-- [`win32-ipc.c`](../win32-ipc.c): managed-root hardening still only applies to
-  backend-generated default socket paths; explicit parents are created but not
-  ownership-validated.
-- [`server.c`](../server.c): listener creation now runs through the shared
-  startup service, but explicit endpoint trust policy is still whatever the
-  resolver accepted.
+  default `-L` resolution, shared canonical endpoint identity, and startup
+  coordination for all socket-path sources.
+- [`ipc-startup.c`](../ipc-startup.c): Win32 coordination still materializes
+  `path.lock` beside the endpoint, keyed by the comparison identity.
+- [`win32-ipc.c`](../win32-ipc.c): explicit `-S` and inherited `$TMUX`
+  startup-side mutation is now parent-validated before directory creation,
+  stale cleanup, or listener recovery.
 
 Problem:
 
-The managed default socket root under `LOCALAPPDATA` now goes through the shared
-endpoint resolver and backend default-path hook. Explicit `-S` paths and
-inherited `$TMUX` paths still bypass that managed-root policy. They now get
-shared canonical path identity, but they still do not get explicit parent
-ownership, reparse-point, or trust-policy checks.
+The managed default socket root under `LOCALAPPDATA` still has the strongest
+policy, but explicit `-S` and inherited `$TMUX` paths are no longer untrusted
+text. The current tree now validates the parent chain before any startup-side
+mutation for non-managed endpoints. The remaining gap is that startup
+coordination still creates a sibling `.lock` file beside the endpoint rather
+than using a backend-private coordination namespace.
 
 Why it matters:
 
-Now that auth is implemented, the risk is no longer "custom path means no
-auth". The remaining risk is endpoint ownership confusion, path aliasing,
-shared-directory deletion or replacement, and policy drift between the managed
-default path and every explicit path. This is especially relevant for startup
-races, stale endpoint cleanup, and same-user / higher-integrity local
-processes.
+The current policy is now safe enough for validated user-owned directories, but
+the `.lock` placement is still coupled to the endpoint filesystem layout. That
+keeps explicit endpoint policy and startup coordination more tightly coupled
+than they need to be and leaves Stage 6 path-policy work open.
 
 Required direction:
 
-- Decide a Win32 product policy for explicit socket paths:
-  reject outside the managed root, or harden and validate them explicitly.
-- Keep explicit paths on the shared canonical identity path, then add parent
-  ownership or final-object validation before treating them as trusted.
-- If explicit custom paths remain supported, validate parent ownership,
-  reparse-point behavior, and endpoint cleanup rules before bind/unlink.
+- Decide whether validated explicit endpoints should continue using adjacent
+  `.lock` coordination or move to a backend-private namespace keyed by the
+  comparison identity.
+- Keep any redesign behind the shared `ipc-startup.c` abstraction.
 
 ### P1: `cmd.exe` command building and popup editor launch are still fragile
 
@@ -396,6 +392,11 @@ current implementation:
   relative/absolute `-S` aliasing, case-variant `-S` attach, stale detached
   autostart, stale foreground `-D`, concurrent autostart, concurrent
   `start-server`, `-D` versus client races, and `.lock` cleanup.
+- Explicit `-S` and inherited `$TMUX` startup mutation on Win32 is no longer
+  unchecked. The current tree validates the parent chain before directory
+  creation, `.lock` acquisition, stale cleanup, or bind recovery, and native
+  PowerShell smoke now covers safe inherited startup plus unsafe explicit
+  rejection without parent creation.
 - Win32 detached startup no longer leaves stale `.lock` guard files behind
   after successful startup or shutdown.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
@@ -440,8 +441,9 @@ The main gaps that still matter are:
    exercised explicitly.
 
 3. Custom socket path policy:
-   weak/shared `-S` parents, reparse-point parents, inherited `$TMUX` paths,
-   and aliased paths behave according to the chosen Win32 policy.
+   validated user-owned `-S` parents, reparse-point parents, inherited `$TMUX`
+   paths, aliased paths, and any future Stage 6 coordination redesign all
+   behave according to the chosen Win32 policy.
 
 4. Startup races:
    concurrent normal starts, concurrent `tmux -D` starts, and aliased socket
@@ -483,8 +485,9 @@ The main gaps that still matter are:
 ## Recommended Implementation Order
 
 1. Win32 ACL and socket boundary cleanup:
-   integrate authenticated peers with `server-access` semantics, then harden
-   explicit socket-path policy, canonicalization, and stale unlink behavior.
+   integrate authenticated peers with `server-access` semantics, then decide
+   whether explicit socket coordination should stay adjacent to the endpoint or
+   move into a backend-private namespace.
 
 2. Pane/job lifecycle cleanup:
    split passive close from forced kill, separate process-exit from

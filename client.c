@@ -35,6 +35,8 @@
 
 #include "tmux.h"
 
+char		*ipc_take_error(void);
+
 static struct tmuxproc	*client_proc;
 static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
@@ -1074,7 +1076,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 	fd = client_connect(base, socket_endpoint, client_flags);
 	if (fd == -1) {
-		if (errno == ECONNREFUSED) {
+		char	*ipc_error = ipc_take_error();
+
+		if (ipc_error != NULL) {
+			fprintf(stderr, "%s\n", ipc_error);
+			free(ipc_error);
+		} else if (errno == ECONNREFUSED) {
 			fprintf(stderr, "no server running on %s\n",
 			    socket_path);
 		} else {

@@ -58,7 +58,11 @@ static char    *win32_ipc_integrity_level_to_name(DWORD);
 static int	win32_ipc_capture_token_integrity(HANDLE, char **, char **);
 static int	win32_ipc_capture_token_integrity_rid(HANDLE, DWORD *, char **);
 static int	win32_ipc_cache_current_identity(void);
+static int	win32_ipc_get_path_attributes(const char *, DWORD *, DWORD *,
+		    char **);
 static int	win32_ipc_make_managed_root(char **, char **);
+static int	win32_ipc_path_owner_is_current_user(const char *, int *,
+		    char **);
 static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
 static char    *win32_ipc_normalize_path(const char *);
@@ -697,6 +701,114 @@ out:
 }
 
 static int
+win32_ipc_get_path_attributes(const char *path, DWORD *attrp, DWORD *errorp,
+    char **cause)
+{
+	wchar_t	*wpath;
+	DWORD	 attr, error;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (errorp != NULL)
+		*errorp = ERROR_SUCCESS;
+	if (path == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert IPC path: %s", path);
+		errno = EINVAL;
+		return (-1);
+	}
+	attr = GetFileAttributesW(wpath);
+	free(wpath);
+	if (attr != INVALID_FILE_ATTRIBUTES) {
+		if (attrp != NULL)
+			*attrp = attr;
+		return (0);
+	}
+
+	error = GetLastError();
+	if (errorp != NULL)
+		*errorp = error;
+	if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+		return (1);
+	if (cause != NULL) {
+		xasprintf(cause, "couldn't inspect IPC path %s: %s", path,
+		    win32_strerror(error));
+	}
+	errno = EACCES;
+	return (-1);
+}
+
+static int
+win32_ipc_path_owner_is_current_user(const char *path, int *same, char **cause)
+{
+	PSECURITY_DESCRIPTOR	 sd = NULL;
+	PSID			 owner = NULL;
+	wchar_t			*wpath = NULL;
+	char			*owner_sid = NULL;
+	DWORD			 error;
+	int			 retval = -1;
+
+	*same = 0;
+	if (cause != NULL)
+		*cause = NULL;
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_user_sid_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine current token");
+		errno = EACCES;
+		return (-1);
+	}
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert IPC path: %s", path);
+		errno = EINVAL;
+		goto out;
+	}
+	error = GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
+	    OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd);
+	if (error != ERROR_SUCCESS) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't read owner for %s: %s", path,
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (owner == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "IPC path %s has no owner", path);
+		errno = EACCES;
+		goto out;
+	}
+
+	owner_sid = win32_ipc_sid_to_string(owner);
+	if (owner_sid == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert owner SID for %s", path);
+		errno = EACCES;
+		goto out;
+	}
+
+	*same = (strcmp(owner_sid, win32_ipc_current_user_sid_value) == 0);
+	retval = 0;
+
+out:
+	free(owner_sid);
+	free(wpath);
+	if (sd != NULL)
+		LocalFree(sd);
+	return (retval);
+}
+
+static int
 win32_ipc_make_managed_root(char **path, char **cause)
 {
 	char		*localappdata;
@@ -947,6 +1059,138 @@ win32_ipc_ensure_parent_dir(const char *path, char **cause)
 	retval = win32_ipc_ensure_dir(normalized, cause);
 	free(normalized);
 	return (retval);
+}
+
+int
+win32_ipc_validate_socket_parent(const char *path, char **cause)
+{
+	char	*parent = NULL, *current = NULL, *next = NULL;
+	DWORD	 attr, error;
+	int	 owner_is_current;
+	int	 state;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (path == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	parent = path_dirname(path);
+	current = win32_ipc_normalize_path(parent);
+	free(parent);
+	parent = NULL;
+	if (current == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid socket path");
+		errno = EINVAL;
+		return (-1);
+	}
+
+	for (;;) {
+		state = win32_ipc_get_path_attributes(current, &attr, &error,
+		    cause);
+		if (state == 0)
+			break;
+		if (state == -1)
+			goto fail;
+
+		next = path_dirname(current);
+		if (strcmp(next, current) == 0) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "socket path does not resolve under an"
+				    " existing directory: %s", path);
+			}
+			free(next);
+			errno = ENOENT;
+			goto fail;
+		}
+		free(current);
+		current = next;
+		next = NULL;
+	}
+
+	if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "socket parent %s is not a directory",
+			    current);
+		}
+		errno = ENOTDIR;
+		goto fail;
+	}
+	if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+		if (cause != NULL) {
+			xasprintf(cause, "socket parent %s is a reparse point",
+			    current);
+		}
+		errno = EACCES;
+		goto fail;
+	}
+	if (win32_ipc_path_owner_is_current_user(current, &owner_is_current,
+	    cause) != 0)
+		goto fail;
+	if (!owner_is_current) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "socket path is not under a user-owned directory:"
+			    " %s", current);
+		}
+		errno = EACCES;
+		goto fail;
+	}
+
+	for (;;) {
+		next = path_dirname(current);
+		if (strcmp(next, current) == 0) {
+			free(next);
+			next = NULL;
+			break;
+		}
+		free(current);
+		current = next;
+		next = NULL;
+
+		state = win32_ipc_get_path_attributes(current, &attr, &error,
+		    cause);
+		if (state != 0) {
+			if (state == 1) {
+				if (cause != NULL) {
+					xasprintf(cause,
+					    "socket parent ancestor disappeared:"
+					    " %s", current);
+				}
+				errno = ENOENT;
+			}
+			goto fail;
+		}
+		if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "socket parent ancestor %s is not a"
+				    " directory", current);
+			}
+			errno = ENOTDIR;
+			goto fail;
+		}
+		if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "socket parent ancestor %s is a reparse"
+				    " point", current);
+			}
+			errno = EACCES;
+			goto fail;
+		}
+	}
+
+	free(current);
+	return (0);
+
+fail:
+	free(next);
+	free(current);
+	return (-1);
 }
 
 int

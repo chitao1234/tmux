@@ -45,6 +45,7 @@ enum ipc_endpoint_class {
 struct ipc_endpoint {
 	char				*path;
 	char				*compare_path;
+	int				 mutation_validated;
 	const struct ipc_backend	*backend;
 	enum ipc_endpoint_source	 source;
 	enum ipc_endpoint_class		 class;
@@ -65,6 +66,7 @@ struct ipc_backend {
 	char	*(*default_path)(const char *, char **);
 	char	*(*canonicalize)(const char *, char **);
 	char	*(*compare_path)(const char *, char **);
+	int	 (*prepare_mutation)(struct ipc_endpoint *, char **);
 	int	 (*connect)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*probe)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*coordination_acquire)(struct ipc_endpoint *,
@@ -80,10 +82,14 @@ struct ipc_backend {
 		    uint64_t, char **);
 };
 
+static char		*ipc_last_error;
+
 static void	 ipc_log_and_free_cause(char **);
+static void	 ipc_record_error(const char *);
 static struct ipc_endpoint *ipc_endpoint_create(const char *,
 		    enum ipc_endpoint_source, enum ipc_endpoint_class, char **);
 static const char *ipc_endpoint_compare_path(struct ipc_endpoint *);
+static int	 ipc_endpoint_prepare_mutation(struct ipc_endpoint *, char **);
 static int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
 static int	 ipc_coordination_acquire(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
@@ -102,6 +108,8 @@ struct ipc_listener_unix {
 static char	*ipc_default_path_unix(const char *, char **);
 static char	*ipc_endpoint_canonicalize_unix(const char *, char **);
 static char	*ipc_endpoint_compare_unix(const char *, char **);
+static int	 ipc_endpoint_prepare_mutation_unix(struct ipc_endpoint *,
+		    char **);
 static int	 ipc_endpoint_connect_unix(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_unix(int);
@@ -127,6 +135,8 @@ struct ipc_coordination_win32 {
 static char	*ipc_default_path_win32(const char *, char **);
 static char	*ipc_endpoint_canonicalize_win32(const char *, char **);
 static char	*ipc_endpoint_compare_win32(const char *, char **);
+static int	 ipc_endpoint_prepare_mutation_win32(struct ipc_endpoint *,
+		    char **);
 static int	 ipc_endpoint_connect_win32(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_win32(int);
@@ -150,6 +160,7 @@ static const struct ipc_backend ipc_backend = {
 	.default_path = ipc_default_path_win32,
 	.canonicalize = ipc_endpoint_canonicalize_win32,
 	.compare_path = ipc_endpoint_compare_win32,
+	.prepare_mutation = ipc_endpoint_prepare_mutation_win32,
 	.connect = ipc_endpoint_connect_win32,
 	.probe = ipc_endpoint_probe_win32,
 	.coordination_acquire = ipc_coordination_acquire_win32,
@@ -165,6 +176,7 @@ static const struct ipc_backend ipc_backend = {
 	.default_path = ipc_default_path_unix,
 	.canonicalize = ipc_endpoint_canonicalize_unix,
 	.compare_path = ipc_endpoint_compare_unix,
+	.prepare_mutation = ipc_endpoint_prepare_mutation_unix,
 	.connect = ipc_endpoint_connect_unix,
 	.probe = ipc_endpoint_probe_unix,
 	.coordination_acquire = ipc_coordination_acquire_unix,
@@ -253,6 +265,12 @@ ipc_endpoint_compare_path(struct ipc_endpoint *endpoint)
 	return (endpoint->compare_path);
 }
 
+static int
+ipc_endpoint_prepare_mutation(struct ipc_endpoint *endpoint, char **cause)
+{
+	return (endpoint->backend->prepare_mutation(endpoint, cause));
+}
+
 void
 ipc_endpoint_free(struct ipc_endpoint *endpoint)
 {
@@ -282,6 +300,7 @@ ipc_client_connect_or_start(struct event_base *base, struct tmuxproc *client,
 	if (~flags & CLIENT_STARTSERVER)
 		return (-1);
 	if (ipc_coordination_acquire(endpoint, &coordination, &cause) != 0) {
+		ipc_record_error(cause);
 		ipc_log_and_free_cause(&cause);
 		return (-1);
 	}
@@ -295,6 +314,7 @@ ipc_client_connect_or_start(struct event_base *base, struct tmuxproc *client,
 	ipc_log_and_free_cause(&cause);
 	if (ipc_endpoint_probe(endpoint, flags, &cause) !=
 	    IPC_ENDPOINT_PROBE_DEAD) {
+		ipc_record_error(cause);
 		ipc_log_and_free_cause(&cause);
 		ipc_coordination_release(coordination);
 		return (-1);
@@ -303,6 +323,7 @@ ipc_client_connect_or_start(struct event_base *base, struct tmuxproc *client,
 	fd = endpoint->backend->start(base, client, endpoint, coordination, flags,
 	    &cause);
 	if (fd == -1) {
+		ipc_record_error(cause);
 		ipc_log_and_free_cause(&cause);
 		return (-1);
 	}
@@ -321,6 +342,8 @@ static int
 ipc_coordination_acquire(struct ipc_endpoint *endpoint,
     struct ipc_coordination **coordination, char **cause)
 {
+	if (ipc_endpoint_prepare_mutation(endpoint, cause) != 0)
+		return (-1);
 	return (endpoint->backend->coordination_acquire(endpoint, coordination,
 	    cause));
 }
@@ -336,6 +359,8 @@ ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags,
 	if (listenerp != NULL)
 		*listenerp = NULL;
 
+	if (ipc_endpoint_prepare_mutation(endpoint, cause) != 0)
+		return (-1);
 	fd = endpoint->backend->listener_create(endpoint, flags, &listener, cause);
 	if (fd != -1 || errno != EADDRINUSE)
 		goto success;
@@ -404,6 +429,26 @@ ipc_log_and_free_cause(char **cause)
 	log_debug("%s", *cause);
 	free(*cause);
 	*cause = NULL;
+}
+
+static void
+ipc_record_error(const char *cause)
+{
+	free(ipc_last_error);
+	if (cause == NULL)
+		ipc_last_error = NULL;
+	else
+		ipc_last_error = xstrdup(cause);
+}
+
+char *
+ipc_take_error(void)
+{
+	char	*cause;
+
+	cause = ipc_last_error;
+	ipc_last_error = NULL;
+	return (cause);
 }
 
 static int
@@ -507,6 +552,15 @@ ipc_endpoint_compare_unix(const char *path, char **cause)
 		return (NULL);
 	}
 	return (xstrdup(path));
+}
+
+static int
+ipc_endpoint_prepare_mutation_unix(__unused struct ipc_endpoint *endpoint,
+    char **cause)
+{
+	if (cause != NULL)
+		*cause = NULL;
+	return (0);
 }
 
 static int
@@ -864,6 +918,21 @@ ipc_endpoint_compare_win32(const char *path, char **cause)
 }
 
 static int
+ipc_endpoint_prepare_mutation_win32(struct ipc_endpoint *endpoint, char **cause)
+{
+	if (cause != NULL)
+		*cause = NULL;
+	if (endpoint->class == IPC_ENDPOINT_CLASS_MANAGED ||
+	    endpoint->mutation_validated)
+		return (0);
+	if (win32_ipc_validate_socket_parent(ipc_endpoint_path(endpoint), cause) !=
+	    0)
+		return (-1);
+	endpoint->mutation_validated = 1;
+	return (0);
+}
+
+static int
 ipc_endpoint_connect_win32(struct ipc_endpoint *endpoint, uint64_t flags,
     char **cause)
 {
@@ -920,6 +989,11 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 	coordination->backend = &ipc_backend;
 	coordination->data = data;
 	data->handle = INVALID_HANDLE_VALUE;
+	if (win32_ipc_ensure_parent_dir(ipc_endpoint_path(endpoint), cause) != 0) {
+		free(data);
+		free(coordination);
+		return (-1);
+	}
 	xasprintf(&data->path, "%s.lock", ipc_endpoint_compare_path(endpoint));
 	if (win32_ipc_ensure_parent_dir(data->path, cause) != 0) {
 		free(data->path);

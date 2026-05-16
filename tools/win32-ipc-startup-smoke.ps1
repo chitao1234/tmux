@@ -62,6 +62,7 @@ function Invoke-Tmux {
     param(
         [string[]]$Arguments,
         [string]$WorkingDirectory = (Get-Location).Path,
+        [hashtable]$Environment = @{},
         [switch]$AllowFailure
     )
 
@@ -72,6 +73,10 @@ function Invoke-Tmux {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.Arguments = Join-Win32Arguments $Arguments
+
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $psi.Environment[$entry.Key] = $entry.Value
+    }
 
     $process = [System.Diagnostics.Process]::Start($psi)
     $stdout = $process.StandardOutput.ReadToEnd()
@@ -472,6 +477,30 @@ function Test-ExplicitMissingParentStartup {
     return "explicit -S startup with missing parent"
 }
 
+function Test-InheritedSocketStartup {
+    $socketPath = Join-Path $script:ArtifactRoot "Env\Sock"
+    $tmuxValue = $socketPath + ",123,0"
+
+    Invoke-Tmux -Arguments @("new-session", "-d", "-s", "envcheck") -Environment @{ TMUX = $tmuxValue } | Out-Null
+    $sessions = Invoke-Tmux -Arguments @("-S", $socketPath, "list-sessions")
+
+    Assert-True ((($sessions.Output -join "`n") -match "envcheck")) "inherited TMUX path did not reach the expected server"
+
+    Invoke-Tmux -Arguments @("-S", $socketPath, "kill-server") | Out-Null
+    return "inherited TMUX startup on explicit socket path"
+}
+
+function Test-UnsafeExplicitSocketRejected {
+    $socketPath = "C:\tmux-unsafe-" + [guid]::NewGuid().ToString("N") + "\Sock"
+    $result = Invoke-Tmux -Arguments @("-S", $socketPath, "start-server") -AllowFailure
+    $output = $result.Output -join "`n"
+
+    Assert-True ($result.ExitCode -ne 0) "unsafe explicit socket path unexpectedly succeeded: $socketPath"
+    Assert-True ($output -match "user-owned|reparse|existing directory|not a directory") "unsafe explicit socket path failed without a trust-policy error: $output"
+    Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $socketPath))) "unsafe explicit socket path unexpectedly created parent directories: $socketPath"
+    return "unsafe explicit -S startup rejection"
+}
+
 function Test-StaleDetachedStartup {
     $socketPath = Join-Path $script:ArtifactRoot "stale-detached.sock"
     Set-Content -LiteralPath $socketPath -Value "stale" -NoNewline
@@ -583,6 +612,8 @@ try {
     $results.Add((Test-DefaultLabelStartup))
     $results.Add((Test-ExplicitSocketAliasing))
     $results.Add((Test-ExplicitMissingParentStartup))
+    $results.Add((Test-InheritedSocketStartup))
+    $results.Add((Test-UnsafeExplicitSocketRejected))
     $results.Add((Test-StaleDetachedStartup))
     $results.Add((Test-ConcurrentAutostart))
     $results.Add((Test-ConcurrentStartServer))
