@@ -41,11 +41,11 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 
 ## Host Toolchain Policy
 
-- Use MSYS2 `bash` for build and configure commands on this host.
-- Use the MSYS2 UCRT64 toolchain for all compiling on this host.
-- Before building in MSYS2 `bash`, prepend `/ucrt64/bin:/usr/bin` to `PATH`.
-- Use native PowerShell or `cmd` for runtime testing on this host.
-- Do not use any other host toolchain for building, configuring, or compiling on this host.
+- Only use MSYS2 `bash` for build and configure commands on this host.
+- Only use the MSYS2 UCRT64 toolchain for all compiling on this host.
+- In MSYS2 `bash`, always prepend `/ucrt64/bin:/usr/bin` to `PATH` before building or compiling.
+- Always use native PowerShell or `cmd` for runtime testing on this host.
+- Never use any other host toolchain on this host for building, configuring, or compiling.
 
 ## Win32 Port
 
