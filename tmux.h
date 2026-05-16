@@ -2450,7 +2450,7 @@ void	proc_remove_peer(struct tmuxpeer *);
 void	proc_kill_peer(struct tmuxpeer *);
 void	proc_flush_peer(struct tmuxpeer *);
 void	proc_toggle_log(struct tmuxproc *);
-pid_t	proc_fork_and_daemon(int *);
+pid_t	proc_fork_and_daemon(int *, struct ipc_endpoint *, uint64_t);
 uid_t	proc_get_peer_uid(struct tmuxpeer *);
 
 /* cfg.c */
@@ -3090,7 +3090,7 @@ int	 server_is_marked(struct session *, struct winlink *,
 	     struct window_pane *);
 int	 server_check_marked(void);
 int	 server_start(struct tmuxproc *, uint64_t, struct event_base *,
-	     struct ipc_coordination *);
+	     struct ipc_endpoint *, struct ipc_coordination *);
 void	 server_update_socket(void);
 void	 server_add_accept(int);
 void printflike(1, 2) server_add_message(const char *, ...);

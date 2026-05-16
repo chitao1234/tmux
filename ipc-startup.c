@@ -694,10 +694,9 @@ ipc_server_start_unix(struct event_base *base, struct tmuxproc *client,
     struct ipc_endpoint *endpoint, struct ipc_coordination *coordination,
     uint64_t flags, char **cause)
 {
-	(void)endpoint;
 	(void)cause;
 
-	return (server_start(client, flags, base, coordination));
+	return (server_start(client, flags, base, endpoint, coordination));
 }
 #endif
 
@@ -982,7 +981,7 @@ ipc_server_start_win32(struct event_base *base, struct tmuxproc *client,
 	int	fd, i, saved_errno;
 
 	if (flags & CLIENT_NOFORK)
-		return (server_start(client, flags, base, coordination));
+		return (server_start(client, flags, base, endpoint, coordination));
 
 	if (win32_server_spawn(ipc_endpoint_path(endpoint), flags, cause) != 0) {
 		ipc_coordination_finish(coordination);

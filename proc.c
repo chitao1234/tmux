@@ -386,13 +386,13 @@ proc_toggle_log(struct tmuxproc *tp)
 }
 
 pid_t
-proc_fork_and_daemon(int *fd)
+proc_fork_and_daemon(int *fd, struct ipc_endpoint *endpoint, uint64_t flags)
 {
 #ifdef TMUX_WIN32
 	char	*cause = NULL;
 
 	*fd = -1;
-	if (win32_server_spawn(socket_path, 0, &cause) != 0) {
+	if (win32_server_spawn(ipc_endpoint_path(endpoint), flags, &cause) != 0) {
 		if (cause != NULL) {
 			log_debug("%s: %s", __func__, cause);
 			free(cause);
@@ -418,6 +418,8 @@ proc_fork_and_daemon(int *fd)
 	default:
 		close(pair[1]);
 		*fd = pair[0];
+		(void)endpoint;
+		(void)flags;
 		return (pid);
 	}
 #endif

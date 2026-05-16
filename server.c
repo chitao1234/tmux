@@ -147,7 +147,7 @@ server_tidy_event(__unused tmux_event_fd fd, __unused short events, __unused voi
 /* Fork new server. */
 int
 server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
-    struct ipc_coordination *coordination)
+    struct ipc_endpoint *endpoint, struct ipc_coordination *coordination)
 {
 	int		 fd;
 #ifndef TMUX_WIN32
@@ -163,7 +163,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 #endif
 
 	if (~flags & CLIENT_NOFORK) {
-		if (proc_fork_and_daemon(&fd) != 0) {
+		if (proc_fork_and_daemon(&fd, endpoint, flags) != 0) {
 #ifndef TMUX_WIN32
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
 #endif

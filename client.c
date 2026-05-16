@@ -1064,13 +1064,13 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	/* Initialize the client socket and start the server. */
 #ifdef TMUX_WIN32
 	if (flags & CLIENT_SPAWNEDSERVER) {
-		fd = server_start(client_proc, flags, base, NULL);
+		fd = server_start(client_proc, flags, base, socket_endpoint, NULL);
 	} else
 #endif
 #ifdef HAVE_SYSTEMD
 	if (systemd_activated()) {
 		/* socket-based activation, do not even try to be a client. */
-		fd = server_start(client_proc, flags, base, NULL);
+		fd = server_start(client_proc, flags, base, socket_endpoint, NULL);
 	} else
 #endif
 	fd = client_connect(base, socket_endpoint, client_flags);
