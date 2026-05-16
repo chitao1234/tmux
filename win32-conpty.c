@@ -978,6 +978,8 @@ win32_pane_drain(struct window_pane *wp)
 	window_pane_read_callback(wp->event, wp);
 }
 
+static void	win32_pane_note_exit(struct window_pane *, int);
+
 static void
 win32_pane_output_event_cb(void *arg, uint32_t events)
 {
@@ -998,10 +1000,12 @@ win32_pane_output_event_cb(void *arg, uint32_t events)
 	else
 		log_debug("%%%u output canceled", wp->id);
 	if (win32_pane_exited(wp, &status)) {
-		wp->status = status;
-		wp->flags |= PANE_STATUSREADY;
+		win32_pane_note_exit(wp, status);
+	} else {
+		log_debug("%%%u output ended before process exit", wp->id);
 	}
-	window_pane_error_callback(wp->event, 0, wp);
+	if (window_pane_destroy_ready(wp))
+		server_destroy_pane(wp, 1);
 }
 
 static int
@@ -1033,6 +1037,14 @@ win32_pane_set_exited(struct window_pane *wp, int *status)
 }
 
 static void
+win32_pane_note_exit(struct window_pane *wp, int status)
+{
+	wp->status = status;
+	wp->flags |= PANE_STATUSREADY;
+	wp->flags |= PANE_EXITED;
+}
+
+static void
 win32_pane_exit_cb(void *arg)
 {
 	struct window_pane	*wp = arg;
@@ -1040,8 +1052,7 @@ win32_pane_exit_cb(void *arg)
 
 	if (!win32_pane_exited(wp, &status))
 		return;
-	wp->status = status;
-	wp->flags |= PANE_STATUSREADY;
+	win32_pane_note_exit(wp, status);
 	log_debug("%%%u exited", wp->id);
 	if (window_pane_destroy_ready(wp))
 		server_destroy_pane(wp, 1);
@@ -1249,6 +1260,24 @@ win32_pane_exited(struct window_pane *wp, int *status)
 	if (!found)
 		return (0);
 	return (win32_pane_set_exited(wp, status));
+}
+
+int
+win32_pane_quiesced(struct window_pane *wp)
+{
+	if (wp == NULL)
+		return (0);
+	if (~wp->flags & PANE_EXITED)
+		return (0);
+	if (~wp->flags & PANE_STATUSREADY)
+		return (0);
+	if (wp->win32 == NULL)
+		return (1);
+	if (!win32_pane_output_done(wp))
+		return (0);
+	if (win32_pane_buffered(wp) > 0)
+		return (0);
+	return (1);
 }
 
 size_t

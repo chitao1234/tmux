@@ -382,11 +382,7 @@ window_pane_destroy_ready(struct window_pane *wp)
 
 #ifdef TMUX_WIN32
 	if (wp->win32 != NULL) {
-		if (~wp->flags & PANE_STATUSREADY)
-			return (0);
-		if (!win32_pane_output_done(wp))
-			return (0);
-		if (win32_pane_buffered(wp) > 0)
+		if (!win32_pane_quiesced(wp))
 			return (0);
 	}
 #else
@@ -1158,6 +1154,13 @@ window_pane_error_callback(__unused struct bufferevent *bufev,
 	struct window_pane *wp = data;
 
 	log_debug("%%%u error", wp->id);
+#ifdef TMUX_WIN32
+	if (wp->win32 != NULL) {
+		if (window_pane_destroy_ready(wp))
+			server_destroy_pane(wp, 1);
+		return;
+	}
+#endif
 	wp->flags |= PANE_EXITED;
 
 	if (window_pane_destroy_ready(wp))

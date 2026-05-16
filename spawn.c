@@ -277,7 +277,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	if (sc->flags & SPAWN_RESPAWN) {
 #ifdef TMUX_WIN32
 		if (sc->wp0->win32 != NULL &&
-		    (~sc->wp0->flags & PANE_EXITED) &&
+		    !win32_pane_quiesced(sc->wp0) &&
 		    (~sc->flags & SPAWN_KILL)) {
 #else
 		if (sc->wp0->fd != -1 && (~sc->flags & SPAWN_KILL)) {

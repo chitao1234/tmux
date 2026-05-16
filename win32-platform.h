@@ -141,6 +141,7 @@ void		 win32_pane_close(struct window_pane *);
 void		 win32_pane_resize(struct window_pane *, u_int, u_int);
 void		 win32_pane_drain(struct window_pane *);
 int		 win32_pane_exited(struct window_pane *, int *);
+int		 win32_pane_quiesced(struct window_pane *);
 size_t		 win32_pane_buffered(struct window_pane *);
 int		 win32_pane_output_done(struct window_pane *);
 int		 win32_pane_output_eof(struct window_pane *);

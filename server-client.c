@@ -1462,6 +1462,10 @@ forward_key:
 	    !KEYC_IS_MOUSE(key) &&
 	    !KEYC_IS_PASTE(key) &&
 	    options_get_number(wp->options, "remain-on-exit") == 3) {
+#ifdef TMUX_WIN32
+		if (wp->win32 != NULL && !win32_pane_quiesced(wp))
+			goto out;
+#endif
 		options_set_number(wp->options, "remain-on-exit", 0);
 		server_destroy_pane(wp, 0);
 		goto out;
