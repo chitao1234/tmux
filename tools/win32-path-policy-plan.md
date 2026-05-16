@@ -29,6 +29,10 @@ In progress in the current worktree:
   of lowercasing it unconditionally;
 - the next IPC slice still needs to turn that groundwork into a real split
   between display spelling, comparison identity, and startup-time trust policy.
+- explicit `-S` startup from a missing parent directory now works on Win32, but
+  the checked-in native smoke still has a concurrency verification gap in
+  `Test-ConcurrentAutostart` that needs to be resolved before it can become a
+  hard gate for later path-policy slices.
 
 Still pending after that:
 
@@ -471,6 +475,74 @@ Success condition:
 
 - IPC endpoint equality and IPC endpoint trust are no longer the same thing.
 
+### Stage 4 execution slices
+
+The remaining Stage 4 work should be done in narrow commits with separate
+verification, not as one blended "path hardening" patch.
+
+#### Slice 4A: give endpoints a real comparison identity
+
+Current gap:
+
+- `endpoint->compare_path` still duplicates `endpoint->path`;
+- preserved display spelling exists, but alias collapse does not.
+
+Required work:
+
+- derive a Win32 comparison identity that is distinct from display spelling and
+  stable across slash aliases and ordinary case aliases;
+- keep the actual user-visible endpoint path unchanged for logs, errors, and
+  `#{socket_path}`;
+- do not reopen the generic filesystem path layer unless a missing primitive is
+  required for IPC identity.
+
+Success condition:
+
+- one endpoint object carries both preserved display spelling and a distinct
+  compare identity.
+
+#### Slice 4B: route alias-sensitive startup logic through compare identity
+
+Current gap:
+
+- startup coordination and later trust policy still do not have a fully
+  separated endpoint identity to key on.
+
+Required work:
+
+- audit every startup-side decision that depends on endpoint identity;
+- make alias-sensitive equality and coordination use the comparison identity
+  rather than the display spelling;
+- keep bind and connect behavior compatible with the accepted display spelling
+  that the user selected.
+
+Success condition:
+
+- case or slash aliases do not produce divergent internal endpoint identity,
+  while user-visible path spelling remains stable.
+
+#### Slice 4C: stabilize the native startup smoke as a real gate
+
+Current gap:
+
+- focused native PowerShell concurrency checks pass;
+- the checked-in `tools/win32-ipc-startup-smoke.ps1` still fails at
+  `Test-ConcurrentAutostart` with `server exited unexpectedly`.
+
+Required work:
+
+- reproduce the failure in isolation using the script's own helper path;
+- determine whether the issue is in the smoke harness or in startup behavior;
+- if it is a harness problem, fix it in a separate commit from the core Stage 4
+  path work;
+- if it is a product bug, feed that result back into Slice 4B instead of
+  papering over it with looser retry behavior.
+
+Success condition:
+
+- the checked-in smoke covers concurrent autostart reliably enough to use as a
+  regression gate for the remaining IPC path-policy work.
+
 ### Stage 5: Harden explicit `-S` and inherited `$TMUX`
 
 Status: pending
@@ -565,14 +637,16 @@ The next implementation step should stay narrowly scoped:
 
 1. finish Stage 4 by giving IPC endpoints a real comparison identity distinct
    from display spelling;
-2. make explicit `-S` startup work on Win32 without reintroducing unconditional
-   lowercasing or broad "treat `EACCES` as dead" logic;
-3. only after that, layer Stage 5 trust validation onto explicit and inherited
+2. route alias-sensitive startup coordination and equality through that
+   comparison identity while keeping user-visible endpoint spelling unchanged;
+3. resolve the `Test-ConcurrentAutostart` smoke discrepancy so the checked-in
+   native harness can become a reliable gate again;
+4. only after that, layer Stage 5 trust validation onto explicit and inherited
    endpoint startup paths.
 
 This keeps the current path-policy work coherent: first make endpoint identity
-correct, then decide which startup-side mutations are allowed for each endpoint
-class.
+correct, then make the checked-in concurrency coverage trustworthy again, then
+decide which startup-side mutations are allowed for each endpoint class.
 
 ### Case behavior
 
