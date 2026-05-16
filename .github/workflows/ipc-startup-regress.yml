@@ -35,11 +35,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            autoconf \
+            automake \
             bison \
             build-essential \
             libevent-dev \
             libncurses-dev \
             pkg-config
+
+      - name: Bootstrap
+        run: sh autogen.sh
 
       - name: Configure
         run: ./configure
