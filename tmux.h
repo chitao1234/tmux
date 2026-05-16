@@ -2671,6 +2671,7 @@ struct job	*job_run(const char *, int, char **, struct environ *,
 		     struct session *, const char *, job_update_cb,
 		     job_complete_cb, job_free_cb, void *, int, int, int);
 void		 job_free(struct job *);
+void		 job_kill(struct job *);
 int		 job_transfer(struct job *, pid_t *, char *, size_t);
 void		 job_resize(struct job *, u_int, u_int);
 #ifndef TMUX_WIN32

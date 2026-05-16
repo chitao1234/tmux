@@ -411,7 +411,7 @@ format_job_get(struct format_expand_state *es, const char *cmd)
 
 	t = time(NULL);
 	if (force && fj->job != NULL)
-	       job_free(fj->job);
+	       job_kill(fj->job);
 	if (force || (fj->job == NULL && fj->last != t)) {
 		fj->job = job_run(expanded, 0, NULL, NULL, NULL,
 		    server_client_get_cwd(ft->client, NULL), format_job_update,
@@ -449,7 +449,7 @@ format_job_tidy(struct format_job_tree *jobs, int force)
 		log_debug("%s: %s", __func__, fj->cmd);
 
 		if (fj->job != NULL)
-			job_free(fj->job);
+			job_kill(fj->job);
 
 		free((void *)fj->expanded);
 		free((void *)fj->cmd);

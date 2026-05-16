@@ -244,7 +244,7 @@ popup_free(struct popup_data *pd)
 	server_client_unref(pd->c);
 
 	if (pd->job != NULL)
-		job_free(pd->job);
+		job_kill(pd->job);
 	input_free(pd->ictx);
 
 	free(pd->or[0].ranges);

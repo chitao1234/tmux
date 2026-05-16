@@ -1744,13 +1744,14 @@ fail:
 	return (NULL);
 }
 
-void
-win32_job_close(struct win32_job *wj)
+static void
+win32_job_release(struct win32_job *wj, int terminate)
 {
 	if (wj == NULL)
 		return;
 	wj->event = NULL;
-	win32_child_kill("job", wj->process_id, wj->job, wj->process);
+	if (terminate)
+		win32_child_kill("job", wj->process_id, wj->job, wj->process);
 	win32_job_disconnect(wj);
 	if (wj->process_event != NULL)
 		win32_io_endpoint_free(wj->process_event);
@@ -1762,6 +1763,18 @@ win32_job_close(struct win32_job *wj)
 	win32_close_handle(&wj->thread);
 	win32_close_handle(&wj->process);
 	free(wj);
+}
+
+void
+win32_job_cleanup(struct win32_job *wj)
+{
+	win32_job_release(wj, 0);
+}
+
+void
+win32_job_terminate(struct win32_job *wj)
+{
+	win32_job_release(wj, 1);
 }
 
 void

@@ -157,7 +157,8 @@ int		 win32_pane_write(struct window_pane *, const void *, size_t);
 struct win32_job *win32_job_spawn(const char *, const char *, int, char **,
 		     struct environ *, struct session *, const char *, int,
 		     int, int, char **);
-void		 win32_job_close(struct win32_job *);
+void		 win32_job_cleanup(struct win32_job *);
+void		 win32_job_terminate(struct win32_job *);
 void		 win32_job_resize(struct win32_job *, u_int, u_int);
 int		 win32_job_exited(struct win32_job *, int *);
 int		 win32_job_output_done(struct win32_job *);

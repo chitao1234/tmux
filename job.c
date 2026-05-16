@@ -41,6 +41,7 @@
 static void	job_read_callback(struct bufferevent *, void *);
 static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
+static void	job_remove(struct job *);
 #ifdef TMUX_WIN32
 static void	job_complete(struct job *);
 static void	job_win32_exit_callback(void *);
@@ -337,33 +338,54 @@ job_transfer(struct job *job, pid_t *pid, char *tty, size_t ttylen)
 	return (fd);
 }
 
-/* Kill and free an individual job. */
-void
-job_free(struct job *job)
+static void
+job_remove(struct job *job)
 {
-	log_debug("free job %p: %s", job, job->cmd);
-
 	LIST_REMOVE(job, entry);
 	free(job->cmd);
 
 	if (job->freecb != NULL && job->data != NULL)
 		job->freecb(job->data);
 
-#ifdef TMUX_WIN32
-	if (job->win32 != NULL) {
-		win32_job_close(job->win32);
-		job->win32 = NULL;
-	}
-#else
-	if (job->pid != -1)
-		kill(job->pid, SIGTERM);
-#endif
 	if (job->event != NULL)
 		bufferevent_free(job->event);
 	if (job->fd != -1)
 		close(job->fd);
 
 	free(job);
+}
+
+/* Free an individual job without treating it as a kill request. */
+void
+job_free(struct job *job)
+{
+	log_debug("free job %p: %s", job, job->cmd);
+
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_cleanup(job->win32);
+		job->win32 = NULL;
+	}
+#endif
+	job_remove(job);
+}
+
+/* Kill and free an individual job. */
+void
+job_kill(struct job *job)
+{
+	log_debug("kill job %p: %s", job, job->cmd);
+
+#ifdef TMUX_WIN32
+	if (job->win32 != NULL) {
+		win32_job_terminate(job->win32);
+		job->win32 = NULL;
+	}
+#else
+	if (job->pid != -1)
+		kill(job->pid, SIGTERM);
+#endif
+	job_remove(job);
 }
 
 /* Resize job. */
@@ -618,7 +640,7 @@ job_kill_all(void)
 	LIST_FOREACH(job, &all_jobs, entry) {
 #ifdef TMUX_WIN32
 		if (job->win32 != NULL) {
-			win32_job_close(job->win32);
+			win32_job_terminate(job->win32);
 			job->win32 = NULL;
 		}
 #else
