@@ -142,9 +142,6 @@ char *
 parse_window_name(const char *in)
 {
 	char	*copy, *name, *ptr;
-#ifdef TMUX_WIN32
-	char	*ptr1, *ptr2;
-#endif
 
 	name = copy = xstrdup(in);
 	if (*name == '"')
@@ -167,18 +164,8 @@ parse_window_name(const char *in)
 			*ptr-- = '\0';
 	}
 
-	if (*name == '/')
-		name = basename(name);
-#ifdef TMUX_WIN32
-	else if (path_is_absolute(name)) {
-		ptr1 = strrchr(name, '/');
-		ptr2 = strrchr(name, '\\');
-		if (ptr1 == NULL || (ptr2 != NULL && ptr2 > ptr1))
-			ptr1 = ptr2;
-		if (ptr1 != NULL)
-			name = ptr1 + 1;
-	}
-#endif
+	if (*name == '/' || path_is_absolute(name))
+		name = path_basename(name);
 	name = clean_name(name, "#");
 	free(copy);
 	if (name == NULL)

@@ -186,7 +186,6 @@ popup_editor_create_temp_file(const char *dir, char **path)
 static int
 popup_editor_temp_path(char **path, char **cmdpath, char **cwd)
 {
-	const char *slash, *name, *backslash;
 	char	*dir;
 	int	 fd;
 
@@ -209,18 +208,8 @@ popup_editor_temp_path(char **path, char **cmdpath, char **cwd)
 	free(dir);
 	if (fd == -1)
 		return (-1);
-	slash = strrchr(*path, '/');
-	backslash = strrchr(*path, '\\');
-	if (slash == NULL || backslash > slash)
-		slash = backslash;
-	if (slash == NULL) {
-		*cmdpath = xstrdup(*path);
-		*cwd = xstrdup(".");
-	} else {
-		name = slash + 1;
-		*cmdpath = xstrdup(name);
-		*cwd = xstrndup(*path, slash - *path);
-	}
+	*cmdpath = path_basename_copy(*path);
+	*cwd = path_dirname(*path);
 	return (fd);
 }
 #endif

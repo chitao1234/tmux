@@ -66,12 +66,26 @@ u_int		  status_prompt_hsize[PROMPT_NTYPES];
 static char *
 status_prompt_find_history_file(void)
 {
-	const char	*home, *history_file;
+#ifdef TMUX_WIN32
 	char		*path;
+#else
+	const char	*home;
+#endif
+	const char	*history_file;
 
 	history_file = options_get_string(global_options, "history-file");
 	if (*history_file == '\0')
 		return (NULL);
+#ifdef TMUX_WIN32
+	path = expand_path(history_file, find_home());
+	if (path == NULL)
+		return (NULL);
+	if (path_is_drive_relative(path) || !path_is_absolute(path)) {
+		free(path);
+		return (NULL);
+	}
+	return (path);
+#else
 	if (path_is_absolute(history_file))
 		return (xstrdup(history_file));
 
@@ -81,6 +95,7 @@ status_prompt_find_history_file(void)
 		return (NULL);
 	xasprintf(&path, "%s%s", home, history_file + 1);
 	return (path);
+#endif
 }
 
 /* Add loaded history item to the appropriate list. */

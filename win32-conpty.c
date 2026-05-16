@@ -327,26 +327,10 @@ win32_build_argv_command(int argc, char **argv)
 	return (line);
 }
 
-static const char *
-win32_path_basename(const char *path)
-{
-	const char	*slash, *backslash;
-
-	if (path == NULL)
-		return ("");
-	slash = strrchr(path, '/');
-	backslash = strrchr(path, '\\');
-	if (slash == NULL || backslash > slash)
-		slash = backslash;
-	if (slash != NULL && slash[1] != '\0')
-		return (slash + 1);
-	return (path);
-}
-
 static int
 win32_shell_is_cmd(const char *shell)
 {
-	const char	*name = win32_path_basename(shell);
+	const char	*name = path_basename(shell);
 
 	return (strcasecmp(name, "cmd.exe") == 0 ||
 	    strcasecmp(name, "cmd") == 0);
@@ -355,7 +339,7 @@ win32_shell_is_cmd(const char *shell)
 static int
 win32_validate_cwd(const char *cwd, char **cause)
 {
-	if (cwd == NULL || cwd[0] != '/')
+	if (cwd == NULL || path_is_absolute(cwd))
 		return (0);
 	if (cause != NULL) {
 		xasprintf(cause, "working directory must be a Windows path on "

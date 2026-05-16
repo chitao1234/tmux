@@ -180,7 +180,7 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 	enum cmd_retval			 retval = CMD_RETURN_NORMAL;
 	char				*pattern, *cwd, *expanded = NULL;
 #ifdef TMUX_WIN32
-	char				*normalized = NULL;
+	char				*normalized = NULL, *expanded_path = NULL;
 #endif
 	const char			*path, *error;
 	glob_t				 g;
@@ -230,15 +230,35 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 			continue;
 		}
 #ifdef TMUX_WIN32
+		free(expanded_path);
+		expanded_path = expand_path(path, find_home());
+		if (expanded_path == NULL) {
+			cmdq_error(item, "invalid path: %s", path);
+			retval = CMD_RETURN_ERROR;
+			continue;
+		}
 		free(normalized);
-		normalized = cmd_source_file_normalize_for_glob(path);
+		normalized = cmd_source_file_normalize_for_glob(expanded_path);
 		path = normalized;
+		if (path_is_drive_relative(path)) {
+			cmdq_error(item, "invalid path: %s", path);
+			retval = CMD_RETURN_ERROR;
+			continue;
+		}
 #endif
 
 		if (path_is_absolute(path))
 			pattern = xstrdup(path);
-		else
-			xasprintf(&pattern, "%s/%s", cwd, path);
+		else {
+			pattern = path_join(cwd, path);
+#ifdef TMUX_WIN32
+			if (pattern == NULL) {
+				cmdq_error(item, "invalid path: %s", path);
+				retval = CMD_RETURN_ERROR;
+				continue;
+			}
+#endif
+		}
 		log_debug("%s: %s", __func__, pattern);
 
 		if ((result = glob(pattern, 0, NULL, &g)) != 0) {
@@ -265,6 +285,7 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 	}
 	free(expanded);
 #ifdef TMUX_WIN32
+	free(expanded_path);
 	free(normalized);
 #endif
 

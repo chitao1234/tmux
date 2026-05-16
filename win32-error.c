@@ -490,10 +490,10 @@ win32_resolve_cwd(const char *cwd, const char *base, char **cause)
 
 	if (cwd == NULL)
 		return (NULL);
-	if (cwd[0] == '/') {
+	if (path_is_drive_relative(cwd)) {
 		if (cause != NULL) {
 			xasprintf(cause,
-			    "working directory must be a Windows path on "
+			    "working directory must not be drive-relative on "
 			    "Win32: %s", cwd);
 		}
 		errno = EINVAL;
@@ -506,7 +506,7 @@ win32_resolve_cwd(const char *cwd, const char *base, char **cause)
 
 	if (path_is_absolute(cwd))
 		root = NULL;
-	else if (base != NULL && base[0] != '/')
+	else if (base != NULL && path_is_absolute(base))
 		root = base;
 	else
 		root = win32_default_cwd();
@@ -568,12 +568,15 @@ fail:
 char *
 win32_sanitize_cwd(const char *cwd)
 {
+	char		*resolved;
 	const char	*actual_cwd;
 
 	if (cwd == NULL)
 		return (NULL);
-	if (cwd[0] != '/' && path_is_absolute(cwd) && win32_path_is_dir(cwd))
-		return (xstrdup(cwd));
+	resolved = win32_resolve_cwd(cwd, NULL, NULL);
+	if (resolved != NULL && win32_path_is_dir(resolved))
+		return (resolved);
+	free(resolved);
 	actual_cwd = win32_default_cwd();
 	if (actual_cwd != NULL)
 		return (xstrdup(actual_cwd));

@@ -72,20 +72,19 @@ static void	cfg_win32_next_file(void);
 static char *
 cfg_win32_get_path(const char *path)
 {
-	const char	*home;
-	char		*expanded, *full_path;
+	char	*expanded, *full_path;
 
-	if (strncmp(path, "~/", 2) == 0) {
-		home = find_home();
-		if (home == NULL)
-			home = "";
-		xasprintf(&expanded, "%s%s", home, path + 1);
-	} else
-		expanded = xstrdup(path);
+	expanded = expand_path(path, find_home());
+	if (expanded == NULL)
+		return (NULL);
+	if (path_is_drive_relative(expanded)) {
+		free(expanded);
+		return (NULL);
+	}
 
 	if (path_is_absolute(expanded))
 		return (expanded);
-	xasprintf(&full_path, "%s/%s", cfg_win32_cwd, expanded);
+	full_path = path_join(cfg_win32_cwd, expanded);
 	free(expanded);
 	return (full_path);
 }
@@ -191,6 +190,9 @@ cfg_win32_file_done(struct client *c, const char *path, int error, int closed,
 static void
 cfg_win32_next_file(void)
 {
+	while (cfg_win32_next < cfg_nfiles &&
+	    cfg_win32_paths[cfg_win32_next] == NULL)
+		cfg_win32_next++;
 	if (cfg_win32_next == cfg_nfiles) {
 		cfg_win32_finish();
 		return;
@@ -241,8 +243,11 @@ start_cfg(void)
 	cfg_win32_cwd = xstrdup(server_client_get_cwd(c, NULL));
 	cfg_win32_paths = xcalloc(cfg_nfiles, sizeof *cfg_win32_paths);
 	cfg_win32_cmdlists = xcalloc(cfg_nfiles, sizeof *cfg_win32_cmdlists);
-	for (i = 0; i < cfg_nfiles; i++)
+	for (i = 0; i < cfg_nfiles; i++) {
 		cfg_win32_paths[i] = cfg_win32_get_path(cfg_files[i]);
+		if (cfg_win32_paths[i] == NULL)
+			cfg_add_cause("%s: invalid path", cfg_files[i]);
+	}
 	cfg_win32_flags = flags;
 	cfg_win32_next = 0;
 	cfg_win32_next_file();

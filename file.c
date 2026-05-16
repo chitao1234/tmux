@@ -77,20 +77,18 @@ RB_GENERATE(client_files, client_file, entry, file_cmp);
 static char *
 file_get_path(struct client *c, const char *file)
 {
-	const char	*home;
 	char		*path, *full_path;
 
-	if (strncmp(file, "~/", 2) != 0)
-		path = xstrdup(file);
-	else {
-		home = find_home();
-		if (home == NULL)
-			home = "";
-		xasprintf(&path, "%s%s", home, file + 1);
+	path = expand_path(file, find_home());
+	if (path == NULL)
+		return (NULL);
+	if (path_is_drive_relative(path)) {
+		free(path);
+		return (NULL);
 	}
 	if (path_is_absolute(path))
 		return (path);
-	xasprintf(&full_path, "%s/%s", server_client_get_cwd(c, NULL), path);
+	full_path = path_join(server_client_get_cwd(c, NULL), path);
 	free(path);
 	return (full_path);
 }
@@ -362,6 +360,11 @@ file_write(struct client *c, const char *path, int flags, const void *bdata,
 
 	cf = file_create_with_client(c, stream, cb, cbdata);
 	cf->path = file_get_path(c, path);
+	if (cf->path == NULL) {
+		cf->path = xstrdup(path);
+		cf->error = EINVAL;
+		goto done;
+	}
 
 	if (c == NULL || c->flags & CLIENT_ATTACHED) {
 #ifdef TMUX_WIN32
@@ -451,6 +454,11 @@ file_read(struct client *c, const char *path, client_file_cb cb, void *cbdata)
 
 	cf = file_create_with_client(c, stream, cb, cbdata);
 	cf->path = file_get_path(c, path);
+	if (cf->path == NULL) {
+		cf->path = xstrdup(path);
+		cf->error = EINVAL;
+		goto done;
+	}
 
 	if (c == NULL || c->flags & CLIENT_ATTACHED) {
 #ifdef TMUX_WIN32

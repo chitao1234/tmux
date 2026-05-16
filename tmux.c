@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <langinfo.h>
@@ -52,6 +53,10 @@ static int		 win32_get_argv(int *, char ***);
 static int		 areshell(const char *);
 static const char	*getenv_canonical(const char *);
 static const char	*getshell(void);
+static size_t		 path_root_length(const char *);
+#ifdef TMUX_WIN32
+static char		*path_list_next(char **);
+#endif
 
 static __dead void
 usage(int status)
@@ -168,10 +173,7 @@ areshell(const char *shell)
 {
 	const char	*progname, *ptr;
 
-	if ((ptr = strrchr(shell, '/')) != NULL)
-		ptr++;
-	else
-		ptr = shell;
+	ptr = path_basename(shell);
 	progname = getprogname();
 	if (*progname == '-')
 		progname++;
@@ -192,6 +194,8 @@ path_is_absolute(const char *path)
 	if (*path == '/')
 		return (1);
 #ifdef TMUX_WIN32
+	if (*path == '\\')
+		return (1);
 	drive = (u_char)path[0];
 	if (((drive >= 'A' && drive <= 'Z') ||
 	    (drive >= 'a' && drive <= 'z')) &&
@@ -204,14 +208,38 @@ path_is_absolute(const char *path)
 	return (0);
 }
 
-static char *
+int
+path_is_drive_relative(const char *path)
+{
+#ifdef TMUX_WIN32
+	u_char	drive;
+
+	if (path == NULL || *path == '\0')
+		return (0);
+	drive = (u_char)path[0];
+	if (((drive >= 'A' && drive <= 'Z') ||
+	    (drive >= 'a' && drive <= 'z')) && path[1] == ':' &&
+	    path[2] != '/' && path[2] != '\\')
+		return (1);
+#else
+	(void)path;
+#endif
+	return (0);
+}
+
+char *
 expand_path(const char *path, const char *home)
 {
-	char			*expanded, *name;
-	const char		*end;
-	struct environ_entry	*value;
+	char		*expanded, *name;
+	const char	*end, *slash, *backslash, *value;
 
+	if (path == NULL)
+		return (NULL);
+#ifdef TMUX_WIN32
+	if (path[0] == '~' && (path[1] == '/' || path[1] == '\\')) {
+#else
 	if (strncmp(path, "~/", 2) == 0) {
+#endif
 		if (home == NULL)
 			return (NULL);
 		xasprintf(&expanded, "%s%s", home, path + 1);
@@ -219,18 +247,27 @@ expand_path(const char *path, const char *home)
 	}
 
 	if (*path == '$') {
+#ifdef TMUX_WIN32
+		slash = strchr(path, '/');
+		backslash = strchr(path, '\\');
+		if (slash == NULL || (backslash != NULL && backslash < slash))
+			end = backslash;
+		else
+			end = slash;
+#else
 		end = strchr(path, '/');
+#endif
 		if (end == NULL)
 			name = xstrdup(path + 1);
 		else
 			name = xstrndup(path + 1, end - path - 1);
-		value = environ_find(global_environ, name);
+		value = getenv_canonical(name);
 		free(name);
 		if (value == NULL)
 			return (NULL);
 		if (end == NULL)
 			end = "";
-		xasprintf(&expanded, "%s%s", value->value, end);
+		xasprintf(&expanded, "%s%s", value, end);
 		return (expanded);
 	}
 
@@ -252,10 +289,19 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 	*n = 0;
 
 	copy = tmp = xstrdup(s);
+#ifdef TMUX_WIN32
+	while ((next = path_list_next(&tmp)) != NULL) {
+#else
 	while ((next = strsep(&tmp, ":")) != NULL) {
+#endif
 		expanded = expand_path(next, home);
-		if (expanded == NULL) {
+		if (expanded == NULL
+#ifdef TMUX_WIN32
+		    || path_is_drive_relative(expanded)
+#endif
+		    ) {
 			log_debug("%s: invalid path: %s", __func__, next);
+			free(expanded);
 			continue;
 		}
 		if (no_realpath)
@@ -291,16 +337,143 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 }
 
 char *
+path_join(const char *base, const char *path)
+{
+	char	*joined;
+	size_t	 len;
+
+	if (path == NULL)
+		return (base != NULL ? xstrdup(base) : NULL);
+	if (base == NULL || *base == '\0' || path_is_absolute(path))
+		return (xstrdup(path));
+#ifdef TMUX_WIN32
+	if (path_is_drive_relative(path))
+		return (NULL);
+#endif
+
+	len = strlen(base);
+	if (len != 0 && (base[len - 1] == '/'
+#ifdef TMUX_WIN32
+	    || base[len - 1] == '\\'
+#endif
+	    ))
+		xasprintf(&joined, "%s%s", base, path);
+	else
+		xasprintf(&joined, "%s/%s", base, path);
+	return (joined);
+}
+
+const char *
+path_basename(const char *path)
+{
+	const char	*ptr, *end;
+	size_t		 rootlen;
+
+	if (path == NULL || *path == '\0')
+		return ("");
+
+	rootlen = path_root_length(path);
+	end = path + strlen(path);
+	while ((size_t)(end - path) > rootlen &&
+	    (end[-1] == '/'
+#ifdef TMUX_WIN32
+	    || end[-1] == '\\'
+#endif
+	    ))
+		end--;
+	if ((size_t)(end - path) == rootlen)
+		return (path);
+
+	ptr = end;
+	while (ptr > path && ptr[-1] != '/'
+#ifdef TMUX_WIN32
+	    && ptr[-1] != '\\'
+#endif
+	    )
+		ptr--;
+	return (ptr);
+}
+
+char *
+path_basename_copy(const char *path)
+{
+	const char	*ptr, *end;
+	size_t		 rootlen;
+
+	if (path == NULL || *path == '\0')
+		return (xstrdup(""));
+
+	rootlen = path_root_length(path);
+	end = path + strlen(path);
+	while ((size_t)(end - path) > rootlen &&
+	    (end[-1] == '/'
+#ifdef TMUX_WIN32
+	    || end[-1] == '\\'
+#endif
+	    ))
+		end--;
+	if ((size_t)(end - path) == rootlen)
+		return (xstrndup(path, end - path));
+
+	ptr = end;
+	while (ptr > path && ptr[-1] != '/'
+#ifdef TMUX_WIN32
+	    && ptr[-1] != '\\'
+#endif
+	    )
+		ptr--;
+	return (xstrndup(ptr, end - ptr));
+}
+
+char *
+path_dirname(const char *path)
+{
+	size_t	len, rootlen;
+
+	if (path == NULL || *path == '\0')
+		return (xstrdup("."));
+
+	rootlen = path_root_length(path);
+	len = strlen(path);
+	while (len > rootlen && (path[len - 1] == '/'
+#ifdef TMUX_WIN32
+	    || path[len - 1] == '\\'
+#endif
+	    ))
+		len--;
+	if (len == 0)
+		return (xstrdup("."));
+	if (rootlen != 0 && len <= rootlen)
+		return (xstrndup(path, rootlen));
+	while (len > rootlen && path[len - 1] != '/'
+#ifdef TMUX_WIN32
+	    && path[len - 1] != '\\'
+#endif
+	    )
+		len--;
+	while (len > rootlen && (path[len - 1] == '/'
+#ifdef TMUX_WIN32
+	    || path[len - 1] == '\\'
+#endif
+	    ))
+		len--;
+	if (len == 0) {
+		if (rootlen != 0)
+			return (xstrndup(path, rootlen));
+		return (xstrdup("."));
+	}
+	if (rootlen != 0 && len < rootlen)
+		len = rootlen;
+	return (xstrndup(path, len));
+}
+
+char *
 shell_argv0(const char *shell, int is_login)
 {
-	const char	*slash, *name;
+	const char	*name;
 	char		*argv0;
 
-	slash = strrchr(shell, '/');
-	if (slash != NULL && slash[1] != '\0')
-		name = slash + 1;
-	else
-		name = shell;
+	name = path_basename(shell);
 	if (is_login)
 		xasprintf(&argv0, "-%s", name);
 	else
@@ -452,6 +625,69 @@ find_home(void)
 
 	return (home);
 }
+
+static size_t
+path_root_length(const char *path)
+{
+#ifdef TMUX_WIN32
+	const char	*p;
+
+	if (path == NULL || *path == '\0')
+		return (0);
+	if (((path[0] >= 'A' && path[0] <= 'Z') ||
+	    (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':') {
+		if (path[2] == '/' || path[2] == '\\')
+			return (3);
+		return (2);
+	}
+	if ((path[0] == '/' || path[0] == '\\') &&
+	    (path[1] == '/' || path[1] == '\\')) {
+		p = path + 2;
+		while (*p != '\0' && *p != '/' && *p != '\\')
+			p++;
+		if (*p == '\0')
+			return (2);
+		p++;
+		while (*p != '\0' && *p != '/' && *p != '\\')
+			p++;
+		if (*p == '\0')
+			return ((size_t)(p - path));
+		return ((size_t)(p - path + 1));
+	}
+	if (path[0] == '/' || path[0] == '\\')
+		return (1);
+	return (0);
+#else
+	if (path != NULL && path[0] == '/')
+		return (1);
+	return (0);
+#endif
+}
+
+#ifdef TMUX_WIN32
+static char *
+path_list_next(char **listp)
+{
+	char	*start, *p;
+
+	if (listp == NULL || *listp == NULL)
+		return (NULL);
+	start = *listp;
+	p = start;
+	while (*p != '\0') {
+		if (*p == ';' ||
+		    (*p == ':' &&
+		    !(p == start + 1 && isalpha((u_char)start[0])))) {
+			*p++ = '\0';
+			*listp = p;
+			return (start);
+		}
+		p++;
+	}
+	*listp = NULL;
+	return (start);
+}
+#endif
 
 const char *
 getversion(void)
@@ -640,8 +876,7 @@ main(int argc, char **argv)
 	if ((s = getenv_canonical("VISUAL")) != NULL ||
 	    (s = getenv_canonical("EDITOR")) != NULL) {
 		options_set_string(global_options, "editor", 0, "%s", s);
-		if (strrchr(s, '/') != NULL)
-			s = strrchr(s, '/') + 1;
+		s = path_basename(s);
 		if (strstr(s, "vi") != NULL)
 			keys = MODEKEY_VI;
 		else

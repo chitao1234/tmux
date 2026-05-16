@@ -4129,12 +4129,12 @@ found:
 		return (NULL);
 	if (modifiers & FORMAT_BASENAME) {
 		saved = found;
-		found = xstrdup(basename(saved));
+		found = path_basename_copy(saved);
 		free(saved);
 	}
 	if (modifiers & FORMAT_DIRNAME) {
 		saved = found;
-		found = xstrdup(dirname(saved));
+		found = path_dirname(saved);
 		free(saved);
 	}
 	if (modifiers & FORMAT_QUOTE_SHELL) {
