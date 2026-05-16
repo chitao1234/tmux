@@ -41,6 +41,7 @@ static uint64_t		 client_flags;
 #ifdef TMUX_WIN32
 static int		 client_is_console;
 static int		 client_console_ready;
+static int		 client_win32_auth_complete;
 static int		 client_win32_console_relay;
 static int		 client_win32_handle_tty;
 static int		 client_win32_handle_tty_force;
@@ -53,6 +54,7 @@ static int		 client_win32_relay_test_transport_lost_fired;
 static int		 client_win32_transport_lost_flag;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
+static HANDLE		 client_win32_auth_mapping;
 static struct evbuffer	*client_win32_input_pending;
 static size_t		 client_win32_input_credit;
 static int		 client_win32_input_reading;
@@ -63,6 +65,14 @@ static struct event	 client_win32_resize_timer;
 static u_int		 client_win32_resize_sx;
 static u_int		 client_win32_resize_sy;
 static int		 client_win32_resize_timer_set;
+static struct msg_command *client_startup_command;
+static size_t		 client_startup_command_size;
+static const char	*client_startup_ttynam;
+static const char	*client_startup_termname;
+static char	      **client_startup_caps;
+static u_int		 client_startup_ncaps;
+static const char	*client_startup_cwd;
+static int		 client_startup_feat;
 #else
 static int		 client_suspended;
 #endif
@@ -85,6 +95,7 @@ static char		*client_exitmessage;
 static const char	*client_execshell;
 static const char	*client_execcmd;
 static int		 client_attached;
+static int		 client_identify_sent;
 static struct client_files client_files = RB_INITIALIZER(&client_files);
 
 static __dead void	 client_exec(const char *,const char *);
@@ -116,6 +127,7 @@ static void		 client_win32_output_error_callback(void *);
 static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
+static void		 client_win32_auth_cleanup(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_console_relay_enabled(void);
 static int		 client_win32_console_relay_test_output_loss_enabled(void);
@@ -135,8 +147,12 @@ static void		 client_signal(int);
 static void		 client_dispatch(struct imsg *, void *);
 static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
+static int		 client_send_startup_command(enum msgtype);
 static const char	*client_exit_message(void);
 static void		 client_send_environ(void);
+#ifdef TMUX_WIN32
+static int		 client_send_win32_auth_bind(struct imsg *);
+#endif
 
 #ifndef TMUX_WIN32
 /*
@@ -1096,6 +1112,88 @@ client_restore_terminal(void)
 }
 #endif
 
+static int
+client_send_startup_command(enum msgtype msg)
+{
+	if (msg == MSG_COMMAND) {
+		if (client_startup_command == NULL)
+			return (0);
+		if (proc_send(client_peer, msg, -1, client_startup_command,
+		    client_startup_command_size) != 0) {
+#ifdef TMUX_WIN32
+			client_restore_terminal();
+#endif
+			fprintf(stderr, "failed to send command\n");
+			return (-1);
+		}
+	} else if (msg == MSG_SHELL) {
+		if (proc_send(client_peer, msg, -1, NULL, 0) != 0) {
+#ifdef TMUX_WIN32
+			client_restore_terminal();
+#endif
+			fprintf(stderr, "failed to send shell request\n");
+			return (-1);
+		}
+	}
+	return (0);
+}
+
+#ifdef TMUX_WIN32
+static void
+client_win32_auth_cleanup(void)
+{
+	if (client_win32_auth_mapping == NULL)
+		return;
+	CloseHandle(client_win32_auth_mapping);
+	client_win32_auth_mapping = NULL;
+}
+
+static int
+client_send_win32_auth_bind(struct imsg *imsg)
+{
+	struct msg_win32_auth_challenge	 challenge;
+	struct msg_win32_auth_bind	 bind;
+	HANDLE				 mapping = NULL;
+	void				*view = NULL;
+	pid_t				 pid;
+	int				 retval = -1;
+
+	if ((size_t)(imsg->hdr.len - IMSG_HEADER_SIZE) != sizeof challenge)
+		return (-1);
+	memcpy(&challenge, imsg->data, sizeof challenge);
+	client_win32_auth_cleanup();
+
+	mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+	    0, sizeof challenge.nonce, NULL);
+	if (mapping == NULL)
+		goto out;
+	view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0,
+	    sizeof challenge.nonce);
+	if (view == NULL)
+		goto out;
+	memcpy(view, challenge.nonce, sizeof challenge.nonce);
+	UnmapViewOfFile(view);
+	view = NULL;
+
+	pid = getpid();
+	bind.pid = (uint32_t)pid;
+	bind.handle = (uint64_t)(uintptr_t)mapping;
+	if (proc_send(client_peer, MSG_WIN32_AUTH_BIND, -1, &bind,
+	    sizeof bind) != 0)
+		goto out;
+	client_win32_auth_mapping = mapping;
+	mapping = NULL;
+	retval = 0;
+
+out:
+	if (view != NULL)
+		UnmapViewOfFile(view);
+	if (mapping != NULL)
+		CloseHandle(mapping);
+	return (retval);
+}
+#endif
+
 /* Client main loop. */
 int
 client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
@@ -1314,12 +1412,6 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	client_win32_resize_timer_start();
 #endif
 
-	/* Send identify messages. */
-	client_send_identify(ttynam, termname, caps, ncaps, cwd, feat);
-	tty_term_free_list(caps, ncaps);
-	proc_flush_peer(client_peer);
-
-	/* Send first command. */
 	if (msg == MSG_COMMAND) {
 		/* How big is the command? */
 		size = 0;
@@ -1347,23 +1439,48 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			return (1);
 		}
 		size += sizeof *data;
-
-		/* Send the command. */
+		client_startup_command = data;
+		client_startup_command_size = size;
+#ifndef TMUX_WIN32
 		if (proc_send(client_peer, msg, -1, data, size) != 0) {
-#ifdef TMUX_WIN32
-			client_restore_terminal();
-#endif
 			fprintf(stderr, "failed to send command\n");
 			free(data);
 			log_close();
 			return (1);
 		}
 		free(data);
-	} else if (msg == MSG_SHELL)
+#endif
+	}
+
+#ifdef TMUX_WIN32
+	client_win32_auth_complete = 0;
+	client_win32_auth_mapping = NULL;
+	client_identify_sent = 0;
+	client_startup_ttynam = ttynam;
+	client_startup_termname = termname;
+	client_startup_caps = caps;
+	client_startup_ncaps = ncaps;
+	client_startup_cwd = cwd;
+	client_startup_feat = feat;
+#else
+	client_send_identify(ttynam, termname, caps, ncaps, cwd, feat);
+	client_identify_sent = 1;
+	proc_flush_peer(client_peer);
+	if (msg == MSG_SHELL)
 		proc_send(client_peer, msg, -1, NULL, 0);
+	tty_term_free_list(caps, ncaps);
+#endif
 
 	/* Start main loop. */
 	proc_loop(client_proc, NULL);
+
+#ifdef TMUX_WIN32
+	client_win32_auth_cleanup();
+	tty_term_free_list(client_startup_caps, client_startup_ncaps);
+	client_startup_caps = NULL;
+	free(client_startup_command);
+	client_startup_command = NULL;
+#endif
 
 	/* Run command if user requested exec, instead of exiting. */
 	if (client_exittype == MSG_EXEC) {
@@ -1712,6 +1829,33 @@ client_dispatch_wait(struct imsg *imsg)
 		client_exitval = 1;
 		proc_exit(client_proc);
 		break;
+#ifdef TMUX_WIN32
+	case MSG_WIN32_AUTH_CHALLENGE:
+		if (client_send_win32_auth_bind(imsg) != 0) {
+			client_exitval = 1;
+			proc_exit(client_proc);
+		}
+		break;
+	case MSG_WIN32_AUTH_RESULT:
+		if (datalen != sizeof(uint32_t))
+			fatalx("bad MSG_WIN32_AUTH_RESULT size");
+		client_win32_auth_cleanup();
+		client_win32_auth_complete = 1;
+		if (!client_identify_sent) {
+			client_send_identify(client_startup_ttynam,
+			    client_startup_termname, client_startup_caps,
+			    client_startup_ncaps, client_startup_cwd,
+			    client_startup_feat);
+			client_identify_sent = 1;
+			proc_flush_peer(client_peer);
+			if (client_send_startup_command(shell_command != NULL ?
+			    MSG_SHELL : MSG_COMMAND) != 0) {
+				client_exitval = 1;
+				proc_exit(client_proc);
+			}
+		}
+		break;
+#endif
 	case MSG_FLAGS:
 		if (datalen != sizeof client_flags)
 			fatalx("bad MSG_FLAGS string");

@@ -1072,7 +1072,7 @@ if test "x$PLATFORM" = xwin32; then
 		[AC_MSG_ERROR([native Windows build requires POSIX regex.h])])
 	AC_SEARCH_LIBS(regcomp, regex, [],
 		[AC_MSG_ERROR([native Windows build requires libregex])])
-	LIBS="$LIBS -lkernel32 -luser32 -ladvapi32 -lws2_32"
+	LIBS="$LIBS -lkernel32 -luser32 -ladvapi32 -lbcrypt -lws2_32"
 fi
 
 # Save our CFLAGS/CPPFLAGS/LDFLAGS for the Makefile and restore the old user

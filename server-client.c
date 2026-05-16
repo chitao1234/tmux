@@ -76,6 +76,11 @@ static int	server_client_win32_identify_handle(struct client *,
 		    struct imsg *, int);
 static int	server_client_win32_identify_size(struct client *,
 		    struct imsg *);
+static int	server_client_win32_auth_start(struct client *);
+static int	server_client_win32_dispatch_auth(struct client *,
+		    struct imsg *);
+static int	server_client_win32_auth_finish(struct client *,
+		    struct win32_ipc_peer_identity *);
 #endif
 
 /* Compare client windows. */
@@ -358,6 +363,10 @@ server_client_create(int fd)
 	TAILQ_INIT(&c->input_requests);
 
 	TAILQ_INSERT_TAIL(&clients, c, entry);
+#ifdef TMUX_WIN32
+	if (fd != -1 && server_client_win32_auth_start(c) != 0)
+		c->flags |= CLIENT_EXIT;
+#endif
 	log_debug("new client %p", c);
 	return (c);
 }
@@ -581,6 +590,8 @@ server_client_lost(struct client *c)
 		CloseHandle(c->win32_stdout);
 		c->win32_stdout = NULL;
 	}
+	win32_ipc_peer_identity_free(c->win32_peer);
+	c->win32_peer = NULL;
 #endif
 	server_client_unref(c);
 
@@ -2333,6 +2344,14 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 
 	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
 
+#ifdef TMUX_WIN32
+	if (c->win32_auth_pending) {
+		if (server_client_win32_dispatch_auth(c, imsg) != 0)
+			goto bad;
+		return;
+	}
+#endif
+
 	switch (imsg->hdr.type) {
 	case MSG_IDENTIFY_CLIENTPID:
 	case MSG_IDENTIFY_CWD:
@@ -2818,7 +2837,7 @@ server_client_win32_identify_handle(struct client *c, struct imsg *imsg,
 	}
 
 	access = input ? GENERIC_READ : GENERIC_WRITE;
-	if (win32_ipc_duplicate_client_handle(c->pid, msg.handle, access,
+	if (win32_ipc_duplicate_client_handle(c->win32_peer, msg.handle, access,
 	    &handle, &cause) != 0) {
 		log_debug("client %p %s rejected: %s", c, name,
 		    cause != NULL ? cause : strerror(errno));
@@ -2869,6 +2888,93 @@ server_client_win32_identify_size(struct client *c, struct imsg *imsg)
 	log_debug("client %p IDENTIFY_WIN32_SIZE %ux%u (%ux%u)", c,
 	    size.sx, size.sy, size.xpixel, size.ypixel);
 	return (0);
+}
+
+static int
+server_client_win32_auth_start(struct client *c)
+{
+	c->win32_auth_pending = 1;
+	if (win32_random_bytes(c->win32_auth_nonce.nonce,
+	    sizeof c->win32_auth_nonce.nonce, NULL) != 0)
+		return (-1);
+	if (proc_send(c->peer, MSG_WIN32_AUTH_CHALLENGE, -1,
+	    &c->win32_auth_nonce, sizeof c->win32_auth_nonce) != 0)
+		return (-1);
+	return (0);
+}
+
+static int
+server_client_win32_auth_finish(struct client *c,
+    struct win32_ipc_peer_identity *peer)
+{
+	char	*cause = NULL;
+
+	if (win32_ipc_peer_identity_same_user(peer, &cause) != 0) {
+		log_debug("client %p auth rejected: %s", c,
+		    cause != NULL ? cause : strerror(errno));
+		free(cause);
+		return (-1);
+	}
+	free(cause);
+	cause = NULL;
+	if (win32_ipc_peer_identity_meets_integrity_floor(peer, &cause) != 0) {
+		log_debug("client %p auth rejected: %s", c,
+		    cause != NULL ? cause : strerror(errno));
+		free(cause);
+		return (-1);
+	}
+	free(cause);
+
+	c->win32_peer = peer;
+	c->win32_auth_pending = 0;
+	if (!server_acl_join(c)) {
+		c->exit_message = xstrdup("access not allowed");
+		c->flags |= CLIENT_EXIT;
+		c->win32_peer = NULL;
+		return (-1);
+	}
+	log_debug("client %p Win32 auth complete", c);
+	return (0);
+}
+
+static int
+server_client_win32_dispatch_auth(struct client *c, struct imsg *imsg)
+{
+	struct win32_ipc_peer_identity	*peer = NULL;
+	struct msg_win32_auth_bind	 bind;
+	struct msg_win32_auth_result	 result;
+	ssize_t				 datalen;
+	char				*cause = NULL;
+
+	switch (imsg->hdr.type) {
+	case MSG_VERSION:
+		return (0);
+	case MSG_WIN32_AUTH_BIND:
+		datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
+		if (datalen != sizeof bind)
+			return (-1);
+		memcpy(&bind, imsg->data, sizeof bind);
+		if (win32_ipc_verify_auth_bind(&c->win32_auth_nonce, &bind, &peer,
+		    &cause) != 0) {
+			log_debug("client %p auth bind rejected: %s", c,
+			    cause != NULL ? cause : strerror(errno));
+			free(cause);
+			return (-1);
+		}
+		if (server_client_win32_auth_finish(c, peer) != 0) {
+			win32_ipc_peer_identity_free(peer);
+			return (-1);
+		}
+		result.success = 1;
+		if (proc_send(c->peer, MSG_WIN32_AUTH_RESULT, -1, &result,
+		    sizeof result) != 0)
+			return (-1);
+		return (0);
+	default:
+		log_debug("client %p rejected pre-auth message %d", c,
+		    imsg->hdr.type);
+		return (-1);
+	}
 }
 #endif
 

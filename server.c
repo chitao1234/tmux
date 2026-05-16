@@ -366,16 +366,20 @@ server_loop(void)
 static void
 server_accept_client(int fd)
 {
+#ifndef TMUX_WIN32
 	struct client	*c;
-
-	c = server_client_create(fd);
-#ifdef TMUX_WIN32
-	server_win32_wait_first_client = 0;
 #endif
+
+#ifdef TMUX_WIN32
+	server_client_create(fd);
+	server_win32_wait_first_client = 0;
+#else
+	c = server_client_create(fd);
 	if (!server_acl_join(c)) {
 		c->exit_message = xstrdup("access not allowed");
 		c->flags |= CLIENT_EXIT;
 	}
+#endif
 }
 
 /* Exit the server by killing all clients and windows. */

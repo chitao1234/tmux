@@ -20,6 +20,7 @@
 #include "tmux.h"
 
 #include <aclapi.h>
+#include <bcrypt.h>
 #include <sddl.h>
 
 #ifdef TMUX_WIN32
@@ -37,6 +38,14 @@ static int win32_ipc_next_id = 3;
 static char *win32_ipc_socket_dir;
 static char *win32_ipc_current_user_sid_value;
 static char *win32_ipc_current_integrity_value;
+static DWORD win32_ipc_current_integrity_rid;
+
+struct win32_ipc_peer_identity {
+	pid_t		 pid;
+	HANDLE		 process;
+	char		*user_sid;
+	DWORD		 integrity_rid;
+};
 
 static int	win32_ipc_errno(int);
 static int	win32_ipc_set_blocking(SOCKET, int, char **);
@@ -46,6 +55,7 @@ static char    *win32_ipc_sid_to_string(PSID);
 static int	win32_ipc_capture_token_identity(HANDLE, char **, char **);
 static char    *win32_ipc_integrity_level_to_name(DWORD);
 static int	win32_ipc_capture_token_integrity(HANDLE, char **, char **);
+static int	win32_ipc_capture_token_integrity_rid(HANDLE, DWORD *, char **);
 static int	win32_ipc_cache_current_identity(void);
 static int	win32_ipc_make_managed_root(char **, char **);
 static int	win32_ipc_set_path_security(const char *, char **);
@@ -351,6 +361,23 @@ win32_ipc_sid_to_string(PSID sid)
 	return (copy);
 }
 
+int
+win32_random_bytes(void *buf, size_t len, char **cause)
+{
+	NTSTATUS	status;
+
+	status = BCryptGenRandom(NULL, buf, (ULONG)len,
+	    BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	if (status != 0) {
+		if (cause != NULL)
+			xasprintf(cause, "BCryptGenRandom failed: %#lx",
+			    (unsigned long)status);
+		errno = EACCES;
+		return (-1);
+	}
+	return (0);
+}
+
 static int
 win32_ipc_capture_token_identity(HANDLE token, char **user_sid, char **cause)
 {
@@ -399,6 +426,44 @@ win32_ipc_integrity_level_to_name(DWORD rid)
 }
 
 static int
+win32_ipc_capture_token_integrity_rid(HANDLE token, DWORD *integrity_rid,
+    char **cause)
+{
+	DWORD			 size;
+	TOKEN_MANDATORY_LABEL	*label = NULL;
+	DWORD			 count;
+	DWORD			*subauth;
+
+	*integrity_rid = 0;
+
+	if (!GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &size) &&
+	    GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "GetTokenInformation(TokenIntegrityLevel) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		return (-1);
+	}
+	label = xmalloc(size);
+	if (!GetTokenInformation(token, TokenIntegrityLevel, label, size,
+	    &size)) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "GetTokenInformation(TokenIntegrityLevel) failed:"
+			    " %s", win32_strerror(GetLastError()));
+		}
+		free(label);
+		return (-1);
+	}
+	count = *GetSidSubAuthorityCount(label->Label.Sid);
+	subauth = GetSidSubAuthority(label->Label.Sid, count - 1);
+	*integrity_rid = *subauth;
+	free(label);
+	return (0);
+}
+
+static int
 win32_ipc_capture_token_integrity(HANDLE token, char **integrity,
     char **cause)
 {
@@ -436,6 +501,174 @@ win32_ipc_capture_token_integrity(HANDLE token, char **integrity,
 	return (*integrity == NULL ? -1 : 0);
 }
 
+struct win32_ipc_peer_identity *
+win32_ipc_peer_identity_create(pid_t pid, HANDLE process, char **cause)
+{
+	struct win32_ipc_peer_identity	*peer;
+	HANDLE				 token = NULL;
+	char				*user_sid = NULL;
+
+	if (pid <= 0 || process == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid peer identity");
+		errno = EINVAL;
+		return (NULL);
+	}
+	if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't open client process token: %s",
+			    win32_strerror(GetLastError()));
+		}
+		errno = EACCES;
+		return (NULL);
+	}
+	if (win32_ipc_capture_token_identity(token, &user_sid, cause) != 0) {
+		CloseHandle(token);
+		return (NULL);
+	}
+
+	peer = xcalloc(1, sizeof *peer);
+	peer->pid = pid;
+	peer->process = process;
+	peer->user_sid = user_sid;
+	if (win32_ipc_capture_token_integrity_rid(token, &peer->integrity_rid,
+	    cause) != 0) {
+		win32_ipc_peer_identity_free(peer);
+		CloseHandle(token);
+		return (NULL);
+	}
+	CloseHandle(token);
+	return (peer);
+}
+
+void
+win32_ipc_peer_identity_free(struct win32_ipc_peer_identity *peer)
+{
+	if (peer == NULL)
+		return;
+	if (peer->process != NULL)
+		CloseHandle(peer->process);
+	free(peer->user_sid);
+	free(peer);
+}
+
+int
+win32_ipc_peer_identity_same_user(const struct win32_ipc_peer_identity *peer,
+    char **cause)
+{
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_user_sid_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine server identity");
+		errno = EACCES;
+		return (-1);
+	}
+	if (peer == NULL || peer->user_sid == NULL ||
+	    strcmp(peer->user_sid, win32_ipc_current_user_sid_value) != 0) {
+		if (cause != NULL)
+			xasprintf(cause, "client process user SID mismatch");
+		errno = EACCES;
+		return (-1);
+	}
+	return (0);
+}
+
+int
+win32_ipc_peer_identity_meets_integrity_floor(
+    const struct win32_ipc_peer_identity *peer, char **cause)
+{
+	if (win32_ipc_cache_current_identity() != 0 ||
+	    win32_ipc_current_integrity_value == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't determine server integrity");
+		errno = EACCES;
+		return (-1);
+	}
+	if (peer == NULL || peer->integrity_rid < win32_ipc_current_integrity_rid) {
+		if (cause != NULL)
+			xasprintf(cause, "client integrity too low");
+		errno = EACCES;
+		return (-1);
+	}
+	return (0);
+}
+
+int
+win32_ipc_verify_auth_bind(
+    const struct msg_win32_auth_challenge *challenge,
+    const struct msg_win32_auth_bind *bind,
+    struct win32_ipc_peer_identity **peer_out, char **cause)
+{
+	HANDLE				 process = NULL;
+	HANDLE				 duplicate = NULL;
+	struct win32_ipc_peer_identity	*peer = NULL;
+	void				*view = NULL;
+	int				 retval = -1;
+
+	*peer_out = NULL;
+	if (challenge == NULL || bind == NULL || bind->pid == 0 ||
+	    bind->handle == 0 ||
+	    bind->handle == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
+		if (cause != NULL)
+			xasprintf(cause, "invalid auth bind");
+		errno = EINVAL;
+		return (-1);
+	}
+
+	process = OpenProcess(PROCESS_DUP_HANDLE|
+	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, bind->pid);
+	if (process == NULL) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't open client process: %s",
+			    win32_strerror(GetLastError()));
+		}
+		errno = EACCES;
+		return (-1);
+	}
+	if (!DuplicateHandle(process, (HANDLE)(uintptr_t)bind->handle,
+	    GetCurrentProcess(), &duplicate, FILE_MAP_READ, FALSE, 0)) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't duplicate auth proof: %s",
+			    win32_strerror(GetLastError()));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	view = MapViewOfFile(duplicate, FILE_MAP_READ, 0, 0,
+	    sizeof challenge->nonce);
+	if (view == NULL) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't map auth proof: %s",
+			    win32_strerror(GetLastError()));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (memcmp(view, challenge->nonce, sizeof challenge->nonce) != 0) {
+		if (cause != NULL)
+			xasprintf(cause, "auth nonce mismatch");
+		errno = EACCES;
+		goto out;
+	}
+	peer = win32_ipc_peer_identity_create((pid_t)bind->pid, process, cause);
+	if (peer == NULL)
+		goto out;
+	process = NULL;
+	*peer_out = peer;
+	peer = NULL;
+	retval = 0;
+
+out:
+	if (view != NULL)
+		UnmapViewOfFile(view);
+	if (duplicate != NULL)
+		CloseHandle(duplicate);
+	if (process != NULL)
+		CloseHandle(process);
+	win32_ipc_peer_identity_free(peer);
+	return (retval);
+}
+
 static int
 win32_ipc_cache_current_identity(void)
 {
@@ -453,6 +686,10 @@ win32_ipc_cache_current_identity(void)
 	if (retval == 0) {
 		retval = win32_ipc_capture_token_integrity(token,
 		    &win32_ipc_current_integrity_value, &cause);
+		if (retval == 0) {
+			retval = win32_ipc_capture_token_integrity_rid(token,
+			    &win32_ipc_current_integrity_rid, &cause);
+		}
 	}
 	CloseHandle(token);
 	free(cause);
@@ -467,63 +704,26 @@ win32_ipc_cache_current_identity(void)
 }
 
 int
-win32_ipc_duplicate_client_handle(pid_t pid, uint64_t value, DWORD access,
-    HANDLE *out, char **cause)
+win32_ipc_duplicate_client_handle(const struct win32_ipc_peer_identity *peer,
+    uint64_t value, DWORD access, HANDLE *out, char **cause)
 {
-	HANDLE	process = NULL, token = NULL, probe = NULL, duplicate = NULL;
-	char	*user_sid = NULL;
+	HANDLE	probe = NULL, duplicate = NULL;
 	DWORD	 error;
 	int	 retval = -1;
 
 	*out = NULL;
-	if (pid <= 0 || value == 0 ||
+	if (peer == NULL || peer->process == NULL || value == 0 ||
 	    value == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
 		if (cause != NULL)
 			xasprintf(cause, "invalid client handle claim");
 		errno = EINVAL;
 		return (-1);
 	}
-	if (win32_ipc_cache_current_identity() != 0 ||
-	    win32_ipc_current_user_sid_value == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't determine server identity");
-		errno = EACCES;
+	if (win32_ipc_peer_identity_same_user(peer, cause) != 0)
 		return (-1);
-	}
 
-	process = OpenProcess(PROCESS_DUP_HANDLE|
-	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-	if (process == NULL) {
-		error = GetLastError();
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't open client process: %s",
-			    win32_strerror(error));
-		}
-		errno = EACCES;
-		return (-1);
-	}
-
-	if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
-		error = GetLastError();
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't open client process token: %s",
-			    win32_strerror(error));
-		}
-		errno = EACCES;
-		goto out;
-	}
-	if (win32_ipc_capture_token_identity(token, &user_sid, cause) != 0) {
-		errno = EACCES;
-		goto out;
-	}
-	if (strcmp(user_sid, win32_ipc_current_user_sid_value) != 0) {
-		if (cause != NULL)
-			xasprintf(cause, "client process user SID mismatch");
-		errno = EACCES;
-		goto out;
-	}
-
-	if (access != 0 && !DuplicateHandle(process, (HANDLE)(uintptr_t)value,
+	if (access != 0 && !DuplicateHandle(peer->process,
+	    (HANDLE)(uintptr_t)value,
 	    GetCurrentProcess(), &probe, access, FALSE, 0)) {
 		error = GetLastError();
 		if (cause != NULL) {
@@ -538,7 +738,7 @@ win32_ipc_duplicate_client_handle(pid_t pid, uint64_t value, DWORD access,
 		probe = NULL;
 	}
 
-	if (!DuplicateHandle(process, (HANDLE)(uintptr_t)value,
+	if (!DuplicateHandle(peer->process, (HANDLE)(uintptr_t)value,
 	    GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
 		error = GetLastError();
 		if (cause != NULL) {
@@ -558,11 +758,6 @@ out:
 		CloseHandle(duplicate);
 	if (probe != NULL)
 		CloseHandle(probe);
-	if (token != NULL)
-		CloseHandle(token);
-	if (process != NULL)
-		CloseHandle(process);
-	free(user_sid);
 	return (retval);
 }
 

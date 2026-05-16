@@ -109,7 +109,20 @@ int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);
 int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
-int		 win32_ipc_duplicate_client_handle(pid_t, uint64_t, DWORD,
+int		 win32_random_bytes(void *, size_t, char **);
+struct win32_ipc_peer_identity *win32_ipc_peer_identity_create(
+		     pid_t, HANDLE, char **);
+void		 win32_ipc_peer_identity_free(struct win32_ipc_peer_identity *);
+int		 win32_ipc_peer_identity_same_user(
+		     const struct win32_ipc_peer_identity *, char **);
+int		 win32_ipc_peer_identity_meets_integrity_floor(
+		     const struct win32_ipc_peer_identity *, char **);
+int		 win32_ipc_verify_auth_bind(
+		     const struct msg_win32_auth_challenge *,
+		     const struct msg_win32_auth_bind *,
+		     struct win32_ipc_peer_identity **, char **);
+int		 win32_ipc_duplicate_client_handle(
+		     const struct win32_ipc_peer_identity *, uint64_t, DWORD,
 		     HANDLE *, char **);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 

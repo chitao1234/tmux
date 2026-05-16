@@ -86,6 +86,9 @@ struct tty_key;
 struct tmuxpeer;
 struct tmuxproc;
 struct winlink;
+#ifdef TMUX_WIN32
+struct win32_ipc_peer_identity;
+#endif
 
 #ifdef TMUX_WIN32
 #include "win32-platform.h"
@@ -2057,6 +2060,9 @@ struct client {
 	size_t			 win32_tty_in_pending;
 	size_t			 win32_tty_out_pending;
 	int			 win32_tty_transport_lost;
+	int			 win32_auth_pending;
+	struct msg_win32_auth_challenge win32_auth_nonce;
+	struct win32_ipc_peer_identity *win32_peer;
 #endif
 	struct event		 event;
 	int			 retval;
