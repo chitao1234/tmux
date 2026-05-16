@@ -163,6 +163,8 @@ Required direction:
   needed if reparse-point aliases matter.
 - Replace unconditional unlink with stale-endpoint validation.
 - Bound or at least diagnose long startup-lock waits.
+- The broader cross-platform redesign for this area is tracked in
+  [`tools/platform-ipc-startup-plan.md`](platform-ipc-startup-plan.md).
 
 ### P1: `cmd.exe` command building and popup editor launch are still fragile
 
