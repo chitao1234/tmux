@@ -36,9 +36,17 @@ enum ipc_endpoint_probe_result {
 	IPC_ENDPOINT_PROBE_UNKNOWN
 };
 
+enum ipc_endpoint_class {
+	IPC_ENDPOINT_CLASS_MANAGED,
+	IPC_ENDPOINT_CLASS_EXPLICIT
+};
+
 struct ipc_endpoint {
 	char				*path;
+	char				*compare_path;
 	const struct ipc_backend	*backend;
+	enum ipc_endpoint_source	 source;
+	enum ipc_endpoint_class		 class;
 };
 
 struct ipc_listener {
@@ -71,7 +79,8 @@ struct ipc_backend {
 };
 
 static void	 ipc_log_and_free_cause(char **);
-static struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
+static struct ipc_endpoint *ipc_endpoint_create(const char *,
+		    enum ipc_endpoint_source, enum ipc_endpoint_class, char **);
 static int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
 static int	 ipc_coordination_acquire(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
@@ -163,10 +172,11 @@ static const struct ipc_backend ipc_backend = {
 
 struct ipc_endpoint *
 ipc_endpoint_resolve(const char *path, const char *label, uint64_t *flags,
-    char **cause)
+    enum ipc_endpoint_source source, char **cause)
 {
 	struct ipc_endpoint	*endpoint;
 	char			*default_path = NULL;
+	enum ipc_endpoint_class	 endpoint_class;
 
 	if (cause != NULL)
 		*cause = NULL;
@@ -178,15 +188,19 @@ ipc_endpoint_resolve(const char *path, const char *label, uint64_t *flags,
 		path = default_path;
 		if (flags != NULL)
 			*flags |= CLIENT_DEFAULTSOCKET;
-	}
+		source = IPC_ENDPOINT_SOURCE_DEFAULT;
+		endpoint_class = IPC_ENDPOINT_CLASS_MANAGED;
+	} else
+		endpoint_class = IPC_ENDPOINT_CLASS_EXPLICIT;
 
-	endpoint = ipc_endpoint_create(path, cause);
+	endpoint = ipc_endpoint_create(path, source, endpoint_class, cause);
 	free(default_path);
 	return (endpoint);
 }
 
 static struct ipc_endpoint *
-ipc_endpoint_create(const char *path, char **cause)
+ipc_endpoint_create(const char *path, enum ipc_endpoint_source source,
+    enum ipc_endpoint_class endpoint_class, char **cause)
 {
 	struct ipc_endpoint	*endpoint;
 
@@ -199,11 +213,14 @@ ipc_endpoint_create(const char *path, char **cause)
 
 	endpoint = xcalloc(1, sizeof *endpoint);
 	endpoint->backend = &ipc_backend;
+	endpoint->source = source;
+	endpoint->class = endpoint_class;
 	endpoint->path = endpoint->backend->canonicalize(path, cause);
 	if (endpoint->path == NULL) {
 		free(endpoint);
 		return (NULL);
 	}
+	endpoint->compare_path = xstrdup(endpoint->path);
 	return (endpoint);
 }
 
@@ -220,6 +237,7 @@ ipc_endpoint_free(struct ipc_endpoint *endpoint)
 {
 	if (endpoint == NULL)
 		return;
+	free(endpoint->compare_path);
 	free(endpoint->path);
 	free(endpoint);
 }
@@ -736,52 +754,32 @@ ipc_default_path_win32(const char *label, char **cause)
 static char *
 ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 {
-	wchar_t	*wpath, *wfull = NULL;
-	char	*full;
-	DWORD	 n;
-	u_int	 i;
+	char		*expanded, *resolved;
+	const char	*cwd;
 
-	wpath = win32_utf8_to_wide(path);
-	if (wpath == NULL) {
+	expanded = expand_path(path, find_home());
+	if (expanded == NULL) {
 		if (cause != NULL)
-			xasprintf(cause, "couldn't convert socket path: %s", path);
+			xasprintf(cause, "invalid socket path: %s", path);
 		errno = EINVAL;
 		return (NULL);
 	}
-
-	n = GetFullPathNameW(wpath, 0, NULL, NULL);
-	free(wpath);
-	if (n == 0)
-		goto fail;
-	wfull = xcalloc(n, sizeof *wfull);
-	wpath = win32_utf8_to_wide(path);
-	if (wpath == NULL)
-		goto fail;
-	if (GetFullPathNameW(wpath, n, wfull, NULL) == 0) {
-		free(wpath);
-		goto fail;
+	if (path_is_drive_relative(expanded)) {
+		if (cause != NULL) {
+			xasprintf(cause, "socket path must not be drive-relative: "
+			    "%s", expanded);
+		}
+		free(expanded);
+		errno = EINVAL;
+		return (NULL);
 	}
-	free(wpath);
-	CharLowerBuffW(wfull, (DWORD)wcslen(wfull));
-
-	full = win32_wide_to_utf8(wfull);
-	free(wfull);
-	if (full == NULL)
-		goto fail;
-	for (i = 0; full[i] != '\0'; i++) {
-		if (full[i] == '\\')
-			full[i] = '/';
-	}
-	while (strlen(full) > 3 && full[strlen(full) - 1] == '/')
-		full[strlen(full) - 1] = '\0';
-	return (full);
-
-fail:
-	free(wfull);
-	if (cause != NULL && *cause == NULL) {
-		xasprintf(cause, "couldn't canonicalize socket path %s: %s",
-		    path, win32_strerror(GetLastError()));
-	}
+	cwd = find_cwd();
+	resolved = win32_resolve_cwd(expanded, cwd, cause);
+	free(expanded);
+	if (resolved != NULL)
+		return (resolved);
+	if (cause != NULL && *cause == NULL)
+		xasprintf(cause, "couldn't canonicalize socket path: %s", path);
 	errno = EINVAL;
 	return (NULL);
 }

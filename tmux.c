@@ -700,6 +700,7 @@ main(int argc, char **argv)
 {
 	char					*path = NULL, *label = NULL;
 	char					*cause;
+	enum ipc_endpoint_source		 endpoint_source;
 #ifndef TMUX_WIN32
 	char					**var;
 #endif
@@ -890,14 +891,18 @@ main(int argc, char **argv)
 	 * used. Otherwise, $TMUX is checked and if that fails "default" is
 	 * used.
 	 */
+	endpoint_source = IPC_ENDPOINT_SOURCE_DEFAULT;
 	if (path == NULL && label == NULL) {
 		s = getenv_canonical("TMUX");
 		if (s != NULL && *s != '\0' && *s != ',') {
 			path = xstrdup(s);
 			path[strcspn(path, ",")] = '\0';
+			endpoint_source = IPC_ENDPOINT_SOURCE_ENV;
 		}
-	}
-	socket_endpoint = ipc_endpoint_resolve(path, label, &flags, &cause);
+	} else if (path != NULL)
+		endpoint_source = IPC_ENDPOINT_SOURCE_CLI;
+	socket_endpoint = ipc_endpoint_resolve(path, label, &flags,
+	    endpoint_source, &cause);
 	free(path);
 	if (socket_endpoint == NULL) {
 		if (cause != NULL) {

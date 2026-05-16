@@ -52,6 +52,12 @@ struct client;
 struct ipc_endpoint;
 struct ipc_coordination;
 struct ipc_listener;
+
+enum ipc_endpoint_source {
+	IPC_ENDPOINT_SOURCE_DEFAULT,
+	IPC_ENDPOINT_SOURCE_ENV,
+	IPC_ENDPOINT_SOURCE_CLI
+};
 struct cmd;
 struct cmd_find_state;
 struct cmdq_item;
@@ -3104,7 +3110,7 @@ int	 server_create_socket(uint64_t, char **);
 
 /* ipc-startup.c */
 struct ipc_endpoint *ipc_endpoint_resolve(const char *, const char *,
-	     uint64_t *, char **);
+	     uint64_t *, enum ipc_endpoint_source, char **);
 const char	*ipc_endpoint_path(struct ipc_endpoint *);
 void		 ipc_endpoint_free(struct ipc_endpoint *);
 int		 ipc_client_connect_or_start(struct event_base *,
