@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-16
+Date: 2026-05-17
 
 Scope: current codebase-wide Win32 implementation review after the AF_UNIX
 auth work landed. This document reflects the current tree, not earlier design
@@ -39,10 +39,7 @@ The remaining problems are the second-order gaps around that progress:
    read-only and deny model.
 2. Native Windows command launch is still fragile around `cmd.exe` quoting and
    popup editor argv handling.
-3. Pane/job lifecycle still conflates passive cleanup, forced termination,
-   helper-job teardown, and the distinction between process exit and drained
-   output EOF.
-4. Relay is now explicitly a first-class transport for native console clients,
+3. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
 
@@ -115,99 +112,6 @@ Required direction:
   when argv structure is already known.
 - Keep shell-specific escaping rules explicit rather than relying on generic
   quote wrapping.
-
-### P1: Win32 pane and job close paths still default to hard termination
-
-Files:
-
-- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_close()` always calls
-  `win32_child_kill()`.
-- [`win32-conpty.c`](../win32-conpty.c): `win32_job_close()` also hard-kills
-  the job/process tree.
-- [`server-fn.c`](../server-fn.c): normal pane destroy paths still use the
-  Win32 close helper.
-- [`spawn.c`](../spawn.c): respawn paths still use the same Win32 close
-  helper.
-
-Problem:
-
-The Win32 close helpers are still also kill helpers. Passive teardown,
-remain-on-exit cleanup, respawn bookkeeping, helper-job cleanup, and explicit
-kill operations are not clearly separated.
-
-Why it matters:
-
-That is stricter than tmux's normal lifecycle semantics. It makes it too easy
-for "close because tmux bookkeeping is done" to become "terminate the whole
-process tree now", including helper jobs or descendants that were not part of
-an explicit kill request.
-
-Required direction:
-
-- Split Win32 passive disconnect/handle-close from explicit forced
-  termination.
-- Use hard kill only for explicit kill paths, irrecoverable cleanup failures,
-  or timed fallback.
-- Keep the semantics of pane close, job close, and helper cleanup separate.
-
-### P1: Win32 pane destroy-readiness still ignores `pipe-pane` helper jobs
-
-Files:
-
-- [`cmd-pipe-pane.c`](../cmd-pipe-pane.c): Win32 `pipe-pane` uses
-  `wp->pipe_job`.
-- [`window.c`](../window.c): `window_pane_destroy_ready()` checks Win32 pane
-  output state and `PANE_EXITED`, but not `wp->pipe_job`.
-- [`window.c`](../window.c): `window_pane_close_pipe()` frees `wp->pipe_job`
-  during teardown.
-
-Problem:
-
-Win32 `pipe-pane` helper ownership is no longer leaked, but destroy-readiness
-still does not wait for the helper job. Pane teardown can still free the
-helper job while it has pending work.
-
-Why it matters:
-
-`pipe-pane -O` output can still be truncated, and bidirectional helpers can
-still be killed by pane teardown rather than by an explicit pipe close or
-helper lifecycle decision.
-
-Required direction:
-
-- Add `wp->pipe_job` readiness to Win32 pane destroy checks.
-- Decide whether ordinary pane destruction should wait for helper completion,
-  drain helper output, or explicitly abandon helper work.
-- Keep explicit forced close able to kill the helper intentionally.
-
-### P2: Win32 still overloads process exit and output-drained EOF
-
-Files:
-
-- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_exit_cb()` sets
-  `PANE_STATUSREADY` when the process exits.
-- [`window.c`](../window.c): `window_pane_error_callback()` sets
-  `PANE_EXITED` only when the output side reaches EOF/error.
-- [`spawn.c`](../spawn.c): respawn logic still uses `PANE_EXITED` as the
-  main "pane is really gone" test.
-
-Problem:
-
-The earlier output-loss bug was fixed by delaying `PANE_EXITED` until reader
-EOF, but tmux still only has one public state bit for both "root process has
-exited" and "output is fully drained".
-
-Why it matters:
-
-Commands that care about process liveness still see an exited pane as active
-until EOF, while respawn and destroy logic cannot distinguish "process is
-dead" from "process is dead and output is fully drained".
-
-Required direction:
-
-- Add a separate Win32-visible state for root-process exit.
-- Keep a distinct output-drained / EOF-complete state.
-- Teach respawn, destroy, and status/reporting paths which state they need.
 
 ### P2: Relay is first-class because detached server-side native console handles still do not work
 
@@ -329,6 +233,12 @@ current implementation:
   after successful startup or shutdown.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
   from process events and job checks.
+- Win32 pane/job lifecycle no longer collapses passive cleanup, explicit
+  termination, process exit, drained output, and `pipe-pane` helper ownership
+  into one close path. The current tree has distinct cleanup versus terminate
+  operations, Win32 quiescence predicates, `pipe-pane` ownership gates, and
+  native PowerShell smoke for dead-pane respawn, remain-on-exit, explicit
+  kill, explicit pipe close, natural job completion, and `job_kill_all`.
 - Worker-backed I/O service notifications are coalesced, bounded, and no
   longer lose wakeups in the previously observed ways.
 - Terminal relay now has input credit, incremental output progress, explicit
@@ -388,17 +298,13 @@ The main gaps that still matter are:
    backlog, UTF-8 split, invalid UTF-8, and transport loss all need continued
    native-host validation.
 
-6. Pane lifecycle:
-   root process exits with delayed ConPTY tail output; verify tail output,
-   dead-pane state, destroy readiness, and respawn semantics.
+6. Popup PTY jobs:
+   popup PTY job completion and replacement still need native coverage so the
+   job-tree drain path is exercised outside ordinary panes.
 
 7. `pipe-pane` lifecycle:
-   destroy panes while Win32 `pipe-pane -O`, `-I`, and `-IO` helpers still
-   have work pending; verify no unintended truncation or helper kill.
-
-8. Passive vs forced teardown:
-   verify natural pane exit, remain-on-exit, kill-pane, respawn, and helper-job
-   cleanup all use the intended Win32 close/kill mode.
+   ordinary pane death with Win32 `pipe-pane -O`, `-I`, and `-IO` helpers
+   still needs native coverage; current smoke only covers explicit pipe close.
 
 9. Command quoting:
    run popup editors and shell commands containing spaces, quotes, `&`, `|`,
@@ -424,19 +330,15 @@ The main gaps that still matter are:
    whether explicit socket coordination should stay adjacent to the endpoint or
    move into a backend-private namespace.
 
-2. Pane/job lifecycle cleanup:
-   split passive close from forced kill, separate process-exit from
-   output-drained state, and add `pipe-pane` helper readiness.
-
-3. Native command and remaining path-surface cleanup:
+2. Native command and remaining path-surface cleanup:
    fix `cmd.exe` quoting, popup editor argv handling, Win32 glob semantics,
    and add broader regression coverage for the shared path policy.
 
-4. Relay-first terminal consolidation:
+3. Relay-first terminal consolidation:
    keep relay as the supported native-console mode, continue native coverage,
    and only revisit server-side native-console handle mode if detached-server
    usability is proven.
 
-5. Broader native regression coverage:
+4. Broader native regression coverage:
    keep runtime verification in native PowerShell or equivalent Windows hosts,
    not under MSYS2 tmux execution.

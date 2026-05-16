@@ -34,6 +34,7 @@ struct win32_pane {
 	struct win32_io_endpoint *output_event;
 	struct win32_io_endpoint *input_writer;
 	struct win32_io_endpoint *process_event;
+	struct event	 tree_timer;
 	struct evbuffer	*input_queue;
 	int		 output_paused;
 	int		 exited;
@@ -54,6 +55,7 @@ struct win32_job {
 	struct win32_io_endpoint *output_event;
 	struct win32_io_endpoint *stdin_writer;
 	struct win32_io_endpoint *process_event;
+	struct event	 tree_timer;
 	struct bufferevent *event;
 	void		(*exitcb)(void *);
 	void		 *exitarg;
@@ -99,9 +101,15 @@ struct win32_job_process {
 #define WIN32_INPUT_WRITER_HIGH (1024 * 1024)
 #define WIN32_INPUT_WRITER_CHUNK (256 * 1024)
 #define WIN32_INPUT_QUEUE_HIGH (4 * 1024 * 1024)
+#define WIN32_TREE_EXIT_POLL_USEC 50000
 
 typedef NTSTATUS (NTAPI *win32_nt_query_information_process)(HANDLE,
     PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+
+static void	win32_pane_close_stdin(struct win32_pane *);
+static void	win32_pane_close_source(struct win32_pane *);
+static void	win32_job_close_input(struct win32_job *);
+static void	win32_job_close_source(struct win32_job *);
 
 static int
 win32_make_pipe_flags(HANDLE *readp, HANDLE *writep, int inherit_read,
@@ -745,31 +753,6 @@ win32_child_kill(const char *name, DWORD pid, HANDLE job, HANDLE process)
 }
 
 static void
-win32_child_disconnect(HPCON *hpcon, HANDLE *input_read, HANDLE *input_write,
-    HANDLE *output_write)
-{
-	win32_close_handle(input_write);
-	win32_close_pseudoconsole(hpcon);
-	win32_close_handle(input_read);
-	win32_close_handle(output_write);
-}
-
-static void
-win32_pane_disconnect(struct win32_pane *pw)
-{
-	if (pw->input_writer != NULL) {
-		win32_io_endpoint_free(pw->input_writer);
-		pw->input_writer = NULL;
-	}
-	if (pw->input_queue != NULL) {
-		evbuffer_free(pw->input_queue);
-		pw->input_queue = NULL;
-	}
-	win32_child_disconnect(&pw->hpcon, &pw->input_read, &pw->input_write,
-	    &pw->output_write);
-}
-
-static void
 win32_pane_close_stdin(struct win32_pane *pw)
 {
 	if (pw->input_queue != NULL)
@@ -780,6 +763,24 @@ win32_pane_close_stdin(struct win32_pane *pw)
 	}
 	win32_close_handle(&pw->input_write);
 	win32_close_handle(&pw->input_read);
+}
+
+static void
+win32_pane_close_source(struct win32_pane *pw)
+{
+	win32_pane_close_stdin(pw);
+	win32_close_pseudoconsole(&pw->hpcon);
+	win32_close_handle(&pw->output_write);
+}
+
+static void
+win32_pane_disconnect(struct win32_pane *pw)
+{
+	win32_pane_close_source(pw);
+	if (pw->input_queue != NULL) {
+		evbuffer_free(pw->input_queue);
+		pw->input_queue = NULL;
+	}
 }
 
 static int
@@ -895,12 +896,15 @@ win32_pane_input_event_cb(void *arg, uint32_t events)
 static void
 win32_job_disconnect(struct win32_job *wj)
 {
-	if (wj->stdin_writer != NULL) {
-		win32_io_endpoint_free(wj->stdin_writer);
-		wj->stdin_writer = NULL;
-	}
-	win32_child_disconnect(&wj->hpcon, &wj->stdin_read, &wj->stdin_write,
-	    &wj->stdout_write);
+	win32_job_close_source(wj);
+}
+
+static void
+win32_job_close_source(struct win32_job *wj)
+{
+	win32_job_close_input(wj);
+	win32_close_pseudoconsole(&wj->hpcon);
+	win32_close_handle(&wj->stdout_write);
 }
 
 static void
@@ -1015,6 +1019,28 @@ win32_process_status(HANDLE process, int *status)
 }
 
 static int
+win32_job_active_processes(HANDLE job, DWORD *active)
+{
+	JOBOBJECT_BASIC_ACCOUNTING_INFORMATION	info;
+	DWORD				 len = 0;
+
+	if (active != NULL)
+		*active = 0;
+	if (job == NULL)
+		return (1);
+	memset(&info, 0, sizeof info);
+	if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+	    &info, sizeof info, &len))
+		return (0);
+	if (active != NULL)
+		*active = info.ActiveProcesses;
+	return (1);
+}
+
+static void	win32_pane_watch_tree(struct window_pane *);
+static void	win32_job_watch_tree(struct win32_job *);
+
+static int
 win32_pane_set_exited(struct window_pane *wp, int *status)
 {
 	struct win32_pane	*pw;
@@ -1033,6 +1059,7 @@ win32_pane_set_exited(struct window_pane *wp, int *status)
 		(void)win32_process_status(pw->process, &pw->status);
 	pw->exited = 1;
 	win32_pane_close_stdin(pw);
+	win32_pane_watch_tree(wp);
 	return (1);
 }
 
@@ -1042,6 +1069,55 @@ win32_pane_note_exit(struct window_pane *wp, int status)
 	wp->status = status;
 	wp->flags |= PANE_STATUSREADY;
 	wp->flags |= PANE_EXITED;
+}
+
+static void
+win32_pane_tree_timer(__unused tmux_event_fd fd, __unused short events,
+    void *arg)
+{
+	struct window_pane	*wp = arg;
+	DWORD			 active;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return;
+	if (!win32_job_active_processes(wp->win32->job, &active)) {
+		log_debug("%%%u tree query failed: %s", wp->id,
+		    win32_strerror(GetLastError()));
+		active = 0;
+	}
+	if (active != 0) {
+		win32_pane_watch_tree(wp);
+		return;
+	}
+	log_debug("%%%u tree exited", wp->id);
+	win32_pane_close_source(wp->win32);
+	if (wp->win32->output_event != NULL &&
+	    win32_io_reader_buffered(wp->win32->output_event) != 0)
+		win32_pane_drain(wp);
+	if (wp->win32 != NULL && wp->win32->output_event != NULL &&
+	    !win32_io_reader_done(wp->win32->output_event)) {
+		log_debug("%%%u forcing output close after tree exit", wp->id);
+		win32_io_endpoint_free(wp->win32->output_event);
+		wp->win32->output_event = NULL;
+	}
+	if (wp->win32 != NULL)
+		win32_close_handle(&wp->win32->output_read);
+	if (window_pane_destroy_ready(wp))
+		server_destroy_pane(wp, 1);
+}
+
+static void
+win32_pane_watch_tree(struct window_pane *wp)
+{
+	struct timeval	tv;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return;
+	if (!event_initialized(&wp->win32->tree_timer))
+		evtimer_set(&wp->win32->tree_timer, win32_pane_tree_timer, wp);
+	timerclear(&tv);
+	tv.tv_usec = WIN32_TREE_EXIT_POLL_USEC;
+	event_add(&wp->win32->tree_timer, &tv);
 }
 
 static void
@@ -1234,6 +1310,8 @@ win32_pane_release(struct window_pane *wp, int terminate)
 	wp->event = NULL;
 	if (terminate)
 		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
+	if (event_initialized(&pw->tree_timer))
+		evtimer_del(&pw->tree_timer);
 	win32_pane_disconnect(pw);
 	if (pw->process_event != NULL)
 		win32_io_endpoint_free(pw->process_event);
@@ -1429,6 +1507,9 @@ win32_job_output_event_cb(void *arg, uint32_t events)
 		    (long)wj->process_id);
 	if (win32_job_exited(wj, &status))
 		wj->status = status;
+	else
+		log_debug("job output ended before process exit, pid %ld",
+		    (long)wj->process_id);
 	if (wj->event != NULL && wj->event->errorcb != NULL)
 		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
 }
@@ -1490,6 +1571,8 @@ win32_job_set_exited(struct win32_job *wj, int *status)
 		(void)win32_process_status(wj->process, &wj->status);
 	wj->exited = 1;
 	win32_job_close_input(wj);
+	if (wj->pty)
+		win32_job_watch_tree(wj);
 	return (1);
 }
 
@@ -1502,6 +1585,56 @@ win32_job_exit_cb(void *arg)
 		wj->exitcb(wj->exitarg);
 	else
 		wj->exit_pending = 1;
+}
+
+static void
+win32_job_tree_timer(__unused tmux_event_fd fd, __unused short events,
+    void *arg)
+{
+	struct win32_job	*wj = arg;
+	DWORD			 active;
+
+	if (wj == NULL)
+		return;
+	if (!win32_job_active_processes(wj->job, &active)) {
+		log_debug("job tree query failed, pid %ld: %s",
+		    (long)wj->process_id, win32_strerror(GetLastError()));
+		active = 0;
+	}
+	if (active != 0) {
+		win32_job_watch_tree(wj);
+		return;
+	}
+	log_debug("job tree exited, pid %ld", (long)wj->process_id);
+	win32_job_close_source(wj);
+	if (wj->output_event != NULL &&
+	    win32_io_reader_buffered(wj->output_event) != 0)
+		win32_job_read_event(wj);
+	if (wj->output_event != NULL &&
+	    !win32_io_reader_done(wj->output_event)) {
+		log_debug("forcing job output close after tree exit, pid %ld",
+		    (long)wj->process_id);
+		win32_io_endpoint_free(wj->output_event);
+		wj->output_event = NULL;
+	}
+	win32_close_handle(&wj->stdout_read);
+	if (win32_job_output_done(wj) &&
+	    wj->event != NULL && wj->event->errorcb != NULL)
+		wj->event->errorcb(wj->event, 0, wj->event->cbarg);
+}
+
+static void
+win32_job_watch_tree(struct win32_job *wj)
+{
+	struct timeval	tv;
+
+	if (wj == NULL)
+		return;
+	if (!event_initialized(&wj->tree_timer))
+		evtimer_set(&wj->tree_timer, win32_job_tree_timer, wj);
+	timerclear(&tv);
+	tv.tv_usec = WIN32_TREE_EXIT_POLL_USEC;
+	event_add(&wj->tree_timer, &tv);
 }
 
 static void
@@ -1752,6 +1885,8 @@ win32_job_release(struct win32_job *wj, int terminate)
 	wj->event = NULL;
 	if (terminate)
 		win32_child_kill("job", wj->process_id, wj->job, wj->process);
+	if (event_initialized(&wj->tree_timer))
+		evtimer_del(&wj->tree_timer);
 	win32_job_disconnect(wj);
 	if (wj->process_event != NULL)
 		win32_io_endpoint_free(wj->process_event);

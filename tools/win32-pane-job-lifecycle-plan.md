@@ -2,13 +2,28 @@
 
 Date: 2026-05-17
 
-Status: In progress
+Status: Implemented
 
 Related docs:
 
 - [`tools/win32-port-findings.md`](win32-port-findings.md)
 - [`tools/win32-io-service-plan.md`](win32-io-service-plan.md)
 - [`tools/win32-console-relay-plan.md`](win32-console-relay-plan.md)
+
+Current implementation result:
+
+- Win32 panes now separate root-process exit from backend quiescence.
+- Win32 pane destroy readiness waits for both quiescent output state and any
+  owned `pipe-pane` helper job.
+- Win32 pane and job cleanup are now passive teardown paths; explicit
+  cancellation uses dedicated terminate paths.
+- The Win32 backend now polls job active-process count after root exit so
+  descendants can finish naturally, then drains buffered output and ends the
+  reader locally if Windows still refuses to deliver a terminal ConPTY reader
+  completion.
+- Native PowerShell smoke now covers dead-pane quiescence, drain-gated
+  respawn, remain-on-exit, explicit respawn kill, explicit pipe close,
+  natural job completion, and `job_kill_all`.
 
 ## Goal
 
