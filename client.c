@@ -102,6 +102,7 @@ static __dead void	 client_exec(const char *,const char *);
 static int		 client_connect(struct event_base *, struct ipc_endpoint *,
 			     uint64_t);
 #ifdef TMUX_WIN32
+static int		 client_send_startup_command(enum msgtype);
 static void		 client_win32_resize_timer_callback(tmux_event_fd,
 			     short, void *);
 static void		 client_win32_resize_timer_start(void);
@@ -144,7 +145,6 @@ static void		 client_signal(int);
 static void		 client_dispatch(struct imsg *, void *);
 static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
-static int		 client_send_startup_command(enum msgtype);
 static const char	*client_exit_message(void);
 static void		 client_send_environ(void);
 #ifdef TMUX_WIN32
@@ -919,6 +919,7 @@ client_restore_terminal(void)
 }
 #endif
 
+#ifdef TMUX_WIN32
 static int
 client_send_startup_command(enum msgtype msg)
 {
@@ -944,8 +945,6 @@ client_send_startup_command(enum msgtype msg)
 	}
 	return (0);
 }
-
-#ifdef TMUX_WIN32
 static void
 client_win32_auth_cleanup(void)
 {
@@ -1251,9 +1250,10 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			return (1);
 		}
 		size += sizeof *data;
+#ifdef TMUX_WIN32
 		client_startup_command = data;
 		client_startup_command_size = size;
-#ifndef TMUX_WIN32
+#else
 		if (proc_send(client_peer, msg, -1, data, size) != 0) {
 			fprintf(stderr, "failed to send command\n");
 			free(data);
