@@ -1566,6 +1566,12 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 		    creation_flags|CREATE_SUSPENDED, wenv, wcwd,
 		    &six.StartupInfo, &pi);
 	} else {
+		/*
+		 * Background jobs run from the detached server should not
+		 * flash a transient console window when the child is a
+		 * console-subsystem program.
+		 */
+		creation_flags |= CREATE_NO_WINDOW;
 		six.StartupInfo.cb = sizeof six;
 		six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 		six.StartupInfo.hStdInput = wj->stdin_read;
