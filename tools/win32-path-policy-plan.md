@@ -31,9 +31,10 @@ In progress in the current worktree:
   coordination now keys off that identity instead of the preserved display
   spelling;
 - explicit `-S` startup from a missing parent directory now works on Win32, but
-  the checked-in native smoke still has a concurrency verification gap in
-  `Test-ConcurrentAutostart` that needs to be resolved before it can become a
-  hard gate for later path-policy slices.
+  the checked-in native PowerShell smoke now passes again when invoked
+  directly; a nested `powershell.exe -File` wrapper under the current
+  automation host can still reproduce a `Test-ConcurrentAutostart`
+  false-negative and should not be treated as a product signal.
 
 Still pending after that:
 
@@ -527,25 +528,28 @@ Remaining boundary:
 
 #### Slice 4C: stabilize the native startup smoke as a real gate
 
+Status: completed for direct native PowerShell invocation
+
 Current gap:
 
-- focused native PowerShell concurrency checks pass;
-- the checked-in `tools/win32-ipc-startup-smoke.ps1` still fails at
-  `Test-ConcurrentAutostart` with `server exited unexpectedly`.
+- the checked-in `tools/win32-ipc-startup-smoke.ps1` now passes when invoked
+  directly from native PowerShell;
+- invoking it through a nested `powershell.exe -File` wrapper under the current
+  automation host can still reproduce `server exited unexpectedly` during
+  `Test-ConcurrentAutostart`.
 
-Required work:
+Completed outcome:
 
-- reproduce the failure in isolation using the script's own helper path;
-- determine whether the issue is in the smoke harness or in startup behavior;
-- if it is a harness problem, fix it in a separate commit from the core Stage 4
-  path work;
-- if it is a product bug, feed that result back into Slice 4B instead of
-  papering over it with looser retry behavior.
+- direct invocation from native PowerShell is once again a reliable regression
+  gate for the path-policy startup work;
+- focused reproductions and exact helper-style replays pass in the same native
+  shell context, which isolates the remaining false-negative to the nested
+  wrapper environment rather than the checked-in smoke logic itself.
 
-Success condition:
+Remaining caveat:
 
-- the checked-in smoke covers concurrent autostart reliably enough to use as a
-  regression gate for the remaining IPC path-policy work.
+- if this smoke is later automated through a nested PowerShell wrapper, that
+  wrapper path still needs its own separate investigation.
 
 ### Stage 5: Harden explicit `-S` and inherited `$TMUX`
 
@@ -639,15 +643,13 @@ Verify:
 
 The next implementation step should stay narrowly scoped:
 
-1. resolve the `Test-ConcurrentAutostart` smoke discrepancy so the checked-in
-   native harness can become a reliable gate again;
-2. only after that, layer Stage 5 trust validation onto explicit and inherited
+1. layer Stage 5 trust validation onto explicit and inherited
    endpoint startup paths.
 
 This keeps the current path-policy work coherent: endpoint identity is now
-split correctly, so the next requirement is trustworthy checked-in concurrency
-coverage before deciding which startup-side mutations are allowed for each
-endpoint class.
+split correctly and the direct native PowerShell smoke is trustworthy again, so
+the next requirement is deciding which startup-side mutations are allowed for
+each endpoint class.
 
 ### Case behavior
 
