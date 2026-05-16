@@ -39,6 +39,14 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 - Optional fuzzing lives under `fuzz/` and is enabled through `--enable-fuzzing`.
 - tmux debug logs are normally produced with `tmux -v` or `tmux -vv` in the working directory.
 
+## Host Toolchain Policy
+
+- Use MSYS2 `bash` for build and configure commands on this host.
+- Use the MSYS2 UCRT64 toolchain for all compiling on this host.
+- Before building in MSYS2 `bash`, prepend `/ucrt64/bin:/usr/bin` to `PATH`.
+- Use native PowerShell or `cmd` for runtime testing on this host.
+- Do not use any other host toolchain for building, configuring, or compiling on this host.
+
 ## Win32 Port
 
 - Native Win32 support is selected by `configure.ac` for `*mingw*` hosts and wired into the build by `Makefile.am`. The main Windows platform boundary is `tmux.h` plus `win32-platform.h`.

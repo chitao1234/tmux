@@ -859,13 +859,13 @@ ipc_server_start_win32(struct event_base *base, struct tmuxproc *client,
 		return (server_start(client, flags, base, coordination));
 
 	if (win32_server_spawn(ipc_endpoint_path(endpoint), flags, cause) != 0) {
-		ipc_coordination_release(coordination);
+		ipc_coordination_finish(coordination);
 		return (-1);
 	}
 	for (i = 0; i < 100; i++) {
 		fd = ipc_endpoint_connect_win32(endpoint, flags, NULL);
 		if (fd != -1) {
-			ipc_coordination_release(coordination);
+			ipc_coordination_finish(coordination);
 			return (fd);
 		}
 		saved_errno = errno;
@@ -875,7 +875,7 @@ ipc_server_start_win32(struct event_base *base, struct tmuxproc *client,
 				    ipc_endpoint_path(endpoint),
 				    strerror(saved_errno));
 			}
-			ipc_coordination_release(coordination);
+			ipc_coordination_finish(coordination);
 			errno = saved_errno;
 			return (-1);
 		}
