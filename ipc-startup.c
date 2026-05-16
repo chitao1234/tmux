@@ -9,6 +9,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #ifndef TMUX_WIN32
 #include <sys/file.h>
@@ -52,6 +53,7 @@ struct ipc_coordination {
 };
 
 struct ipc_backend {
+	char	*(*default_path)(const char *, char **);
 	char	*(*canonicalize)(const char *, char **);
 	int	 (*connect)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*probe)(struct ipc_endpoint *, uint64_t, char **);
@@ -69,6 +71,7 @@ struct ipc_backend {
 };
 
 static void	 ipc_log_and_free_cause(char **);
+static struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
 static int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
 static int	 ipc_coordination_acquire(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
@@ -84,6 +87,7 @@ struct ipc_listener_unix {
 	char	*path;
 };
 
+static char	*ipc_default_path_unix(const char *, char **);
 static char	*ipc_endpoint_canonicalize_unix(const char *, char **);
 static int	 ipc_endpoint_connect_unix(struct ipc_endpoint *, uint64_t,
 		    char **);
@@ -107,6 +111,7 @@ struct ipc_coordination_win32 {
 	HANDLE	 handle;
 };
 
+static char	*ipc_default_path_win32(const char *, char **);
 static char	*ipc_endpoint_canonicalize_win32(const char *, char **);
 static int	 ipc_endpoint_connect_win32(struct ipc_endpoint *, uint64_t,
 		    char **);
@@ -128,6 +133,7 @@ static int	 ipc_server_start_win32(struct event_base *, struct tmuxproc *,
 
 #ifdef TMUX_WIN32
 static const struct ipc_backend ipc_backend = {
+	.default_path = ipc_default_path_win32,
 	.canonicalize = ipc_endpoint_canonicalize_win32,
 	.connect = ipc_endpoint_connect_win32,
 	.probe = ipc_endpoint_probe_win32,
@@ -141,6 +147,7 @@ static const struct ipc_backend ipc_backend = {
 };
 #else
 static const struct ipc_backend ipc_backend = {
+	.default_path = ipc_default_path_unix,
 	.canonicalize = ipc_endpoint_canonicalize_unix,
 	.connect = ipc_endpoint_connect_unix,
 	.probe = ipc_endpoint_probe_unix,
@@ -155,6 +162,30 @@ static const struct ipc_backend ipc_backend = {
 #endif
 
 struct ipc_endpoint *
+ipc_endpoint_resolve(const char *path, const char *label, uint64_t *flags,
+    char **cause)
+{
+	struct ipc_endpoint	*endpoint;
+	char			*default_path = NULL;
+
+	if (cause != NULL)
+		*cause = NULL;
+
+	if (path == NULL) {
+		default_path = ipc_backend.default_path(label, cause);
+		if (default_path == NULL)
+			return (NULL);
+		path = default_path;
+		if (flags != NULL)
+			*flags |= CLIENT_DEFAULTSOCKET;
+	}
+
+	endpoint = ipc_endpoint_create(path, cause);
+	free(default_path);
+	return (endpoint);
+}
+
+static struct ipc_endpoint *
 ipc_endpoint_create(const char *path, char **cause)
 {
 	struct ipc_endpoint	*endpoint;
@@ -343,6 +374,68 @@ ipc_endpoint_probe(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
 }
 
 #ifndef TMUX_WIN32
+static char *
+ipc_default_path_unix(const char *label, char **cause)
+{
+	char		**paths, *path, *base;
+	struct stat	  sb;
+	uid_t		  uid;
+	u_int		  i, n;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (label == NULL)
+		label = "default";
+	uid = getuid();
+
+	expand_paths(TMUX_SOCK, &paths, &n, 0);
+	if (n == 0) {
+		if (cause != NULL)
+			xasprintf(cause, "no suitable socket path");
+		return (NULL);
+	}
+	path = paths[0];
+	for (i = 1; i < n; i++)
+		free(paths[i]);
+	free(paths);
+
+	xasprintf(&base, "%s/tmux-%ld", path, (long)uid);
+	free(path);
+	if (mkdir(base, S_IRWXU) != 0 && errno != EEXIST) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't create directory %s (%s)", base,
+			    strerror(errno));
+		}
+		goto fail;
+	}
+	if (lstat(base, &sb) != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't read directory %s (%s)", base,
+			    strerror(errno));
+		}
+		goto fail;
+	}
+	if (!S_ISDIR(sb.st_mode)) {
+		if (cause != NULL)
+			xasprintf(cause, "%s is not a directory", base);
+		goto fail;
+	}
+	if (sb.st_uid != uid || (sb.st_mode & TMUX_SOCK_PERM) != 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "directory %s has unsafe permissions",
+			    base);
+		}
+		goto fail;
+	}
+	xasprintf(&path, "%s/%s", base, label);
+	free(base);
+	return (path);
+
+fail:
+	free(base);
+	return (NULL);
+}
+
 static char *
 ipc_endpoint_canonicalize_unix(const char *path, char **cause)
 {
@@ -609,6 +702,38 @@ ipc_server_start_unix(struct event_base *base, struct tmuxproc *client,
 #endif
 
 #ifdef TMUX_WIN32
+static char *
+ipc_default_path_win32(const char *label, char **cause)
+{
+	const char	*base;
+	char		*path;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (label == NULL)
+		label = "default";
+
+	base = win32_default_socket_dir();
+	if (base == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "no suitable socket path");
+		errno = ENOENT;
+		return (NULL);
+	}
+	if (win32_ipc_ensure_socket_dir(base, cause) != 0)
+		return (NULL);
+
+	xasprintf(&path, "%s/%s", base, label);
+	if (strlen(path) >= 100) {
+		if (cause != NULL)
+			xasprintf(cause, "socket path too long: %s", path);
+		free(path);
+		errno = ENAMETOOLONG;
+		return (NULL);
+	}
+	return (path);
+}
+
 static char *
 ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 {

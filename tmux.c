@@ -48,7 +48,6 @@ static __dead void	 usage(int);
 #ifdef TMUX_WIN32
 static int		 win32_get_argv(int *, char ***);
 #endif
-static char		*make_label(const char *, char **);
 
 static int		 areshell(const char *);
 static const char	*getenv_canonical(const char *);
@@ -238,7 +237,7 @@ expand_path(const char *path, const char *home)
 	return (xstrdup(path));
 }
 
-static void
+void
 expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 {
 	const char	*home = find_home();
@@ -251,20 +250,6 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 
 	*paths = NULL;
 	*n = 0;
-
-#ifdef TMUX_WIN32
-	if (strcmp(s, TMUX_SOCK) == 0) {
-		const char	*socket_dir = win32_default_socket_dir();
-
-		if (socket_dir == NULL)
-			return;
-		path = xstrdup(socket_dir);
-		*paths = xcalloc(1, sizeof **paths);
-		(*paths)[0] = path;
-		*n = 1;
-		return;
-	}
-#endif
 
 	copy = tmp = xstrdup(s);
 	while ((next = strsep(&tmp, ":")) != NULL) {
@@ -303,81 +288,6 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 		(*paths)[(*n)++] = path;
 	}
 	free(copy);
-}
-
-static char *
-make_label(const char *label, char **cause)
-{
-	char		**paths, *path, *base;
-	u_int		  i, n;
-#ifndef TMUX_WIN32
-	struct stat	  sb;
-#endif
-#ifndef TMUX_WIN32
-	uid_t		  uid;
-#endif
-
-	*cause = NULL;
-	if (label == NULL)
-		label = "default";
-#ifndef TMUX_WIN32
-	uid = getuid();
-#endif
-
-	expand_paths(TMUX_SOCK, &paths, &n, 0);
-	if (n == 0) {
-		xasprintf(cause, "no suitable socket path");
-		return (NULL);
-	}
-	path = paths[0]; /* can only have one socket! */
-	for (i = 1; i < n; i++)
-		free(paths[i]);
-	free(paths);
-
-#ifdef TMUX_WIN32
-	base = path;
-	path = NULL;
-	if (win32_ipc_ensure_socket_dir(base, cause) != 0)
-		goto fail;
-	xasprintf(&path, "%s/%s", base, label);
-	if (strlen(path) >= 100) {
-		xasprintf(cause, "socket path too long: %s", path);
-		free(path);
-		path = NULL;
-		goto fail;
-	}
-	free(base);
-	return (path);
-#else
-	xasprintf(&base, "%s/tmux-%ld", path, (long)uid);
-	free(path);
-	if (mkdir(base, S_IRWXU) != 0 && errno != EEXIST) {
-		xasprintf(cause, "couldn't create directory %s (%s)", base,
-		    strerror(errno));
-		goto fail;
-	}
-	if (lstat(base, &sb) != 0) {
-		xasprintf(cause, "couldn't read directory %s (%s)", base,
-		    strerror(errno));
-		goto fail;
-	}
-	if (!S_ISDIR(sb.st_mode)) {
-		xasprintf(cause, "%s is not a directory", base);
-		goto fail;
-	}
-	if (sb.st_uid != uid || (sb.st_mode & TMUX_SOCK_PERM) != 0) {
-		xasprintf(cause, "directory %s has unsafe permissions", base);
-		goto fail;
-	}
-	xasprintf(&path, "%s/%s", base, label);
-	free(base);
-	return (path);
-#endif
-
-fail:
-	free(base);
-	free(path);
-	return (NULL);
 }
 
 char *
@@ -752,17 +662,7 @@ main(int argc, char **argv)
 			path[strcspn(path, ",")] = '\0';
 		}
 	}
-	if (path == NULL) {
-		if ((path = make_label(label, &cause)) == NULL) {
-			if (cause != NULL) {
-				fprintf(stderr, "%s\n", cause);
-				free(cause);
-			}
-			exit(1);
-		}
-		flags |= CLIENT_DEFAULTSOCKET;
-	}
-	socket_endpoint = ipc_endpoint_create(path, &cause);
+	socket_endpoint = ipc_endpoint_resolve(path, label, &flags, &cause);
 	free(path);
 	if (socket_endpoint == NULL) {
 		if (cause != NULL) {

@@ -2426,6 +2426,7 @@ extern int		 ptm_fd;
 extern const char	*shell_command;
 int		 checkshell(const char *);
 int		 path_is_absolute(const char *);
+void		 expand_paths(const char *, char ***, u_int *, int);
 void		 setblocking(int, int);
 char 		*shell_argv0(const char *, int);
 uint64_t	 get_timer(void);
@@ -3096,7 +3097,8 @@ void printflike(1, 2) server_add_message(const char *, ...);
 int	 server_create_socket(uint64_t, char **);
 
 /* ipc-startup.c */
-struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
+struct ipc_endpoint *ipc_endpoint_resolve(const char *, const char *,
+	     uint64_t *, char **);
 const char	*ipc_endpoint_path(struct ipc_endpoint *);
 void		 ipc_endpoint_free(struct ipc_endpoint *);
 int		 ipc_client_connect_or_start(struct event_base *,

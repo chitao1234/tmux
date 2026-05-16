@@ -94,20 +94,23 @@ Required direction:
 
 Files:
 
-- [`tmux.c`](../tmux.c): only default `-L` sockets go through
-  `make_label()` and `win32_ipc_ensure_socket_dir()`.
-- [`server.c`](../server.c): `server_create_socket()` directly calls
-  `win32_ipc_server_create(socket_path, ...)`.
-- [`win32-ipc.c`](../win32-ipc.c): `win32_ipc_server_create()` ensures parent
-  directories exist, but explicit paths do not get the managed-root security
-  treatment.
+- [`ipc-startup.c`](../ipc-startup.c): `ipc_endpoint_resolve()` now owns
+  default `-L` resolution and shared canonical endpoint identity for all
+  socket-path sources.
+- [`win32-ipc.c`](../win32-ipc.c): managed-root hardening still only applies to
+  backend-generated default socket paths; explicit parents are created but not
+  ownership-validated.
+- [`server.c`](../server.c): listener creation now runs through the shared
+  startup service, but explicit endpoint trust policy is still whatever the
+  resolver accepted.
 
 Problem:
 
-The managed default socket root under `LOCALAPPDATA` gets Win32 DACL / SACL
-hardening. Explicit `-S` paths and inherited `$TMUX` paths still bypass that
-policy. They are normalized only by slash conversion and trailing-slash trim,
-not by real canonical path resolution or ownership checks.
+The managed default socket root under `LOCALAPPDATA` now goes through the shared
+endpoint resolver and backend default-path hook. Explicit `-S` paths and
+inherited `$TMUX` paths still bypass that managed-root policy. They now get
+shared canonical path identity, but they still do not get explicit parent
+ownership, reparse-point, or trust-policy checks.
 
 Why it matters:
 
@@ -122,8 +125,8 @@ Required direction:
 
 - Decide a Win32 product policy for explicit socket paths:
   reject outside the managed root, or harden and validate them explicitly.
-- Canonicalize explicit paths before hashing, binding, reconnecting, or
-  treating them as trusted.
+- Keep explicit paths on the shared canonical identity path, then add parent
+  ownership or final-object validation before treating them as trusted.
 - If explicit custom paths remain supported, validate parent ownership,
   reparse-point behavior, and endpoint cleanup rules before bind/unlink.
 
@@ -386,12 +389,13 @@ current implementation:
 - The earlier `SIO_AF_UNIX_GETPEERPID` direction was dropped and is no longer
   part of the active design.
 - Managed socket-root failure no longer falls back to `C:/Temp`.
-- The tree now has a shared `ipc-startup.c` service that owns endpoint
-  canonicalization, connect-or-start sequencing, stale probing, listener
-  creation retries, and backend startup handoff behind one abstraction. Native
-  PowerShell validation now covers baseline startup, relative/absolute `-S`
-  aliasing, case-variant `-S` attach, stale detached autostart, stale
-  foreground `-D`, concurrent autostart, and `-D` versus client races.
+- The tree now has a shared `ipc-startup.c` service that owns default socket
+  resolution, endpoint canonicalization, connect-or-start sequencing, stale
+  probing, listener creation retries, and backend startup handoff behind one
+  abstraction. Native PowerShell validation now covers default `-L` startup,
+  relative/absolute `-S` aliasing, case-variant `-S` attach, stale detached
+  autostart, stale foreground `-D`, concurrent autostart, concurrent
+  `start-server`, `-D` versus client races, and `.lock` cleanup.
 - Win32 detached startup no longer leaves stale `.lock` guard files behind
   after successful startup or shutdown.
 - The old polling-based child-exit path is gone. Win32 process exit now comes

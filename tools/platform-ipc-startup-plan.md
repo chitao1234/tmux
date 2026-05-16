@@ -28,6 +28,8 @@ platform-specific primitive.
 Current tree status:
 
 - endpoint resolution already produces a shared `struct ipc_endpoint`;
+- backend-owned default socket generation now lives in the endpoint service, so
+  `tmux.c` no longer manufactures default socket paths itself;
 - coordination and listener ownership now have backend-neutral shared APIs and
   backend-owned private state;
 - Win32 endpoint canonicalization now normalizes slash spelling and case
@@ -36,8 +38,12 @@ Current tree status:
   listener create, stale removal, listener destruction, and startup handoff;
 - `client.c` now calls one shared `connect-or-start` helper and no longer
   branches on Win32 startup mechanics directly;
-- the remaining work is now validation and any follow-up cleanup needed after
-  race and stale-endpoint testing.
+- native PowerShell validation now covers default `-L` startup, explicit `-S`
+  alias and case identity, stale detached startup, stale foreground `-D`
+  startup, concurrent autostart, concurrent `start-server`, `-D` versus
+  ordinary clients, and `.lock` cleanup;
+- the remaining unverified piece is Unix runtime validation on a Unix host,
+  plus any follow-up cleanup that validation exposes.
 
 This is not a request for "a better Win32 lock." It is a request to stop
 letting the Unix startup model define the shared control flow and then bolting
@@ -477,6 +483,9 @@ Success condition:
 Success condition:
 
 - connect, startup guard, bind, and cleanup all use one canonical path.
+- Status in current tree: implemented, including backend-owned default-path
+  generation and canonical endpoint identity for default, explicit, and
+  inherited socket paths.
 
 ### Stage 3: Unify startup control flow
 
@@ -532,11 +541,16 @@ Windows runtime validation:
   same endpoint identity;
 - inject a stale socket path and verify only the stale endpoint is removed;
 - verify a losing startup path cannot remove a listener created by the winner.
+- Status on 2026-05-16: all Windows-native cases above passed from native
+  PowerShell; the `-D` cases required a PTY-backed native PowerShell session so
+  foreground tmux had a real terminal.
 
 Unix validation:
 
 - run the normal startup path and explicit `-S` path flow;
 - verify lock-and-retry behavior still works under concurrent autostart.
+- Status on 2026-05-16: still pending because this host is Windows-only under
+  the active toolchain policy.
 
 ## Expected Outcome
 
