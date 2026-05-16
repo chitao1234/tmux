@@ -556,8 +556,12 @@ Unix validation:
 - a Unix-oriented shared regression now exists in `regress/ipc-startup.sh`;
   `regress/Makefile` picks it up automatically through the existing `*.sh`
   driver, but it still needs execution on a Unix host.
+- a targeted Linux runner now exists in
+  `.github/workflows/ipc-startup-regress.yml` to build tmux and execute that
+  shared regression on `ubuntu-latest`.
 - Status on 2026-05-16: still pending because this host is Windows-only under
-  the active toolchain policy.
+  the active toolchain policy, so Unix proof now depends on the workflow
+  producing a real green run.
 
 ## Expected Outcome
 

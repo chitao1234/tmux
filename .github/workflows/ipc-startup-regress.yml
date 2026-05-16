@@ -1,0 +1,42 @@
+name: IPC Startup Regress
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ipc-startup-regress.yml
+      - client.c
+      - ipc-startup.c
+      - proc.c
+      - regress/ipc-startup.sh
+      - server.c
+      - tmux.c
+      - tmux.h
+      - win32-ipc.c
+  workflow_dispatch:
+
+jobs:
+  regress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bison \
+            build-essential \
+            libevent-dev \
+            libncurses-dev \
+            pkg-config
+
+      - name: Configure
+        run: ./configure
+
+      - name: Build
+        run: make -j2
+
+      - name: Run shared IPC startup regression
+        run: |
+          cd regress
+          TEST_TMUX="$(pwd)/../tmux" make ipc-startup.sh
