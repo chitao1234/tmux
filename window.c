@@ -384,6 +384,8 @@ window_pane_destroy_ready(struct window_pane *wp)
 	if (wp->win32 != NULL) {
 		if (!win32_pane_quiesced(wp))
 			return (0);
+		if (wp->pipe_job != NULL)
+			return (0);
 	}
 #else
 	if (wp->pipe_fd != -1) {
@@ -422,7 +424,8 @@ window_pane_close_pipe(struct window_pane *wp)
 		wp->pipe_job = NULL;
 		wp->pipe_pid = -1;
 		wp->pipe_fd = -1;
-		job_free(job);
+		job_set_reading(job, 1);
+		job_close_stdin(job);
 	}
 #endif
 	if (wp->pipe_fd != -1) {
