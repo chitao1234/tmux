@@ -2,7 +2,7 @@
 
 Date: 2026-05-16
 
-Status: Windows implementation complete; Unix runtime validation pending
+Status: Implemented and validated on Windows and Unix
 
 Related docs:
 
@@ -44,8 +44,11 @@ Current tree status:
   alias and case identity, stale detached startup, stale foreground `-D`
   startup, concurrent autostart, concurrent `start-server`, `-D` versus
   ordinary clients, and `.lock` cleanup;
-- the remaining unverified piece is Unix runtime validation on a Unix host,
-  plus any follow-up cleanup that validation exposes.
+- Unix validation now passes from WSL Ubuntu 24.04 on the distro filesystem:
+  Autotools bootstrap, Unix build, and `regress/ipc-startup.sh`;
+- the shared Unix regression was tightened so it still covers concurrent
+  `list-commands` and `start-server` startup races without assuming an empty
+  server remains alive after those commands complete.
 
 This is not a request for "a better Win32 lock." It is a request to stop
 letting the Unix startup model define the shared control flow and then bolting
@@ -559,9 +562,10 @@ Unix validation:
 - a targeted Linux runner now exists in
   `.github/workflows/ipc-startup-regress.yml` to build tmux and execute that
   shared regression on `ubuntu-latest`.
-- Status on 2026-05-16: still pending because this host is Windows-only under
-  the active toolchain policy, so Unix proof now depends on the workflow
-  producing a real green run.
+- Status on 2026-05-16: passed locally on WSL Ubuntu 24.04 from
+  `/home/chi/codex/tmux-ipc-verify` after `sh autogen.sh`, `./configure`,
+  `make -j2`, and `cd regress && TEST_TMUX="$HOME/codex/tmux-ipc-verify/tmux"
+  make ipc-startup.sh`.
 
 ## Expected Outcome
 
