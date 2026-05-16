@@ -26,7 +26,8 @@ peer-credential replacement.
 
 The Win32 product behavior should be:
 
-- the authorization principal is the Windows user SID;
+- the authorization principal is the Windows user SID, not a specific logon
+  session;
 - later attaches from a different logon session of the same Windows user are
   allowed, including later SSH logons;
 - different Windows users are not allowed;
@@ -259,8 +260,11 @@ The Win32 admission flow should become:
    normal identify traffic.
 
 This pass does not need to redesign the user-visible `server-access` command.
-For now, Windows policy remains effectively "current user only," but now backed
-by a real authenticated peer identity instead of unconditional trust.
+For now, Windows policy is same-user SID plus integrity floor. That still
+allows later attaches from other logon sessions of the same user, but blocks
+different users and lower-integrity clients. The difference from today is that
+this policy is enforced from an authenticated peer identity instead of
+unconditional trust.
 
 ## Code Changes Required
 
