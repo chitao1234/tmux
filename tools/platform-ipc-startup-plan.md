@@ -28,11 +28,14 @@ platform-specific primitive.
 Current tree status:
 
 - endpoint resolution already produces a shared `struct ipc_endpoint`;
-- coordination and listener ownership now have backend-neutral shared APIs;
-- shared code now calls backend operations for connect, coordination, listener
-  create, stale removal, and listener destruction;
-- the remaining work is to finish collapsing the last split startup control
-  flow and to validate stale-endpoint recovery and race cases.
+- coordination and listener ownership now have backend-neutral shared APIs and
+  backend-owned private state;
+- shared code now calls backend operations for connect, probe, coordination,
+  listener create, stale removal, listener destruction, and startup handoff;
+- `client.c` now calls one shared `connect-or-start` helper and no longer
+  branches on Win32 startup mechanics directly;
+- the remaining work is now validation and any follow-up cleanup needed after
+  race and stale-endpoint testing.
 
 This is not a request for "a better Win32 lock." It is a request to stop
 letting the Unix startup model define the shared control flow and then bolting
@@ -53,9 +56,10 @@ Today the product policy is fragmented:
 
 That means Unix currently defines the shape of tmux startup, while Win32 tries
 to imitate pieces of it out of band. The recent shared
-[`ipc-startup.c`](../ipc-startup.c) work fixed part of that by introducing a
-common endpoint, coordination, and listener contract, but the startup state
-machine is still only partially unified at the call-site level.
+[`ipc-startup.c`](../ipc-startup.c) work fixed that core layering by
+introducing a common endpoint, coordination, listener, probe, and startup
+contract. The remaining work is to validate the abstraction under races and
+stale-endpoint cases, not to add more call-site branches.
 
 The result is exactly the drift the port is showing now:
 
@@ -299,16 +303,18 @@ redesign is:
 
 ### Why the current shape is weak
 
-The current tree is weak even after the recent cleanup because the shared layer
-still bakes in backend-specific concepts:
+The old tree was weak because the shared layer baked in backend-specific
+concepts:
 
-- `ipc-startup.c` still manufactures `.lock` paths itself;
-- coordination is still keyed by raw endpoint text passed down from callers
-  rather than by a fully resolved endpoint object;
-- listener lifetime is still represented mostly as "an fd plus a pathname";
-- backend policy and shared policy are still interleaved.
+- shared code manufactured `.lock` paths itself;
+- coordination was keyed by raw endpoint text passed down from callers rather
+  than by a fully resolved endpoint object;
+- listener lifetime was represented mostly as "an fd plus a pathname";
+- backend policy and shared policy were interleaved.
 
-That means we have improved the primitive, but not yet the abstraction.
+The current refactor removes those leaks from the shared startup path. The
+remaining question is whether the abstraction behaves correctly under
+concurrency and stale-endpoint recovery.
 
 ### What the final abstraction should allow
 
@@ -377,9 +383,7 @@ Target role:
 
 Current role:
 
-- owns Unix retry and lock flow directly;
-- branches into separate Win32 lock/spawn logic;
-- knows about `CLIENT_NOFORK` bypass behavior.
+- call one shared `connect-or-start` helper.
 
 Target role:
 
@@ -428,15 +432,11 @@ void ipc_endpoint_free(struct ipc_endpoint *);
 
 int ipc_client_connect_or_start(struct event_base *, struct tmuxproc *,
     struct ipc_endpoint *, uint64_t);
-
-int ipc_coordination_acquire(struct ipc_endpoint *,
-    struct ipc_coordination **, char **);
+int ipc_server_create(struct ipc_endpoint *, uint64_t,
+    struct ipc_listener **, char **);
+void ipc_listener_destroy(struct ipc_listener *);
 void ipc_coordination_release(struct ipc_coordination *);
 void ipc_coordination_finish(struct ipc_coordination *);
-
-int ipc_listener_create(struct ipc_endpoint *, struct ipc_coordination *,
-    uint64_t, struct ipc_listener **, int *, char **);
-void ipc_listener_destroy(struct ipc_listener *);
 ```
 
 The exact exported surface should stay small. The important rule is that the
@@ -486,6 +486,7 @@ Success condition:
 Success condition:
 
 - there is no special startup path that skips coordination on Win32.
+- Status in current tree: implemented; validate with native startup-race tests.
 
 ### Stage 4: Finalize backend implementations
 
@@ -497,6 +498,8 @@ Success condition:
 
 - shared code no longer knows whether the backend used a file lock, mutex, or
   anything else.
+- Status in current tree: implemented for the startup path; validate and then
+  trim any leftover helper surface that is no longer needed.
 
 ### Stage 5: Shared stale-endpoint policy
 

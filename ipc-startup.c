@@ -29,6 +29,12 @@
 
 struct ipc_backend;
 
+enum ipc_endpoint_probe_result {
+	IPC_ENDPOINT_PROBE_LIVE,
+	IPC_ENDPOINT_PROBE_DEAD,
+	IPC_ENDPOINT_PROBE_UNKNOWN
+};
+
 struct ipc_endpoint {
 	char				*path;
 	const struct ipc_backend	*backend;
@@ -36,24 +42,19 @@ struct ipc_endpoint {
 
 struct ipc_listener {
 	int				 fd;
-	char				*path;
 	const struct ipc_backend	*backend;
+	void				*data;
 };
 
 struct ipc_coordination {
-	char				*name;
 	const struct ipc_backend	*backend;
-#ifdef TMUX_WIN32
-	HANDLE				 handle;
-#else
-	int				 fd;
-#endif
+	void				*data;
 };
 
 struct ipc_backend {
 	char	*(*canonicalize)(const char *, char **);
 	int	 (*connect)(struct ipc_endpoint *, uint64_t, char **);
-	int	 (*connect_dead)(int);
+	int	 (*probe)(struct ipc_endpoint *, uint64_t, char **);
 	int	 (*coordination_acquire)(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
 	void	 (*coordination_finish)(struct ipc_coordination *);
@@ -62,14 +63,33 @@ struct ipc_backend {
 		    struct ipc_listener **, char **);
 	int	 (*remove_stale)(struct ipc_endpoint *, char **);
 	void	 (*listener_destroy)(struct ipc_listener *);
-	void	 (*closefd)(int);
+	int	 (*start)(struct event_base *, struct tmuxproc *,
+		    struct ipc_endpoint *, struct ipc_coordination *,
+		    uint64_t, char **);
 };
 
+static void	 ipc_log_and_free_cause(char **);
+static int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
+static int	 ipc_coordination_acquire(struct ipc_endpoint *,
+		    struct ipc_coordination **, char **);
+static int	 ipc_endpoint_probe(struct ipc_endpoint *, uint64_t, char **);
+
 #ifndef TMUX_WIN32
+struct ipc_coordination_unix {
+	char	*path;
+	int	 fd;
+};
+
+struct ipc_listener_unix {
+	char	*path;
+};
+
 static char	*ipc_endpoint_canonicalize_unix(const char *, char **);
 static int	 ipc_endpoint_connect_unix(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_unix(int);
+static int	 ipc_endpoint_probe_unix(struct ipc_endpoint *, uint64_t,
+		    char **);
 static int	 ipc_coordination_acquire_unix(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
 static void	 ipc_coordination_finish_unix(struct ipc_coordination *);
@@ -78,12 +98,21 @@ static int	 ipc_listener_create_unix(struct ipc_endpoint *, uint64_t,
 		    struct ipc_listener **, char **);
 static int	 ipc_remove_stale_unix(struct ipc_endpoint *, char **);
 static void	 ipc_listener_destroy_unix(struct ipc_listener *);
-static void	 ipc_closefd_unix(int);
+static int	 ipc_server_start_unix(struct event_base *, struct tmuxproc *,
+		    struct ipc_endpoint *, struct ipc_coordination *,
+		    uint64_t, char **);
 #else
+struct ipc_coordination_win32 {
+	char	*path;
+	HANDLE	 handle;
+};
+
 static char	*ipc_endpoint_canonicalize_win32(const char *, char **);
 static int	 ipc_endpoint_connect_win32(struct ipc_endpoint *, uint64_t,
 		    char **);
 static int	 ipc_endpoint_connect_dead_win32(int);
+static int	 ipc_endpoint_probe_win32(struct ipc_endpoint *, uint64_t,
+		    char **);
 static int	 ipc_coordination_acquire_win32(struct ipc_endpoint *,
 		    struct ipc_coordination **, char **);
 static void	 ipc_coordination_finish_win32(struct ipc_coordination *);
@@ -92,34 +121,36 @@ static int	 ipc_listener_create_win32(struct ipc_endpoint *, uint64_t,
 		    struct ipc_listener **, char **);
 static int	 ipc_remove_stale_win32(struct ipc_endpoint *, char **);
 static void	 ipc_listener_destroy_win32(struct ipc_listener *);
-static void	 ipc_closefd_win32(int);
+static int	 ipc_server_start_win32(struct event_base *, struct tmuxproc *,
+		    struct ipc_endpoint *, struct ipc_coordination *,
+		    uint64_t, char **);
 #endif
 
 #ifdef TMUX_WIN32
 static const struct ipc_backend ipc_backend = {
 	.canonicalize = ipc_endpoint_canonicalize_win32,
 	.connect = ipc_endpoint_connect_win32,
-	.connect_dead = ipc_endpoint_connect_dead_win32,
+	.probe = ipc_endpoint_probe_win32,
 	.coordination_acquire = ipc_coordination_acquire_win32,
 	.coordination_finish = ipc_coordination_finish_win32,
 	.coordination_release = ipc_coordination_release_win32,
 	.listener_create = ipc_listener_create_win32,
 	.remove_stale = ipc_remove_stale_win32,
 	.listener_destroy = ipc_listener_destroy_win32,
-	.closefd = ipc_closefd_win32,
+	.start = ipc_server_start_win32,
 };
 #else
 static const struct ipc_backend ipc_backend = {
 	.canonicalize = ipc_endpoint_canonicalize_unix,
 	.connect = ipc_endpoint_connect_unix,
-	.connect_dead = ipc_endpoint_connect_dead_unix,
+	.probe = ipc_endpoint_probe_unix,
 	.coordination_acquire = ipc_coordination_acquire_unix,
 	.coordination_finish = ipc_coordination_finish_unix,
 	.coordination_release = ipc_coordination_release_unix,
 	.listener_create = ipc_listener_create_unix,
 	.remove_stale = ipc_remove_stale_unix,
 	.listener_destroy = ipc_listener_destroy_unix,
-	.closefd = ipc_closefd_unix,
+	.start = ipc_server_start_unix,
 };
 #endif
 
@@ -163,18 +194,60 @@ ipc_endpoint_free(struct ipc_endpoint *endpoint)
 }
 
 int
+ipc_client_connect_or_start(struct event_base *base, struct tmuxproc *client,
+    struct ipc_endpoint *endpoint, uint64_t flags)
+{
+	struct ipc_coordination	*coordination = NULL;
+	char			*cause = NULL;
+	int			 fd;
+
+	fd = ipc_endpoint_connect(endpoint, flags, &cause);
+	if (fd != -1) {
+		setblocking(fd, 0);
+		return (fd);
+	}
+	ipc_log_and_free_cause(&cause);
+	if (flags & CLIENT_NOSTARTSERVER)
+		return (-1);
+	if (~flags & CLIENT_STARTSERVER)
+		return (-1);
+	if (ipc_coordination_acquire(endpoint, &coordination, &cause) != 0) {
+		ipc_log_and_free_cause(&cause);
+		return (-1);
+	}
+
+	fd = ipc_endpoint_connect(endpoint, flags, &cause);
+	if (fd != -1) {
+		ipc_coordination_release(coordination);
+		setblocking(fd, 0);
+		return (fd);
+	}
+	ipc_log_and_free_cause(&cause);
+	if (ipc_endpoint_probe(endpoint, flags, &cause) !=
+	    IPC_ENDPOINT_PROBE_DEAD) {
+		ipc_log_and_free_cause(&cause);
+		ipc_coordination_release(coordination);
+		return (-1);
+	}
+
+	fd = endpoint->backend->start(base, client, endpoint, coordination, flags,
+	    &cause);
+	if (fd == -1) {
+		ipc_log_and_free_cause(&cause);
+		return (-1);
+	}
+	if (fd != -1)
+		setblocking(fd, 0);
+	return (fd);
+}
+
+static int
 ipc_endpoint_connect(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
 {
 	return (endpoint->backend->connect(endpoint, flags, cause));
 }
 
-int
-ipc_endpoint_connect_dead(struct ipc_endpoint *endpoint, int error)
-{
-	return (endpoint->backend->connect_dead(error));
-}
-
-int
+static int
 ipc_coordination_acquire(struct ipc_endpoint *endpoint,
     struct ipc_coordination **coordination, char **cause)
 {
@@ -188,7 +261,7 @@ ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags,
 {
 	struct ipc_listener	*listener = NULL;
 	char			*probe_cause = NULL;
-	int			 fd, probe_fd;
+	int			 fd, state;
 
 	if (listenerp != NULL)
 		*listenerp = NULL;
@@ -197,22 +270,25 @@ ipc_server_create(struct ipc_endpoint *endpoint, uint64_t flags,
 	if (fd != -1 || errno != EADDRINUSE)
 		goto success;
 
-	probe_fd = endpoint->backend->connect(endpoint, 0, &probe_cause);
-	if (probe_fd != -1) {
-		endpoint->backend->closefd(probe_fd);
-		errno = EADDRINUSE;
-		free(probe_cause);
-		return (-1);
-	}
-	if (!endpoint->backend->connect_dead(errno)) {
-		free(probe_cause);
+	state = ipc_endpoint_probe(endpoint, 0, &probe_cause);
+	if (state == IPC_ENDPOINT_PROBE_LIVE) {
+		ipc_log_and_free_cause(&probe_cause);
 		errno = EADDRINUSE;
 		return (-1);
 	}
-	free(probe_cause);
+	if (state != IPC_ENDPOINT_PROBE_DEAD) {
+		ipc_log_and_free_cause(&probe_cause);
+		errno = EADDRINUSE;
+		return (-1);
+	}
+	ipc_log_and_free_cause(&probe_cause);
 
 	if (endpoint->backend->remove_stale(endpoint, cause) != 0)
 		return (-1);
+	if (cause != NULL) {
+		free(*cause);
+		*cause = NULL;
+	}
 
 	fd = endpoint->backend->listener_create(endpoint, flags, &listener, cause);
 	if (fd == -1)
@@ -248,6 +324,22 @@ ipc_coordination_release(struct ipc_coordination *coordination)
 	if (coordination == NULL)
 		return;
 	coordination->backend->coordination_release(coordination);
+}
+
+static void
+ipc_log_and_free_cause(char **cause)
+{
+	if (cause == NULL || *cause == NULL)
+		return;
+	log_debug("%s", *cause);
+	free(*cause);
+	*cause = NULL;
+}
+
+static int
+ipc_endpoint_probe(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
+{
+	return (endpoint->backend->probe(endpoint, flags, cause));
 }
 
 #ifndef TMUX_WIN32
@@ -313,37 +405,69 @@ ipc_endpoint_connect_dead_unix(int error)
 }
 
 static int
+ipc_endpoint_probe_unix(struct ipc_endpoint *endpoint, uint64_t flags,
+    char **cause)
+{
+	char	*probe_cause = NULL;
+	int	 fd, saved_errno;
+
+	fd = ipc_endpoint_connect_unix(endpoint, flags, &probe_cause);
+	if (fd != -1) {
+		close(fd);
+		free(probe_cause);
+		return (IPC_ENDPOINT_PROBE_LIVE);
+	}
+	saved_errno = errno;
+	if (ipc_endpoint_connect_dead_unix(saved_errno)) {
+		free(probe_cause);
+		return (IPC_ENDPOINT_PROBE_DEAD);
+	}
+	if (cause != NULL)
+		*cause = probe_cause;
+	else
+		free(probe_cause);
+	errno = saved_errno;
+	return (IPC_ENDPOINT_PROBE_UNKNOWN);
+}
+
+static int
 ipc_coordination_acquire_unix(struct ipc_endpoint *endpoint,
     struct ipc_coordination **coordinationp, char **cause)
 {
-	struct ipc_coordination	*coordination;
+	struct ipc_coordination		*coordination;
+	struct ipc_coordination_unix	*data;
 
 	*coordinationp = NULL;
 
 	coordination = xcalloc(1, sizeof *coordination);
+	data = xcalloc(1, sizeof *data);
 	coordination->backend = &ipc_backend;
-	xasprintf(&coordination->name, "%s.lock", ipc_endpoint_path(endpoint));
-	log_debug("lock file is %s", coordination->name);
+	coordination->data = data;
+	data->fd = -1;
+	xasprintf(&data->path, "%s.lock", ipc_endpoint_path(endpoint));
+	log_debug("lock file is %s", data->path);
 
-	coordination->fd = open(coordination->name, O_WRONLY|O_CREAT, 0600);
-	if (coordination->fd == -1) {
+	data->fd = open(data->path, O_WRONLY|O_CREAT, 0600);
+	if (data->fd == -1) {
 		if (cause != NULL) {
-			xasprintf(cause, "open(%s) failed: %s", coordination->name,
+			xasprintf(cause, "open(%s) failed: %s", data->path,
 			    strerror(errno));
 		}
-		free(coordination->name);
+		free(data->path);
+		free(data);
 		free(coordination);
 		return (-1);
 	}
 
-	while (flock(coordination->fd, LOCK_EX) == -1) {
+	while (flock(data->fd, LOCK_EX) == -1) {
 		if (errno != EINTR) {
 			if (cause != NULL) {
 				xasprintf(cause, "flock(%s) failed: %s",
-				    coordination->name, strerror(errno));
+				    data->path, strerror(errno));
 			}
-			close(coordination->fd);
-			free(coordination->name);
+			close(data->fd);
+			free(data->path);
+			free(data);
 			free(coordination);
 			return (-1);
 		}
@@ -357,20 +481,26 @@ ipc_coordination_acquire_unix(struct ipc_endpoint *endpoint,
 static void
 ipc_coordination_finish_unix(struct ipc_coordination *coordination)
 {
-	if (coordination->fd >= 0) {
-		(void)unlink(coordination->name);
-		close(coordination->fd);
+	struct ipc_coordination_unix	*data = coordination->data;
+
+	if (data->fd >= 0) {
+		(void)unlink(data->path);
+		close(data->fd);
 	}
-	free(coordination->name);
+	free(data->path);
+	free(data);
 	free(coordination);
 }
 
 static void
 ipc_coordination_release_unix(struct ipc_coordination *coordination)
 {
-	if (coordination->fd >= 0)
-		close(coordination->fd);
-	free(coordination->name);
+	struct ipc_coordination_unix	*data = coordination->data;
+
+	if (data->fd >= 0)
+		close(data->fd);
+	free(data->path);
+	free(data);
 	free(coordination);
 }
 
@@ -381,6 +511,7 @@ ipc_listener_create_unix(struct ipc_endpoint *endpoint, uint64_t flags,
 	const char		*path = ipc_endpoint_path(endpoint);
 	struct sockaddr_un	 sa;
 	struct ipc_listener	*listener;
+	struct ipc_listener_unix *data;
 	size_t			 size;
 	mode_t			 mask;
 	int			 fd, saved_errno;
@@ -421,9 +552,11 @@ ipc_listener_create_unix(struct ipc_endpoint *endpoint, uint64_t flags,
 	setblocking(fd, 0);
 
 	listener = xcalloc(1, sizeof *listener);
+	data = xcalloc(1, sizeof *data);
 	listener->fd = fd;
-	listener->path = xstrdup(path);
 	listener->backend = &ipc_backend;
+	listener->data = data;
+	data->path = xstrdup(path);
 	if (listenerp != NULL)
 		*listenerp = listener;
 	return (fd);
@@ -452,18 +585,26 @@ ipc_remove_stale_unix(struct ipc_endpoint *endpoint, char **cause)
 static void
 ipc_listener_destroy_unix(struct ipc_listener *listener)
 {
+	struct ipc_listener_unix	*data = listener->data;
+
 	if (listener->fd != -1)
 		(void)close(listener->fd);
-	if (listener->path != NULL)
-		(void)unlink(listener->path);
-	free(listener->path);
+	if (data->path != NULL)
+		(void)unlink(data->path);
+	free(data->path);
+	free(data);
 	free(listener);
 }
 
-static void
-ipc_closefd_unix(int fd)
+static int
+ipc_server_start_unix(struct event_base *base, struct tmuxproc *client,
+    struct ipc_endpoint *endpoint, struct ipc_coordination *coordination,
+    uint64_t flags, char **cause)
 {
-	(void)close(fd);
+	(void)endpoint;
+	(void)cause;
+
+	return (server_start(client, flags, base, coordination));
 }
 #endif
 
@@ -537,39 +678,71 @@ ipc_endpoint_connect_dead_win32(int error)
 }
 
 static int
+ipc_endpoint_probe_win32(struct ipc_endpoint *endpoint, uint64_t flags,
+    char **cause)
+{
+	char	*probe_cause = NULL;
+	int	 fd, saved_errno;
+
+	fd = ipc_endpoint_connect_win32(endpoint, flags, &probe_cause);
+	if (fd != -1) {
+		win32_ipc_close(fd);
+		free(probe_cause);
+		return (IPC_ENDPOINT_PROBE_LIVE);
+	}
+	saved_errno = errno;
+	if (ipc_endpoint_connect_dead_win32(saved_errno)) {
+		free(probe_cause);
+		return (IPC_ENDPOINT_PROBE_DEAD);
+	}
+	if (cause != NULL)
+		*cause = probe_cause;
+	else
+		free(probe_cause);
+	errno = saved_errno;
+	return (IPC_ENDPOINT_PROBE_UNKNOWN);
+}
+
+static int
 ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
     struct ipc_coordination **coordinationp, char **cause)
 {
-	struct ipc_coordination	*coordination;
-	wchar_t			*wname;
+	struct ipc_coordination		*coordination;
+	struct ipc_coordination_win32	*data;
+	wchar_t				*wname;
 
 	*coordinationp = NULL;
 
 	coordination = xcalloc(1, sizeof *coordination);
+	data = xcalloc(1, sizeof *data);
 	coordination->backend = &ipc_backend;
-	xasprintf(&coordination->name, "%s.lock", ipc_endpoint_path(endpoint));
+	coordination->data = data;
+	data->handle = INVALID_HANDLE_VALUE;
+	xasprintf(&data->path, "%s.lock", ipc_endpoint_path(endpoint));
 
-	wname = win32_utf8_to_wide(coordination->name);
+	wname = win32_utf8_to_wide(data->path);
 	if (wname == NULL) {
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't convert startup lock path: %s",
-			    coordination->name);
+			    data->path);
 		}
-		free(coordination->name);
+		free(data->path);
+		free(data);
 		free(coordination);
 		errno = EINVAL;
 		return (-1);
 	}
-	coordination->handle = CreateFileW(wname, GENERIC_READ|GENERIC_WRITE,
+	data->handle = CreateFileW(wname, GENERIC_READ|GENERIC_WRITE,
 	    FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL,
 	    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	free(wname);
-	if (coordination->handle == INVALID_HANDLE_VALUE) {
+	if (data->handle == INVALID_HANDLE_VALUE) {
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't open startup lock %s: %s",
-			    coordination->name, win32_strerror(GetLastError()));
+			    data->path, win32_strerror(GetLastError()));
 		}
-		free(coordination->name);
+		free(data->path);
+		free(data);
 		free(coordination);
 		errno = EACCES;
 		return (-1);
@@ -577,7 +750,7 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 	for (;;) {
 		OVERLAPPED	ov = { 0 };
 
-		if (LockFileEx(coordination->handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
+		if (LockFileEx(data->handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
 		    1, 0, &ov)) {
 			*coordinationp = coordination;
 			return (0);
@@ -585,11 +758,12 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 		if (GetLastError() != ERROR_LOCK_VIOLATION) {
 			if (cause != NULL) {
 				xasprintf(cause, "couldn't lock startup guard %s:"
-				    " %s", coordination->name,
+				    " %s", data->path,
 				    win32_strerror(GetLastError()));
 			}
-			CloseHandle(coordination->handle);
-			free(coordination->name);
+			CloseHandle(data->handle);
+			free(data->path);
+			free(data);
 			free(coordination);
 			errno = EACCES;
 			return (-1);
@@ -601,30 +775,32 @@ ipc_coordination_acquire_win32(struct ipc_endpoint *endpoint,
 static void
 ipc_coordination_finish_win32(struct ipc_coordination *coordination)
 {
+	struct ipc_coordination_win32	*data = coordination->data;
 	OVERLAPPED	ov = { 0 };
 
-	if (coordination->handle != NULL &&
-	    coordination->handle != INVALID_HANDLE_VALUE) {
-		UnlockFileEx(coordination->handle, 0, 1, 0, &ov);
-		CloseHandle(coordination->handle);
+	if (data->handle != NULL && data->handle != INVALID_HANDLE_VALUE) {
+		UnlockFileEx(data->handle, 0, 1, 0, &ov);
+		CloseHandle(data->handle);
 	}
-	if (coordination->name != NULL)
-		(void)win32_unlink_utf8(coordination->name);
-	free(coordination->name);
+	if (data->path != NULL)
+		(void)win32_unlink_utf8(data->path);
+	free(data->path);
+	free(data);
 	free(coordination);
 }
 
 static void
 ipc_coordination_release_win32(struct ipc_coordination *coordination)
 {
+	struct ipc_coordination_win32	*data = coordination->data;
 	OVERLAPPED	ov = { 0 };
 
-	if (coordination->handle != NULL &&
-	    coordination->handle != INVALID_HANDLE_VALUE) {
-		UnlockFileEx(coordination->handle, 0, 1, 0, &ov);
-		CloseHandle(coordination->handle);
+	if (data->handle != NULL && data->handle != INVALID_HANDLE_VALUE) {
+		UnlockFileEx(data->handle, 0, 1, 0, &ov);
+		CloseHandle(data->handle);
 	}
-	free(coordination->name);
+	free(data->path);
+	free(data);
 	free(coordination);
 }
 
@@ -669,13 +845,48 @@ ipc_listener_destroy_win32(struct ipc_listener *listener)
 {
 	if (listener->fd != -1)
 		(void)win32_ipc_close(listener->fd);
-	free(listener->path);
 	free(listener);
 }
 
-static void
-ipc_closefd_win32(int fd)
+static int
+ipc_server_start_win32(struct event_base *base, struct tmuxproc *client,
+    struct ipc_endpoint *endpoint, struct ipc_coordination *coordination,
+    uint64_t flags, char **cause)
 {
-	(void)win32_ipc_close(fd);
+	int	fd, i, saved_errno;
+
+	if (flags & CLIENT_NOFORK)
+		return (server_start(client, flags, base, coordination));
+
+	if (win32_server_spawn(ipc_endpoint_path(endpoint), flags, cause) != 0) {
+		ipc_coordination_release(coordination);
+		return (-1);
+	}
+	for (i = 0; i < 100; i++) {
+		fd = ipc_endpoint_connect_win32(endpoint, flags, NULL);
+		if (fd != -1) {
+			ipc_coordination_release(coordination);
+			return (fd);
+		}
+		saved_errno = errno;
+		if (!ipc_endpoint_connect_dead_win32(saved_errno)) {
+			if (cause != NULL) {
+				xasprintf(cause, "couldn't connect to %s: %s",
+				    ipc_endpoint_path(endpoint),
+				    strerror(saved_errno));
+			}
+			ipc_coordination_release(coordination);
+			errno = saved_errno;
+			return (-1);
+		}
+		Sleep(50);
+	}
+	if (cause != NULL) {
+		xasprintf(cause, "timed out waiting for server startup at %s",
+		    ipc_endpoint_path(endpoint));
+	}
+	ipc_coordination_finish(coordination);
+	errno = ETIMEDOUT;
+	return (-1);
 }
 #endif

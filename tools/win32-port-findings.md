@@ -127,49 +127,6 @@ Required direction:
 - If explicit custom paths remain supported, validate parent ownership,
   reparse-point behavior, and endpoint cleanup rules before bind/unlink.
 
-### P1: Endpoint startup control flow is still only partially unified
-
-Files:
-
-- [`ipc-startup.c`](../ipc-startup.c): now owns a backend-neutral endpoint,
-  coordination, and listener contract, but it still does not fully own the
-  entire connect-or-start state machine.
-- [`client.c`](../client.c): detached-helper spawn versus foreground server
-  startup is still visible in platform branches.
-- [`server.c`](../server.c): server start still receives coordination from the
-  caller rather than entering through one shared startup service.
-- [`win32-proc.c`](../win32-proc.c): detached helper startup remains a distinct
-  product path that the shared IPC layer does not yet hide.
-
-Problem:
-
-The tree is no longer primarily suffering from the old hashed-mutex design, and
-the shared layer no longer manufactures coordination names or cleanup policy
-directly. The remaining weakness is that startup sequencing is still split
-between the shared endpoint service and platform-shaped call-site control flow,
-especially around detached helper startup, foreground startup, and the final
-connect-or-timeout loop.
-
-Why it matters:
-
-As long as callers still own visible pieces of the startup state machine, every
-further Win32 fix in this area remains fragile. Helper handoff,
-foreground-versus-detached differences, stale cleanup retries, and future
-backend changes can still leak through call sites because the abstraction
-boundary is improved but not complete.
-
-Required direction:
-
-- Finish moving client connect-or-start sequencing into the shared endpoint
-  service so callers do not branch on backend startup mechanics.
-- Keep callers on opaque endpoint, coordination, and listener objects only.
-- Validate stale-endpoint recovery and concurrent startup behavior under the new
-  backend contract.
-- Keep backend choice hidden so the same shared code works whether the backend
-  uses `flock`, `LockFileEx`, a mutex, or another primitive.
-- The broader cross-platform redesign for this area is tracked in
-  [`tools/platform-ipc-startup-plan.md`](platform-ipc-startup-plan.md).
-
 ### P1: `cmd.exe` command building and popup editor launch are still fragile
 
 Files:
@@ -429,10 +386,12 @@ current implementation:
 - The earlier `SIO_AF_UNIX_GETPEERPID` direction was dropped and is no longer
   part of the active design.
 - Managed socket-root failure no longer falls back to `C:/Temp`.
-- The tree now has a shared `ipc-startup.c` layer and Win32 endpoint-scoped
-  file locking. The remaining startup issue is that the abstraction boundary is
-  still incomplete and still leaks Unix-shaped/backend-specific concepts into
-  shared code.
+- The tree now has a shared `ipc-startup.c` service that owns endpoint
+  canonicalization, connect-or-start sequencing, stale probing, listener
+  creation retries, and backend startup handoff behind one abstraction. Native
+  PowerShell validation now covers baseline startup, relative/absolute `-S`
+  aliasing, stale detached autostart, stale foreground `-D`, concurrent
+  autostart, and `-D` versus client races.
 - The old polling-based child-exit path is gone. Win32 process exit now comes
   from process events and job checks.
 - Worker-backed I/O service notifications are coalesced, bounded, and no
@@ -517,8 +476,7 @@ The main gaps that still matter are:
 
 1. Win32 ACL and socket boundary cleanup:
    integrate authenticated peers with `server-access` semantics, then harden
-   explicit socket-path policy, canonicalization, startup locking, and stale
-   unlink behavior.
+   explicit socket-path policy, canonicalization, and stale unlink behavior.
 
 2. Pane/job lifecycle cleanup:
    split passive close from forced kill, separate process-exit from

@@ -3099,10 +3099,8 @@ int	 server_create_socket(uint64_t, char **);
 struct ipc_endpoint *ipc_endpoint_create(const char *, char **);
 const char	*ipc_endpoint_path(struct ipc_endpoint *);
 void		 ipc_endpoint_free(struct ipc_endpoint *);
-int	 ipc_endpoint_connect(struct ipc_endpoint *, uint64_t, char **);
-int	 ipc_endpoint_connect_dead(struct ipc_endpoint *, int);
-int	 ipc_coordination_acquire(struct ipc_endpoint *,
-	     struct ipc_coordination **, char **);
+int		 ipc_client_connect_or_start(struct event_base *,
+		     struct tmuxproc *, struct ipc_endpoint *, uint64_t);
 int	 ipc_server_create(struct ipc_endpoint *, uint64_t,
 	     struct ipc_listener **, char **);
 void		 ipc_listener_destroy(struct ipc_listener *);
