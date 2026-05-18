@@ -2929,6 +2929,13 @@ server_client_win32_auth_finish(struct client *c,
 	}
 	free(cause);
 
+	if (proc_set_peer_user_sid(c->peer,
+	    win32_ipc_peer_identity_user_sid(peer)) != 0) {
+		log_debug("client %p auth rejected: couldn't store peer SID", c);
+		return (-1);
+	}
+	free((void *)c->user);
+	c->user = xstrdup(win32_ipc_peer_identity_user_sid(peer));
 	c->win32_peer = peer;
 	c->win32_auth_pending = 0;
 	if (!server_acl_join(c)) {

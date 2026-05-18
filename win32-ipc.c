@@ -499,6 +499,14 @@ win32_ipc_peer_identity_free(struct win32_ipc_peer_identity *peer)
 	free(peer);
 }
 
+const char *
+win32_ipc_peer_identity_user_sid(const struct win32_ipc_peer_identity *peer)
+{
+	if (peer == NULL)
+		return (NULL);
+	return (peer->user_sid);
+}
+
 int
 win32_ipc_peer_identity_same_user(const struct win32_ipc_peer_identity *peer,
     char **cause)
@@ -648,6 +656,14 @@ win32_ipc_cache_current_identity(void)
 	}
 	win32_ipc_current_user_sid_value = user_sid;
 	return (0);
+}
+
+const char *
+win32_ipc_current_user_sid(void)
+{
+	if (win32_ipc_cache_current_identity() != 0)
+		return (NULL);
+	return (win32_ipc_current_user_sid_value);
 }
 
 int

@@ -57,6 +57,9 @@ struct tmuxpeer {
 	struct imsgbuf	 ibuf;
 	struct event	 event;
 	uid_t		 uid;
+#ifdef TMUX_WIN32
+	char		*user_sid;
+#endif
 
 	int		 flags;
 #define PEER_BAD 0x1
@@ -69,6 +72,7 @@ struct tmuxpeer {
 
 static int	peer_check_version(struct tmuxpeer *, struct imsg *);
 static void	proc_update_event(struct tmuxpeer *);
+static void	proc_clear_peer_identity(struct tmuxpeer *);
 
 static void
 proc_event_cb(__unused tmux_event_fd fd, short events, void *arg)
@@ -358,6 +362,7 @@ proc_remove_peer(struct tmuxpeer *peer)
 
 	event_del(&peer->event);
 	imsgbuf_clear(&peer->ibuf);
+	proc_clear_peer_identity(peer);
 
 #ifdef TMUX_WIN32
 	win32_ipc_close(peer->ibuf.fd);
@@ -429,4 +434,39 @@ uid_t
 proc_get_peer_uid(struct tmuxpeer *peer)
 {
 	return (peer->uid);
+}
+
+#ifdef TMUX_WIN32
+int
+proc_set_peer_user_sid(struct tmuxpeer *peer, const char *sid)
+{
+	if (peer == NULL || sid == NULL || *sid == '\0') {
+		errno = EINVAL;
+		return (-1);
+	}
+	proc_clear_peer_identity(peer);
+	peer->uid = (uid_t)-1;
+	peer->user_sid = xstrdup(sid);
+	return (0);
+}
+
+const char *
+proc_get_peer_user_sid(struct tmuxpeer *peer)
+{
+	if (peer == NULL)
+		return (NULL);
+	return (peer->user_sid);
+}
+#endif
+
+static void
+proc_clear_peer_identity(struct tmuxpeer *peer)
+{
+	if (peer == NULL)
+		return;
+	peer->uid = (uid_t)-1;
+#ifdef TMUX_WIN32
+	free(peer->user_sid);
+	peer->user_sid = NULL;
+#endif
 }

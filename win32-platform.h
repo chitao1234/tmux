@@ -126,6 +126,9 @@ int		 win32_ipc_verify_auth_bind(
 int		 win32_ipc_duplicate_client_handle(
 		     const struct win32_ipc_peer_identity *, uint64_t, DWORD,
 		     HANDLE *, char **);
+const char	*win32_ipc_peer_identity_user_sid(
+		     const struct win32_ipc_peer_identity *);
+const char	*win32_ipc_current_user_sid(void);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
 int		 win32_terminal_prepare_terminfo(void);

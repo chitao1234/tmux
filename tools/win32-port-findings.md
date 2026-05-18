@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-17
+Date: 2026-05-18
 
 Scope: current codebase-wide Win32 implementation review after the AF_UNIX
 auth work landed. This document reflects the current tree, not earlier design
@@ -12,6 +12,10 @@ Current baseline:
   `MSG_WIN32_AUTH_CHALLENGE` / `MSG_WIN32_AUTH_BIND` /
   `MSG_WIN32_AUTH_RESULT`, same-user SID admission, integrity-floor checks,
   and direct handle duplication bound to the authenticated peer process.
+- Win32 ACL now consumes authenticated SIDs for peer admission:
+  `struct tmuxpeer` stores the authenticated SID, `server_acl_join()` is
+  SID-keyed on Win32, `server_acl_init()` seeds the ACL from the server SID,
+  and `server-access -l` lists the real Win32 principal.
 - The current Win32 build links and passes native `start-server` /
   `list-commands` smoke from PowerShell. Fresh `-vv` traces show auth
   completion and post-auth handle duplication.
@@ -27,61 +31,23 @@ Review method:
 
 ## Executive Summary
 
-The biggest stale claim from earlier Win32 audits is now wrong: Win32 client
-authorization is no longer "missing". The port now has a real AF_UNIX
-challenge/bind auth path, and direct handle duplication is tied to the
-authenticated client process rather than a claimed PID.
+The biggest stale claims from earlier Win32 audits are now wrong: Win32 client
+authorization is no longer "missing", and authenticated peers are no longer
+disconnected from tmux ACL semantics. The port now has a real AF_UNIX
+challenge/bind auth path, direct handle duplication tied to the authenticated
+client process, and SID-keyed ACL admission for Win32 peers.
 
 The remaining problems are the second-order gaps around that progress:
 
-1. Win32 auth is not yet integrated into tmux's ACL and `server-access`
-   semantics, so authenticated same-user clients still bypass the Unix-shaped
-   read-only and deny model.
-2. Native Windows command launch still has gaps around popup editor argv
+1. Native Windows command launch still has gaps around popup editor argv
    handling and broader `cmd.exe` edge-case coverage.
-3. Relay is now explicitly a first-class transport for native console clients,
+2. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
+3. Several Win32 filesystem and ConPTY edge semantics remain incomplete,
+   especially glob matching and ignored ConPTY resize failures.
 
 ## Active Priority Findings
-
-### P1: Win32 authenticated peers are not integrated into tmux ACL semantics
-
-Files:
-
-- [`proc.c`](../proc.c): `proc_add_peer()` still sets Win32 peer UID to
-  `(uid_t)-1`.
-- [`server-acl.c`](../server-acl.c): `server_acl_join()` returns success
-  unconditionally on Win32.
-- [`cmd-server-access.c`](../cmd-server-access.c): mutating `server-access` is
-  still rejected on Win32.
-- [`server-client.c`](../server-client.c): Win32 auth now finishes before
-  `server_acl_join()`, but the ACL layer has no Win32 identity model to use.
-
-Problem:
-
-The new Win32 AF_UNIX auth path produces a real peer identity, but that
-identity lives in `c->win32_peer` rather than in the generic `struct tmuxpeer`
-/ ACL model. As a result, `server-access -a/-d/-r/-w` still has no functional
-Win32 equivalent, `proc_get_peer_uid()` remains unusable on Win32, and
-authenticated same-user clients always get full access.
-
-Why it matters:
-
-tmux now has Win32 admission control, but it still does not have Win32 ACL
-semantics. The gap is no longer "any local process can attach"; the gap is
-"all authenticated same-user clients are treated the same, and the
-read-only/deny management surface is effectively absent on Windows."
-
-Required direction:
-
-- Decide whether Win32 should map ACLs to SID-based identities, logon-session
-  identities, or a narrower same-user policy.
-- Either plumb authenticated Win32 peer identity into `struct tmuxpeer` /
-  `server_acl_*`, or add a dedicated Win32 ACL implementation with equivalent
-  tmux behavior.
-- Define what `server-access -r/-w` should mean for same-user multi-logon
-  attaches.
 
 ### P1: Popup editor launch remains argv-fragile and broader `cmd.exe` coverage is still thin
 
@@ -215,6 +181,13 @@ current implementation:
 - Win32 client auth is no longer "missing". The current tree has AF_UNIX
   challenge/bind auth, same-user SID admission, integrity-floor checks, and
   direct handle duplication bound to the authenticated peer process.
+- Win32 authenticated peers are now integrated into tmux ACL semantics.
+  `struct tmuxpeer` stores the authenticated SID on Win32,
+  `server_acl_join()` now consults the Win32 ACL tree, `server_acl_init()`
+  seeds that tree from the server SID, and `server-access -l` lists the
+  actual SID principal. `server-access` mutation remains intentionally
+  disabled on Windows for now because all same-user attaches share the same
+  SID principal.
 - The earlier `SIO_AF_UNIX_GETPEERPID` direction was dropped and is no longer
   part of the active design.
 - Managed socket-root failure no longer falls back to `C:/Temp`.

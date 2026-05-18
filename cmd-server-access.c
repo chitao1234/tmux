@@ -44,6 +44,7 @@ const struct cmd_entry cmd_server_access_entry = {
 	.exec = cmd_server_access_exec
 };
 
+#ifndef TMUX_WIN32
 static enum cmd_retval
 cmd_server_access_deny(struct cmdq_item *item, struct passwd *pw)
 {
@@ -66,15 +67,18 @@ cmd_server_access_deny(struct cmdq_item *item, struct passwd *pw)
 
 	return (CMD_RETURN_NORMAL);
 }
+#endif
 
 static enum cmd_retval
 cmd_server_access_exec(struct cmd *self, struct cmdq_item *item)
 {
 
 	struct args	*args = cmd_get_args(self);
+#ifndef TMUX_WIN32
 	struct client	*c = cmdq_get_target_client(item);
 	char		*name;
 	struct passwd	*pw = NULL;
+#endif
 
 	if (args_has(args, 'l')) {
 		server_acl_display(item);
@@ -82,9 +86,10 @@ cmd_server_access_exec(struct cmd *self, struct cmdq_item *item)
 	}
 #ifdef TMUX_WIN32
 	cmdq_error(item,
-	    "server-access can only list the current user on Windows");
+	    "server-access mutation is not supported on Windows");
 	return (CMD_RETURN_ERROR);
 #endif
+#ifndef TMUX_WIN32
 	if (args_count(args) == 0) {
 		cmdq_error(item, "missing user argument");
 		return (CMD_RETURN_ERROR);
@@ -150,4 +155,5 @@ cmd_server_access_exec(struct cmd *self, struct cmdq_item *item)
 	}
 
 	return (CMD_RETURN_NORMAL);
+#endif
 }

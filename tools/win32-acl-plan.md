@@ -105,10 +105,11 @@ Recommended direction:
 
 - keep Unix user-name behavior unchanged;
 - make Windows list output show the current authenticated principal;
-- let Windows ACL mutation target the authenticated principal, not an invented
-  Unix user mapping;
-- keep the UI conservative until there is a stable, user-friendly way to name
-  principals on Windows.
+- keep Win32 ACL core integration real, but leave `server-access` mutation
+  rejected until there is a stable principal naming and readonly policy for
+  same-user multi-logon attaches;
+- do not invent a Unix user mapping just to make Win32 mutation superficially
+  resemble the Unix path.
 
 This avoids pretending that Windows has a meaningful Unix passwd database for
 ACL control.
@@ -122,20 +123,23 @@ ACL control.
    `uid_t`.
 4. Remove the Win32 unconditional-success ACL path and seed the Win32 ACL tree
    from the authenticated server principal.
-5. Update `server-access` and identity display paths to use the new principal
-   model.
-6. Add Windows-native smoke coverage for same-user attach, different-user
-   rejection, and readonly propagation.
+5. Update identity display paths and Win32 `server-access -l` to use the new
+   principal model.
+6. Add Windows-native smoke coverage for same-user attach and principal
+   display, while keeping different-user rejection covered by the auth smoke.
+7. Revisit Win32 `server-access` mutation only after a stable readonly and
+   principal-targeting policy exists for same-user multi-logon attaches.
 
 ## Testing Plan
 
 Native Windows coverage should include:
 
-- same Windows user across different logon sessions attaches successfully;
-- different Windows user is rejected before identify traffic is accepted;
-- authenticated same-user clients inherit the expected readonly state from ACL;
+- same-user attach succeeds and the authenticated SID is visible through
+  Win32 ACL listing and client identity display;
+- different-user rejection remains covered by the existing auth smoke;
 - `server-access -l` shows the active Windows principal;
-- changing readonly state updates all clients that share that principal.
+- readonly propagation testing is deferred until Win32 `server-access`
+  mutation semantics are defined.
 
 The existing auth smoke should continue to pass unchanged after the ACL
 integration.

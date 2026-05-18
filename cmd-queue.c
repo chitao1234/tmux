@@ -570,14 +570,18 @@ cmdq_add_message(struct cmdq_item *item)
 
 	tmp = cmd_print(item->cmd);
 	if (c != NULL) {
-		uid = proc_get_peer_uid(c->peer);
-		if (uid != (uid_t)-1 && uid != getuid()) {
-			if ((pw = getpwuid(uid)) != NULL)
-				xasprintf(&user, "[%s]", pw->pw_name);
-			else
-				user = xstrdup("[unknown]");
-		} else
-			user = xstrdup("");
+		if (c->user != NULL && *c->user != '\0')
+			xasprintf(&user, "[%s]", c->user);
+		else {
+			uid = proc_get_peer_uid(c->peer);
+			if (uid != (uid_t)-1 && uid != getuid()) {
+				if ((pw = getpwuid(uid)) != NULL)
+					xasprintf(&user, "[%s]", pw->pw_name);
+				else
+					user = xstrdup("[unknown]");
+			} else
+				user = xstrdup("");
+		}
 		if (c->session != NULL && state->event.key != KEYC_NONE) {
 			key = key_string_lookup_key(state->event.key, 0);
 			server_add_message("%s%s key %s: %s", c->name, user,

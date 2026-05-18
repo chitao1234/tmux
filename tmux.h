@@ -2464,6 +2464,10 @@ void	proc_flush_peer(struct tmuxpeer *);
 void	proc_toggle_log(struct tmuxproc *);
 pid_t	proc_fork_and_daemon(int *, struct ipc_endpoint *, uint64_t);
 uid_t	proc_get_peer_uid(struct tmuxpeer *);
+#ifdef TMUX_WIN32
+int	proc_set_peer_user_sid(struct tmuxpeer *, const char *);
+const char *proc_get_peer_user_sid(struct tmuxpeer *);
+#endif
 
 /* cfg.c */
 extern int cfg_finished;
@@ -3931,14 +3935,23 @@ struct screen	*sixel_to_screen(struct sixel_image *);
 
 /* server-acl.c */
 void			 server_acl_init(void);
+#ifndef TMUX_WIN32
 struct server_acl_user	*server_acl_user_find(uid_t);
-void 			 server_acl_display(struct cmdq_item *);
 void			 server_acl_user_allow(uid_t);
 void			 server_acl_user_deny(uid_t);
 void			 server_acl_user_allow_write(uid_t);
 void			 server_acl_user_deny_write(uid_t);
-int			 server_acl_join(struct client *);
 uid_t			 server_acl_get_uid(struct server_acl_user *);
+#else
+struct server_acl_user	*server_acl_user_find_sid(const char *);
+void			 server_acl_user_allow_sid(const char *);
+void			 server_acl_user_deny_sid(const char *);
+void			 server_acl_user_allow_write_sid(const char *);
+void			 server_acl_user_deny_write_sid(const char *);
+const char		*server_acl_get_sid(struct server_acl_user *);
+#endif
+void 			 server_acl_display(struct cmdq_item *);
+int			 server_acl_join(struct client *);
 
 /* hyperlink.c */
 u_int	 		 hyperlinks_put(struct hyperlinks *, const char *,
