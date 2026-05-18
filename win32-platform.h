@@ -45,6 +45,7 @@ wchar_t		*win32_utf8_to_wide(const char *);
 char		*win32_wide_to_utf8(const wchar_t *);
 int		 win32_path_is_dir(const char *);
 const char	*win32_default_cwd(void);
+const char	*win32_default_shell(void);
 char		*win32_resolve_cwd(const char *, const char *, char **);
 char		*win32_sanitize_cwd(const char *);
 wchar_t		*win32_build_argv_command(int, char **);

@@ -406,9 +406,15 @@ win32_build_shell_command(const char *shell, const char *cmd)
 	char	*line = NULL;
 	wchar_t	*wline;
 	char	*argv[3];
+	const char *default_shell;
 
-	if (shell == NULL || *shell == '\0')
-		shell = "cmd.exe";
+	if (shell == NULL || *shell == '\0') {
+		default_shell = win32_default_shell();
+		if (default_shell != NULL)
+			shell = default_shell;
+		else
+			shell = "cmd.exe";
+	}
 	if (win32_shell_is_cmd(shell)) {
 		if (cmd == NULL)
 			xasprintf(&line, "\"%s\"", shell);

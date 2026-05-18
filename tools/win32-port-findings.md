@@ -37,8 +37,8 @@ The remaining problems are the second-order gaps around that progress:
 1. Win32 auth is not yet integrated into tmux's ACL and `server-access`
    semantics, so authenticated same-user clients still bypass the Unix-shaped
    read-only and deny model.
-2. Native Windows command launch is still fragile around `cmd.exe` quoting and
-   popup editor argv handling.
+2. Native Windows command launch still has gaps around popup editor argv
+   handling and broader `cmd.exe` edge-case coverage.
 3. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
@@ -83,33 +83,39 @@ Required direction:
 - Define what `server-access -r/-w` should mean for same-user multi-logon
   attaches.
 
-### P1: `cmd.exe` command building and popup editor launch are still fragile
+### P1: Popup editor launch remains argv-fragile and broader `cmd.exe` coverage is still thin
 
 Files:
 
-- [`win32-conpty.c`](../win32-conpty.c): `win32_build_shell_command()` embeds
-  raw command text inside `cmd.exe /d /s /c "..."`.
 - [`popup.c`](../popup.c): `popup_editor_open()` still builds a shell command
   with `"%s %s"`.
+- [`win32-conpty.c`](../win32-conpty.c): the central pane/job shell-command
+  path now resolves a real Win32 `cmd.exe` default and has native smoke for
+  quoted-path pane and `run-shell` cases, but the remaining `cmd.exe` matrix is
+  still incomplete.
 
 Problem:
 
-The Win32 shell path still relies on naive string interpolation for
-`cmd.exe`. Popup editor launch still concatenates editor and path text into a
-single command string instead of treating it as argv.
+The central Win32 shell-command path is no longer falling back to `/bin/sh`:
+tmux now resolves `COMSPEC` or system `cmd.exe`, and native smoke covers quoted
+helper paths, spaces, and `&` through both pane and `run-shell` one-argument
+command paths. The remaining issue is that popup editor launch still
+concatenates editor and path text into a single command string instead of
+treating it as argv, and the checked-in `cmd.exe` coverage still does not span
+all of the edge characters we care about.
 
 Why it matters:
 
-Commands containing quotes, `&`, `|`, `^`, parentheses, or paths under
-`C:\Program Files` can execute with different structure than tmux intended or
-can fail outright. Popup editing is one of the easiest user-facing places to
-hit this.
+Popup editing is one of the easiest user-facing places to hit argument-joining
+bugs, and `cmd.exe` regressions tend to hide in edge combinations until a real
+user trips them.
 
 Required direction:
 
 - Treat popup editor launch as an argv construction problem.
-- Either implement a deliberate `cmd.exe` quoting policy or avoid `cmd.exe`
-  when argv structure is already known.
+- Keep extending native `cmd.exe` coverage beyond the new quoted-path baseline
+  so future changes do not silently regress `|`, `^`, parentheses, or popup
+  entry points.
 - Keep shell-specific escaping rules explicit rather than relying on generic
   quote wrapping.
 
@@ -273,6 +279,8 @@ Tracked native smoke coverage now exists for:
   `tools/win32-console-direct-probe.ps1`
 - UTF-8 / wide-char boundary:
   `tools/win32-utf8-boundary-smoke.ps1`
+- Win32 shell-command default-shell, pane, and `run-shell` launch:
+  `tools/win32-shell-command-smoke.ps1`
 
 The main gaps that still matter are:
 
@@ -307,8 +315,9 @@ The main gaps that still matter are:
    still needs native coverage; current smoke only covers explicit pipe close.
 
 9. Command quoting:
-   run popup editors and shell commands containing spaces, quotes, `&`, `|`,
-   `^`, and parentheses under `cmd.exe`.
+   extend the new `tools/win32-shell-command-smoke.ps1` baseline to popup
+   editors and additional `cmd.exe` texts containing quotes, `|`, `^`, and
+   parentheses.
 
 10. Win32 path-policy regression matrix:
     keep verifying `/foo`, `\foo`, drive-qualified paths, UNC paths, `~/...`,

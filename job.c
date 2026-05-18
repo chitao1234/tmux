@@ -121,6 +121,10 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 		else
 			oo = global_s_options;
 		shell = options_get_string(oo, "default-shell");
+#ifdef TMUX_WIN32
+		if (!checkshell(shell))
+			shell = win32_default_shell();
+#endif
 		if (!checkshell(shell))
 			shell = _PATH_BSHELL;
 	}

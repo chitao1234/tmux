@@ -375,6 +375,10 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	/* Then the shell. If respawning, use the old one. */
 	if (~sc->flags & SPAWN_RESPAWN) {
 		tmp = options_get_string(s->options, "default-shell");
+#ifdef TMUX_WIN32
+		if (!checkshell(tmp))
+			tmp = win32_default_shell();
+#endif
 		if (!checkshell(tmp))
 			tmp = _PATH_BSHELL;
 		free(new_wp->shell);

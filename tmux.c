@@ -144,6 +144,12 @@ getshell(void)
 	if (checkshell(shell))
 		return (shell);
 
+#ifdef TMUX_WIN32
+	shell = win32_default_shell();
+	if (checkshell(shell))
+		return (shell);
+#endif
+
 	pw = getpwuid(getuid());
 	if (pw != NULL && checkshell(pw->pw_shell))
 		return (pw->pw_shell);

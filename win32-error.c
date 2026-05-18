@@ -26,11 +26,13 @@ static struct passwd win32_passwd;
 static char    *win32_passwd_name;
 static char    *win32_passwd_dir;
 static char    *win32_passwd_shell;
+static char    *win32_default_shell_path;
 static LONG	win32_ctrl_c_events;
 static LONG	win32_ctrl_close_event;
 char	      **environ;
 
 static void	 win32_free_environ_block(void);
+static char	*win32_build_default_shell_path(void);
 static int	 win32_import_environment(struct environ *);
 static int	 win32_import_environment_entry(const wchar_t *,
 		     struct environ *);
@@ -596,6 +598,40 @@ win32_default_cwd(void)
 	return (NULL);
 }
 
+static char *
+win32_build_default_shell_path(void)
+{
+	const char	*shell, *systemroot;
+	char		*candidate;
+
+	shell = win32_getenv_canonical("COMSPEC");
+	if (shell != NULL && checkshell(shell))
+		return (xstrdup(shell));
+
+	systemroot = win32_getenv_canonical("SYSTEMROOT");
+	if (systemroot != NULL && path_is_absolute(systemroot)) {
+		xasprintf(&candidate, "%s\\System32\\cmd.exe", systemroot);
+		if (checkshell(candidate))
+			return (candidate);
+		free(candidate);
+	}
+
+	candidate = xstrdup("C:\\Windows\\System32\\cmd.exe");
+	if (checkshell(candidate))
+		return (candidate);
+	free(candidate);
+
+	return (NULL);
+}
+
+const char *
+win32_default_shell(void)
+{
+	if (win32_default_shell_path == NULL)
+		win32_default_shell_path = win32_build_default_shell_path();
+	return (win32_default_shell_path);
+}
+
 int
 win32_terminal_prepare_terminfo(void)
 {
@@ -663,6 +699,8 @@ win32_passwd_set(const char *name)
 		home = "C:\\";
 
 	shell = win32_getenv_canonical("SHELL");
+	if (shell == NULL || !checkshell(shell))
+		shell = win32_default_shell();
 	if (shell == NULL || *shell == '\0')
 		shell = _PATH_BSHELL;
 
@@ -827,6 +865,8 @@ win32_fini(void)
 {
 	win32_io_service_fini();
 	win32_free_environ_block();
+	free(win32_default_shell_path);
+	win32_default_shell_path = NULL;
 	SetConsoleCtrlHandler(win32_console_ctrl_handler, FALSE);
 	WSACleanup();
 }
