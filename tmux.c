@@ -72,50 +72,7 @@ usage(int status)
 static int
 win32_get_argv(int *argcp, char ***argvp)
 {
-	typedef LPWSTR *(WINAPI *command_line_to_argv)(LPCWSTR, int *);
-
-	HMODULE			 shell32;
-	union {
-		FARPROC			 proc;
-		command_line_to_argv	 to_argv;
-	}			 cast;
-	wchar_t		       **wargv;
-	char		       **argv;
-	int			 argc, i;
-
-	shell32 = LoadLibraryW(L"shell32.dll");
-	if (shell32 == NULL)
-		return (-1);
-	cast.proc = GetProcAddress(shell32, "CommandLineToArgvW");
-	if (cast.proc == NULL) {
-		FreeLibrary(shell32);
-		return (-1);
-	}
-
-	wargv = cast.to_argv(GetCommandLineW(), &argc);
-	if (wargv == NULL) {
-		FreeLibrary(shell32);
-		return (-1);
-	}
-
-	argv = xcalloc(argc + 1, sizeof *argv);
-	for (i = 0; i < argc; i++) {
-		argv[i] = win32_wide_to_utf8(wargv[i]);
-		if (argv[i] == NULL) {
-			while (i-- > 0)
-				free(argv[i]);
-			free(argv);
-			LocalFree(wargv);
-			FreeLibrary(shell32);
-			return (-1);
-		}
-	}
-	LocalFree(wargv);
-	FreeLibrary(shell32);
-
-	*argcp = argc;
-	*argvp = argv;
-	return (0);
+	return (win32_wide_to_argv(GetCommandLineW(), argcp, argvp));
 }
 #endif
 

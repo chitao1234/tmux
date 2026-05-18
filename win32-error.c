@@ -40,6 +40,7 @@ static int	 win32_import_utf8_entry(char *, struct environ *);
 static int	 win32_errno_from_last_error(DWORD);
 static const char *win32_getenv_canonical(const char *);
 static void	 win32_sync_global_environ_entry(const char *, const char *);
+static int	 win32_command_line_to_argv(const wchar_t *, int *, char ***);
 
 static const char *
 win32_getenv_canonical(const char *name)
@@ -193,6 +194,93 @@ win32_wide_to_utf8(const wchar_t *s)
 		return (NULL);
 	}
 	return (out);
+}
+
+static int
+win32_command_line_to_argv(const wchar_t *cmdline, int *argcp, char ***argvp)
+{
+	typedef LPWSTR *(WINAPI *command_line_to_argv)(LPCWSTR, int *);
+
+	HMODULE			 shell32;
+	union {
+		FARPROC			 proc;
+		command_line_to_argv	 to_argv;
+	}			 cast;
+	wchar_t		       **wargv;
+	char		       **argv;
+	int			 argc, i;
+
+	if (cmdline == NULL || argcp == NULL || argvp == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+
+	shell32 = LoadLibraryW(L"shell32.dll");
+	if (shell32 == NULL) {
+		errno = EIO;
+		return (-1);
+	}
+	cast.proc = GetProcAddress(shell32, "CommandLineToArgvW");
+	if (cast.proc == NULL) {
+		FreeLibrary(shell32);
+		errno = EIO;
+		return (-1);
+	}
+
+	wargv = cast.to_argv(cmdline, &argc);
+	if (wargv == NULL) {
+		FreeLibrary(shell32);
+		errno = EINVAL;
+		return (-1);
+	}
+	if (argc == 0) {
+		LocalFree(wargv);
+		FreeLibrary(shell32);
+		errno = EINVAL;
+		return (-1);
+	}
+
+	argv = xcalloc(argc + 1, sizeof *argv);
+	for (i = 0; i < argc; i++) {
+		argv[i] = win32_wide_to_utf8(wargv[i]);
+		if (argv[i] == NULL) {
+			while (i-- > 0)
+				free(argv[i]);
+			free(argv);
+			LocalFree(wargv);
+			FreeLibrary(shell32);
+			errno = EINVAL;
+			return (-1);
+		}
+	}
+	LocalFree(wargv);
+	FreeLibrary(shell32);
+
+	*argcp = argc;
+	*argvp = argv;
+	return (0);
+}
+
+int
+win32_wide_to_argv(const wchar_t *cmdline, int *argcp, char ***argvp)
+{
+	return (win32_command_line_to_argv(cmdline, argcp, argvp));
+}
+
+int
+win32_utf8_to_argv(const char *cmdline, int *argcp, char ***argvp)
+{
+	wchar_t	*wcmdline;
+	int	 retval;
+
+	wcmdline = win32_utf8_to_wide(cmdline);
+	if (wcmdline == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	retval = win32_command_line_to_argv(wcmdline, argcp, argvp);
+	free(wcmdline);
+	return (retval);
 }
 
 char *

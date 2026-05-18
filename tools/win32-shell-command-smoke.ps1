@@ -165,6 +165,12 @@ if /I "%~1"=="--write" (
     )
     exit /b 0
 )
+if /I "%~1"=="--edit" (
+    > "%~2" (
+        echo popup editor ok
+    )
+    exit /b 0
+)
 echo ARGS=[%~1]^|[%~2]
 '@ | Set-Content -LiteralPath $Path -Encoding ASCII
 }
@@ -174,6 +180,79 @@ function New-Label {
 
     $token = [guid]::NewGuid().ToString("N").Substring(0, 8)
     "$LabelPrefix-$Suffix-$token"
+}
+
+function Start-TmuxClientProcess {
+    param(
+        [string[]]$Arguments,
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [hashtable]$Environment = @{},
+        [string[]]$RemoveEnvironment = @()
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $script:TmuxPath
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = Join-Win32Arguments $Arguments
+
+    foreach ($name in $RemoveEnvironment) {
+        $null = $psi.Environment.Remove($name)
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $psi.Environment[$entry.Key] = $entry.Value
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    [pscustomobject]@{
+        Process = $process
+        Stdout = $process.StandardOutput.ReadToEndAsync()
+        Stderr = $process.StandardError.ReadToEndAsync()
+    }
+}
+
+function Wait-TmuxClientProcess {
+    param(
+        $Run,
+        [int]$TimeoutMs,
+        [string]$Description
+    )
+
+    if (-not $Run.Process.WaitForExit($TimeoutMs)) {
+        $Run.Process.Kill()
+        throw "$Description did not exit within ${TimeoutMs}ms"
+    }
+
+    [pscustomobject]@{
+        ExitCode = $Run.Process.ExitCode
+        Stdout = $Run.Stdout.Result
+        Stderr = $Run.Stderr.Result
+    }
+}
+
+function Get-TmuxClientName {
+    param(
+        [string]$Label,
+        [string]$WorkingDirectory,
+        [hashtable]$Environment,
+        [string[]]$RemoveEnvironment
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+    while ([DateTime]::UtcNow -le $deadline) {
+        $result = Invoke-Tmux -Arguments @("-L", $Label, "list-clients",
+            "-F", "#{client_name}") -WorkingDirectory $WorkingDirectory `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment `
+            -AllowFailure
+        if ($result.ExitCode -eq 0 -and $result.Output.Count -ne 0) {
+            return $result.Output[0]
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "timed out waiting for attached client"
 }
 
 function Invoke-DefaultShellCase {
@@ -290,6 +369,133 @@ function Invoke-JobShellCommandCase {
     }
 }
 
+function Invoke-PopupArgvCase {
+    param(
+        [string]$Root,
+        [hashtable]$Environment,
+        [string[]]$RemoveEnvironment
+    )
+
+    $caseDir = New-CaseDirectory $Root "popup-argv"
+    $label = New-Label "popup"
+    $helperDir = Join-Path $caseDir "helper dir"
+    $helper = Join-Path $helperDir "capture.cmd"
+    $marker = Join-Path $caseDir "popup marker.txt"
+    $run = $null
+    $clientName = $null
+
+    New-Item -ItemType Directory -Path $helperDir | Out-Null
+    New-CaptureHelper -Path $helper
+
+    Push-Location $caseDir
+    try {
+        Invoke-Tmux -Arguments @("-L", $label, "-f", "NUL", "new-session",
+            "-d", "-s", "probe") -WorkingDirectory $caseDir `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment | Out-Null
+        $run = Start-TmuxClientProcess -Arguments @("-L", $label, "-f", "NUL",
+            "attach-session", "-t", "probe") -WorkingDirectory $caseDir `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment
+        $clientName = Get-TmuxClientName -Label $label `
+            -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment
+
+        Invoke-Tmux -Arguments @("-L", $label, "display-popup", "-c",
+            $clientName, "-t", "probe:0.0", "-E", "--", "cmd.exe", "/d",
+            "/c", "call", $helper, "--write", $marker, "popup alpha",
+            "popup beta") -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment | Out-Null
+
+        Wait-Until -TimeoutMs 5000 -IntervalMs 100 -Description "popup marker" `
+            -Condition { Test-Path -LiteralPath $marker }
+        $text = Get-Content -LiteralPath $marker -Raw
+        Assert-True -Condition ($text.Contains("ARGS=[popup alpha]|[popup beta]")) `
+            -Message ("display-popup argv path lost argument structure: " + $text)
+    } finally {
+        Invoke-Tmux -Arguments @("-L", $label, "kill-server") `
+            -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment -AllowFailure | Out-Null
+        if ($run -ne $null) {
+            Wait-TmuxClientProcess -Run $run -TimeoutMs 5000 `
+                -Description "popup argv client" | Out-Null
+        }
+        Pop-Location
+    }
+}
+
+function Invoke-PopupEditorCase {
+    param(
+        [string]$Root,
+        [hashtable]$Environment,
+        [string[]]$RemoveEnvironment
+    )
+
+    $caseDir = New-CaseDirectory $Root "popup-editor"
+    $label = New-Label "editor"
+    $helperDir = Join-Path $caseDir "helper dir"
+    $helper = Join-Path $helperDir "capture.cmd"
+    $editor = $null
+    $run = $null
+    $clientName = $null
+
+    New-Item -ItemType Directory -Path $helperDir | Out-Null
+    New-CaptureHelper -Path $helper
+    $editor = ('cmd.exe /d /c call "{0}" --edit' -f $helper)
+
+    Push-Location $caseDir
+    try {
+        Invoke-Tmux -Arguments @("-L", $label, "-f", "NUL", "new-session",
+            "-d", "-s", "probe") -WorkingDirectory $caseDir `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment | Out-Null
+        Invoke-Tmux -Arguments @("-L", $label, "set-option", "-g", "editor",
+            $editor) -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment | Out-Null
+        Invoke-Tmux -Arguments @("-L", $label, "set-buffer", "-b", "sample",
+            "original popup text") -WorkingDirectory $caseDir `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment | Out-Null
+
+        $run = Start-TmuxClientProcess -Arguments @("-L", $label, "-f", "NUL",
+            "attach-session", "-t", "probe") -WorkingDirectory $caseDir `
+            -Environment $Environment -RemoveEnvironment $RemoveEnvironment
+        $clientName = Get-TmuxClientName -Label $label `
+            -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment
+
+        Invoke-Tmux -Arguments @("-L", $label, "choose-buffer", "-t",
+            "probe:0.0") -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment | Out-Null
+        Wait-Until -TimeoutMs 5000 -IntervalMs 100 `
+            -Description "choose-buffer mode" -Condition {
+                $info = Invoke-Tmux -Arguments @("-L", $label, "display-message",
+                    "-p", "-t", "probe:0.0", "mode=[#{pane_in_mode}] pane_mode=[#{pane_mode}]") `
+                    -WorkingDirectory $caseDir -Environment $Environment `
+                    -RemoveEnvironment $RemoveEnvironment
+                return (($info.Output -join "") -match 'pane_mode=\[buffer-mode\]')
+            }
+
+        Invoke-Tmux -Arguments @("-L", $label, "send-keys", "-c",
+            $clientName, "-t", "probe:0.0", "e") `
+            -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment | Out-Null
+
+        Wait-Until -TimeoutMs 5000 -IntervalMs 100 `
+            -Description "edited popup buffer" -Condition {
+                $buffer = Invoke-Tmux -Arguments @("-L", $label, "show-buffer",
+                    "-b", "sample") -WorkingDirectory $caseDir `
+                    -Environment $Environment -RemoveEnvironment $RemoveEnvironment
+                return (($buffer.Output -join "`n").Contains("popup editor ok"))
+            }
+    } finally {
+        Invoke-Tmux -Arguments @("-L", $label, "kill-server") `
+            -WorkingDirectory $caseDir -Environment $Environment `
+            -RemoveEnvironment $RemoveEnvironment -AllowFailure | Out-Null
+        if ($run -ne $null) {
+            Wait-TmuxClientProcess -Run $run -TimeoutMs 5000 `
+                -Description "popup editor client" | Out-Null
+        }
+        Pop-Location
+    }
+}
+
 $script:TmuxPath = [System.IO.Path]::GetFullPath($TmuxPath)
 $root = Join-Path $env:TEMP ($LabelPrefix + "-" + [guid]::NewGuid().ToString("N"))
 $envMap = @{
@@ -308,6 +514,10 @@ try {
     Invoke-PaneShellCommandCase -Root $root -Environment $envMap `
         -RemoveEnvironment $removeEnv
     Invoke-JobShellCommandCase -Root $root -Environment $envMap `
+        -RemoveEnvironment $removeEnv
+    Invoke-PopupArgvCase -Root $root -Environment $envMap `
+        -RemoveEnvironment $removeEnv
+    Invoke-PopupEditorCase -Root $root -Environment $envMap `
         -RemoveEnvironment $removeEnv
     "Win32 shell-command smoke passed"
 } finally {

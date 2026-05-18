@@ -1061,7 +1061,12 @@ static int
 popup_editor_open(struct popup_editor *pe)
 {
 	struct client	*c = pe->c;
+#ifdef TMUX_WIN32
+	char	       **argv;
+	int		 argc;
+#else
 	char		*cmd;
+#endif
 	u_int		 px, py, sx, sy;
 
 	if (c->flags & CLIENT_DEAD || c->session == NULL)
@@ -1072,6 +1077,18 @@ popup_editor_open(struct popup_editor *pe)
 	px = (c->tty.sx / 2) - (sx / 2);
 	py = (c->tty.sy / 2) - (sy / 2);
 
+#ifdef TMUX_WIN32
+	if (win32_utf8_to_argv(pe->editor, &argc, &argv) != 0)
+		return (-1);
+	cmd_append_argv(&argc, &argv, pe->cmdpath);
+	if (popup_display(POPUP_INTERNAL|POPUP_CLOSEEXIT, BOX_LINES_DEFAULT,
+	    NULL, px, py, sx, sy, NULL, NULL, argc, argv, pe->cwd, NULL, c,
+	    NULL, NULL, NULL, popup_editor_close_cb, pe) != 0) {
+		cmd_free_argv(argc, argv);
+		return (-1);
+	}
+	cmd_free_argv(argc, argv);
+#else
 	xasprintf(&cmd, "%s %s", pe->editor, pe->cmdpath);
 	if (popup_display(POPUP_INTERNAL|POPUP_CLOSEEXIT, BOX_LINES_DEFAULT,
 	    NULL, px, py, sx, sy, NULL, cmd, 0, NULL, pe->cwd, NULL, c, NULL,
@@ -1080,6 +1097,7 @@ popup_editor_open(struct popup_editor *pe)
 		return (-1);
 	}
 	free(cmd);
+#endif
 	return (0);
 }
 

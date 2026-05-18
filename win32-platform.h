@@ -43,6 +43,8 @@ const char	*win32_strerror(DWORD);
 char		*win32_getenv_utf8(const char *);
 wchar_t		*win32_utf8_to_wide(const char *);
 char		*win32_wide_to_utf8(const wchar_t *);
+int		 win32_wide_to_argv(const wchar_t *, int *, char ***);
+int		 win32_utf8_to_argv(const char *, int *, char ***);
 int		 win32_path_is_dir(const char *);
 const char	*win32_default_cwd(void);
 const char	*win32_default_shell(void);

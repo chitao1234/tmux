@@ -39,53 +39,18 @@ client process, and SID-keyed ACL admission for Win32 peers.
 
 The remaining problems are the second-order gaps around that progress:
 
-1. Native Windows command launch still has gaps around popup editor argv
-   handling and broader `cmd.exe` edge-case coverage.
+1. Native Windows command launch now covers popup editor argv handling and
+   generic popup PTY argv execution, but broader `cmd.exe` edge-case coverage
+   still needs expansion.
 2. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
 3. Several Win32 filesystem and regression-coverage edges remain incomplete,
-   especially glob matching and native Windows path and popup coverage.
+   especially glob matching and native Windows path coverage.
 
 ## Active Priority Findings
 
-### P1: Popup editor launch remains argv-fragile and broader `cmd.exe` coverage is still thin
-
-Files:
-
-- [`popup.c`](../popup.c): `popup_editor_open()` still builds a shell command
-  with `"%s %s"`.
-- [`win32-conpty.c`](../win32-conpty.c): the central pane/job shell-command
-  path now resolves a real Win32 `cmd.exe` default and has native smoke for
-  quoted-path pane and `run-shell` cases, but the remaining `cmd.exe` matrix is
-  still incomplete.
-
-Problem:
-
-The central Win32 shell-command path is no longer falling back to `/bin/sh`:
-tmux now resolves `COMSPEC` or system `cmd.exe`, and native smoke covers quoted
-helper paths, spaces, and `&` through both pane and `run-shell` one-argument
-command paths. The remaining issue is that popup editor launch still
-concatenates editor and path text into a single command string instead of
-treating it as argv, and the checked-in `cmd.exe` coverage still does not span
-all of the edge characters we care about.
-
-Why it matters:
-
-Popup editing is one of the easiest user-facing places to hit argument-joining
-bugs, and `cmd.exe` regressions tend to hide in edge combinations until a real
-user trips them.
-
-Required direction:
-
-- Treat popup editor launch as an argv construction problem.
-- Keep extending native `cmd.exe` coverage beyond the new quoted-path baseline
-  so future changes do not silently regress `|`, `^`, parentheses, or popup
-  entry points.
-- Keep shell-specific escaping rules explicit rather than relying on generic
-  quote wrapping.
-
-### P2: Relay is first-class because detached server-side native console handles still do not work
+### P1: Relay is first-class because detached server-side native console handles still do not work
 
 Files:
 
@@ -117,7 +82,7 @@ Required direction:
 - Treat future relay replacement as gated on usable detached-server console
   handles, not merely on handle transfer.
 
-### P3: Win32 glob and case folding remain incomplete
+### P2: Win32 glob and case folding remain incomplete
 
 Files:
 
@@ -202,6 +167,11 @@ current implementation:
 - The relay UTF-8 writer boundary now carries multibyte splits incrementally
   and fails closed on invalid UTF-8 instead of silently pushing malformed data
   into the native console path.
+- Popup editor launch on Win32 no longer concatenates `editor` and the temp
+  path into one shell string. The current tree splits the editor command line
+  into argv, appends the temp file path explicitly, and native PowerShell
+  smoke now covers both generic popup argv execution and the real
+  `choose-buffer` editor flow.
 - Recent IPC path work removed ANSI WinAPI calls from the socket-root security
   and directory-creation path.
 - The wide/UTF-8 boundary work now covers environment import, cwd discovery,
@@ -229,7 +199,7 @@ Tracked native smoke coverage now exists for:
   `tools/win32-console-direct-probe.ps1`
 - UTF-8 / wide-char boundary:
   `tools/win32-utf8-boundary-smoke.ps1`
-- Win32 shell-command default-shell, pane, and `run-shell` launch:
+- Win32 shell-command, popup argv, and popup editor launch:
   `tools/win32-shell-command-smoke.ps1`
 
 The main gaps that still matter are:
@@ -257,33 +227,28 @@ The main gaps that still matter are:
    transport loss, but resize-under-backlog and output-progress remain
    host-sensitive and still need continued native-host validation.
 
-6. Popup PTY jobs:
-   popup PTY job completion and replacement still need native coverage so the
-   job-tree drain path is exercised outside ordinary panes.
-
-7. `pipe-pane` lifecycle:
+6. `pipe-pane` lifecycle:
    ordinary pane death with Win32 `pipe-pane -O`, `-I`, and `-IO` helpers
    still needs native coverage; current smoke only covers explicit pipe close.
 
-8. ConPTY resize rejection path:
+7. ConPTY resize rejection path:
    injected or teardown-time `ResizePseudoConsole()` failure still needs
    targeted validation so the new logging and guard behavior stays correct.
 
-9. Command quoting:
-   extend the new `tools/win32-shell-command-smoke.ps1` baseline to popup
-   editors and additional `cmd.exe` texts containing quotes, `|`, `^`, and
-   parentheses.
+8. Command quoting:
+   keep broadening `cmd.exe` texts containing quotes, `|`, `^`, and
+   parentheses beyond the popup editor and popup PTY argv baseline.
 
-10. Win32 path-policy regression matrix:
+9. Win32 path-policy regression matrix:
     keep verifying `/foo`, `\foo`, drive-qualified paths, UNC paths, `~/...`,
     `~\...`, and drive-letter path lists so future changes do not regress the
     now-shared Win32 path grammar.
 
-11. Long and Unicode path shapes:
+10. Long and Unicode path shapes:
     start tmux from long and non-ASCII cwd / executable / config paths and
     verify spawn, config lookup, logs, `PWD`, and reconnect behavior.
 
-12. Glob semantics:
+11. Glob semantics:
     test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names,
     and mixed slash/backslash input for `source-file`.
 
@@ -295,8 +260,8 @@ The main gaps that still matter are:
    move into a backend-private namespace.
 
 2. Native command and remaining path-surface cleanup:
-   fix `cmd.exe` quoting, popup editor argv handling, Win32 glob semantics,
-   and add broader regression coverage for the shared path policy.
+   broaden `cmd.exe` coverage, Win32 glob semantics, and regression coverage
+   for the shared path policy.
 
 3. Relay-first terminal consolidation:
    keep relay as the supported native-console mode, continue native coverage,
