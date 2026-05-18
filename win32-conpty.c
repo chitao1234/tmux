@@ -11,6 +11,7 @@
 #include <sys/types.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -470,6 +471,26 @@ win32_close_pseudoconsole(HPCON *hpcon)
 	if (*hpcon != NULL)
 		ClosePseudoConsole(*hpcon);
 	*hpcon = NULL;
+}
+
+static int
+win32_pseudoconsole_size(u_int sx, u_int sy, COORD *size, char **cause)
+{
+	u_int	 cols, rows;
+
+	cols = sx == 0 ? 80 : sx;
+	rows = sy == 0 ? 24 : sy;
+	if (cols > SHRT_MAX || rows > SHRT_MAX) {
+		if (cause != NULL) {
+			xasprintf(cause,
+			    "pseudoconsole size %ux%u is out of range",
+			    cols, rows);
+		}
+		return (-1);
+	}
+	size->X = (SHORT)cols;
+	size->Y = (SHORT)rows;
+	return (0);
 }
 
 static int
@@ -1162,12 +1183,9 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 
 	memset(&si, 0, sizeof si);
 	pw = xcalloc(1, sizeof *pw);
-	size.X = screen_size_x(&wp->base);
-	size.Y = screen_size_y(&wp->base);
-	if (size.X <= 0)
-		size.X = 80;
-	if (size.Y <= 0)
-		size.Y = 24;
+	if (win32_pseudoconsole_size(screen_size_x(&wp->base),
+	    screen_size_y(&wp->base), &size, cause) != 0)
+		goto fail;
 
 	if (win32_make_input_pipe(&pw->input_read, &pw->input_write) != 0 ||
 	    win32_make_output_pipe(&pw->output_read, &pw->output_write) != 0) {
@@ -1294,13 +1312,24 @@ fail:
 void
 win32_pane_resize(struct window_pane *wp, u_int sx, u_int sy)
 {
+	struct win32_pane	*pw;
 	COORD	size;
+	HRESULT	hr;
 
-	if (wp->win32 == NULL || wp->win32->hpcon == NULL)
+	if (wp == NULL || wp->win32 == NULL)
 		return;
-	size.X = sx == 0 ? 80 : sx;
-	size.Y = sy == 0 ? 24 : sy;
-	ResizePseudoConsole(wp->win32->hpcon, size);
+	pw = wp->win32;
+	if (pw->hpcon == NULL || pw->exited)
+		return;
+	if (win32_pseudoconsole_size(sx, sy, &size, NULL) != 0) {
+		log_debug("%%%u resize out of range: %ux%u", wp->id, sx, sy);
+		return;
+	}
+	hr = ResizePseudoConsole(pw->hpcon, size);
+	if (FAILED(hr)) {
+		log_debug("%%%u resize to %ux%u failed: 0x%08lx", wp->id,
+		    (u_int)size.X, (u_int)size.Y, (unsigned long)hr);
+	}
 }
 
 static void
@@ -1690,8 +1719,8 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	creation_flags = CREATE_UNICODE_ENVIRONMENT;
 
 	if (wj->pty) {
-		size.X = sx <= 0 ? 80 : sx;
-		size.Y = sy <= 0 ? 24 : sy;
+		if (win32_pseudoconsole_size(sx, sy, &size, cause) != 0)
+			goto fail;
 		hr = CreatePseudoConsole(size, wj->stdin_read,
 		    wj->stdout_write, 0, &wj->hpcon);
 		if (FAILED(hr)) {
@@ -1922,12 +1951,21 @@ void
 win32_job_resize(struct win32_job *wj, u_int sx, u_int sy)
 {
 	COORD	size;
+	HRESULT	hr;
 
-	if (wj->hpcon == NULL)
+	if (wj == NULL || !wj->pty || wj->hpcon == NULL || wj->exited)
 		return;
-	size.X = sx == 0 ? 80 : sx;
-	size.Y = sy == 0 ? 24 : sy;
-	ResizePseudoConsole(wj->hpcon, size);
+	if (win32_pseudoconsole_size(sx, sy, &size, NULL) != 0) {
+		log_debug("job resize, pid %ld, out of range: %ux%u",
+		    (long)wj->process_id, sx, sy);
+		return;
+	}
+	hr = ResizePseudoConsole(wj->hpcon, size);
+	if (FAILED(hr)) {
+		log_debug("job resize, pid %ld, to %ux%u failed: 0x%08lx",
+		    (long)wj->process_id, (u_int)size.X, (u_int)size.Y,
+		    (unsigned long)hr);
+	}
 }
 
 int

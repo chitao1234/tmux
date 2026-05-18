@@ -44,8 +44,8 @@ The remaining problems are the second-order gaps around that progress:
 2. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
-3. Several Win32 filesystem and ConPTY edge semantics remain incomplete,
-   especially glob matching and ignored ConPTY resize failures.
+3. Several Win32 filesystem and regression-coverage edges remain incomplete,
+   especially glob matching and native Windows path and popup coverage.
 
 ## Active Priority Findings
 
@@ -146,33 +146,6 @@ Required direction:
 - Add tests for `*`, `?`, bracket expressions, escapes, drive paths, UNC
   paths, Unicode names, and mixed slash/backslash input.
 
-### P3: ConPTY resize failures are still ignored
-
-Files:
-
-- [`win32-conpty.c`](../win32-conpty.c): `win32_pane_resize()` ignores the
-  `ResizePseudoConsole()` `HRESULT`.
-- [`win32-conpty.c`](../win32-conpty.c): `win32_job_resize()` also ignores the
-  `ResizePseudoConsole()` `HRESULT`.
-- [`window.c`](../window.c): pane size state is updated regardless.
-- [`job.c`](../job.c): job resize requests also assume success.
-
-Problem:
-
-tmux still updates logical size state and calls `ResizePseudoConsole()`
-without checking whether the resize succeeded.
-
-Why it matters:
-
-If the ConPTY is tearing down or rejects the resize, tmux and the child can
-silently diverge on size, which makes rendering-edge bugs harder to diagnose.
-
-Required direction:
-
-- Check and log `ResizePseudoConsole()` failures with pane/job identity.
-- Decide whether failures should be ignored, retried, or treated as teardown
-  signals.
-
 ## Retired Findings
 
 The following earlier findings were verified as fixed or superseded by the
@@ -188,6 +161,10 @@ current implementation:
   actual SID principal. `server-access` mutation remains intentionally
   disabled on Windows for now because all same-user attaches share the same
   SID principal.
+- ConPTY resize failures are no longer ignored. The current tree validates
+  pseudoconsole sizes before narrowing them into `COORD`, rejects impossible
+  sizes during pane/job creation, skips resize after exit, and logs
+  `ResizePseudoConsole()` failures with pane/job identity.
 - The earlier `SIO_AF_UNIX_GETPEERPID` direction was dropped and is no longer
   part of the active design.
 - Managed socket-root failure no longer falls back to `C:/Temp`.
@@ -286,6 +263,10 @@ The main gaps that still matter are:
 7. `pipe-pane` lifecycle:
    ordinary pane death with Win32 `pipe-pane -O`, `-I`, and `-IO` helpers
    still needs native coverage; current smoke only covers explicit pipe close.
+
+8. ConPTY resize rejection path:
+   injected or teardown-time `ResizePseudoConsole()` failure still needs
+   targeted validation so the new logging and guard behavior stays correct.
 
 9. Command quoting:
    extend the new `tools/win32-shell-command-smoke.ps1` baseline to popup
