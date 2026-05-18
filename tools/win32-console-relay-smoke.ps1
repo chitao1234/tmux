@@ -293,6 +293,15 @@ public static class Win32ConsoleOutput
     static extern bool GetConsoleScreenBufferInfo(IntPtr consoleOutput,
         out CONSOLE_SCREEN_BUFFER_INFO info);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetConsoleScreenBufferSize(IntPtr consoleOutput,
+        COORD size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetConsoleWindowInfo(IntPtr consoleOutput,
+        [MarshalAs(UnmanagedType.Bool)] bool absolute,
+        ref SMALL_RECT window);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool ReadConsoleOutputCharacterW(IntPtr consoleOutput,
         StringBuilder buffer, uint length, COORD coord,
@@ -347,6 +356,73 @@ public static class Win32ConsoleOutput
             CloseHandle(handle);
         }
     }
+
+    public static string GetWindowSize()
+    {
+        IntPtr handle = CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0,
+            IntPtr.Zero);
+        if (handle == new IntPtr(-1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "CreateFileW(CONOUT$) failed");
+
+        try
+        {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(handle, out info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "GetConsoleScreenBufferInfo failed");
+
+            int width = info.srWindow.Right - info.srWindow.Left + 1;
+            int height = info.srWindow.Bottom - info.srWindow.Top + 1;
+            return width + "x" + height;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    public static void SetWindowSize(int width, int height)
+    {
+        IntPtr handle = CreateFileW("CONOUT$", GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0,
+            IntPtr.Zero);
+        if (handle == new IntPtr(-1))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "CreateFileW(CONOUT$) failed");
+
+        try
+        {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(handle, out info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "GetConsoleScreenBufferInfo failed");
+
+            COORD bufferSize;
+            bufferSize.X = (short)Math.Max(info.dwSize.X, width);
+            bufferSize.Y = (short)Math.Max(info.dwSize.Y, height);
+            if ((int)bufferSize.X != info.dwSize.X ||
+                (int)bufferSize.Y != info.dwSize.Y) {
+                if (!SetConsoleScreenBufferSize(handle, bufferSize))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "SetConsoleScreenBufferSize failed");
+            }
+
+            SMALL_RECT window;
+            window.Left = info.srWindow.Left;
+            window.Top = info.srWindow.Top;
+            window.Right = (short)(window.Left + width - 1);
+            window.Bottom = (short)(window.Top + height - 1);
+            if (!SetConsoleWindowInfo(handle, true, ref window))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "SetConsoleWindowInfo failed");
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
 }
 "@
 }
@@ -354,6 +430,18 @@ public static class Win32ConsoleOutput
 function Get-ConsoleVisibleText {
     Initialize-ConsoleOutputInterop
     [Win32ConsoleOutput]::ReadVisibleText()
+}
+
+function Get-ConsoleWindowSizeNative {
+    Initialize-ConsoleOutputInterop
+    $sizeText = [Win32ConsoleOutput]::GetWindowSize()
+    if ($sizeText -notmatch '^([0-9]+)x([0-9]+)$') {
+        throw "Unexpected native console size text: $sizeText"
+    }
+    [pscustomobject]@{
+        Width = [int]$Matches[1]
+        Height = [int]$Matches[2]
+    }
 }
 
 function Wait-ConsoleVisibleText {
@@ -371,6 +459,25 @@ function Wait-ConsoleVisibleText {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     $false
+}
+
+function Wait-ConsoleWindowSizeNative {
+    param(
+        [int]$Width,
+        [int]$Height,
+        [int]$TimeoutMs = 5000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        $size = Get-ConsoleWindowSizeNative
+        if ($size.Width -eq $Width -and $size.Height -eq $Height) {
+            return $size
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $null
 }
 
 function Get-ConsoleWindowSize {
@@ -411,27 +518,92 @@ function Get-AlternateConsoleWindowSize {
     }
 }
 
+function Get-AlternateConsoleWindowSizeCandidates {
+    param(
+        [int]$Width,
+        [int]$Height
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+
+    function Add-SizeCandidate {
+        param(
+            [int]$CandidateWidth,
+            [int]$CandidateHeight
+        )
+
+        if ($CandidateWidth -lt 20 -or $CandidateHeight -lt 8) {
+            return
+        }
+        if ($CandidateWidth -eq $Width -and $CandidateHeight -eq $Height) {
+            return
+        }
+        foreach ($existing in $candidates) {
+            if ($existing.Width -eq $CandidateWidth -and
+                $existing.Height -eq $CandidateHeight) {
+                return
+            }
+        }
+        [void]$candidates.Add([pscustomobject]@{
+            Width = $CandidateWidth
+            Height = $CandidateHeight
+        })
+    }
+
+    $preferred = Get-AlternateConsoleWindowSize -Width $Width -Height $Height
+    Add-SizeCandidate -CandidateWidth $preferred.Width `
+        -CandidateHeight $preferred.Height
+    Add-SizeCandidate -CandidateWidth ($Width - 8) -CandidateHeight $Height
+    Add-SizeCandidate -CandidateWidth ($Width - 4) -CandidateHeight $Height
+    Add-SizeCandidate -CandidateWidth ($Width + 4) -CandidateHeight $Height
+    Add-SizeCandidate -CandidateWidth $Width -CandidateHeight ($Height - 4)
+    Add-SizeCandidate -CandidateWidth $Width -CandidateHeight ($Height - 2)
+    Add-SizeCandidate -CandidateWidth $Width -CandidateHeight ($Height + 2)
+    Add-SizeCandidate -CandidateWidth $Width -CandidateHeight ($Height + 4)
+
+    $candidates
+}
+
+function Invoke-ObservedConsoleResize {
+    param(
+        [int]$OriginalWidth,
+        [int]$OriginalHeight,
+        [int]$RequestedWidth,
+        [int]$RequestedHeight,
+        [int]$TimeoutMs = 2000
+    )
+
+    try {
+        Set-ConsoleWindowSize -Width $RequestedWidth -Height $RequestedHeight
+    } catch {
+        return $null
+    }
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        $size = Get-ConsoleWindowSizeNative
+        if ($size.Width -eq $RequestedWidth -and
+            $size.Height -eq $RequestedHeight) {
+            return $size
+        }
+        if ($size.Width -ne $OriginalWidth -or
+            $size.Height -ne $OriginalHeight) {
+            return $size
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $null
+}
+
 function Set-ConsoleWindowSize {
     param(
         [int]$Width,
         [int]$Height
     )
 
-    $raw = $Host.UI.RawUI
-    $buffer = $raw.BufferSize
-    $bufferWidth = [Math]::Max($buffer.Width, $Width)
-    $bufferHeight = [Math]::Max($buffer.Height, $Height)
-
-    if ($bufferWidth -ne $buffer.Width -or $bufferHeight -ne $buffer.Height) {
-        $raw.BufferSize = [System.Management.Automation.Host.Size]::new(
-            $bufferWidth,
-            $bufferHeight
-        )
-    }
-    $raw.WindowSize = [System.Management.Automation.Host.Size]::new(
-        $Width,
-        $Height
-    )
+    Initialize-ConsoleOutputInterop
+    [Win32ConsoleOutput]::SetWindowSize($Width, $Height)
 }
 
 function Test-AnyLogMatch {
@@ -502,6 +674,25 @@ function Get-CurrentTmuxLogs {
     )
 
     @(Get-ChildItem -LiteralPath $Path -Filter "tmux-*.log" -File)
+}
+
+function Wait-LogMatch {
+    param(
+        [string]$Path,
+        [string]$Pattern,
+        [int]$TimeoutMs = 5000
+    )
+
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    do {
+        $logs = Get-CurrentTmuxLogs -Path $Path
+        if (Test-AnyLogMatch $logs $Pattern) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $false
 }
 
 function Get-TmuxClientSize {
@@ -685,6 +876,7 @@ try {
     $utf8SplitVisible = $false
     $utf8SplitCarryLogged = $false
     $invalidUtf8PrefixVisible = $false
+    $resizeConsoleObserved = $null
 
     $env:TMUX = $null
     $env:TMUX_WIN32_HANDLE_TTY = "0"
@@ -1116,19 +1308,50 @@ try {
                     "Enter"
                 ) | Out-Null
                 Start-Sleep -Milliseconds 100
-                $script:restoreConsoleSize = Get-ConsoleWindowSize
-                $script:resizeTarget = Get-AlternateConsoleWindowSize `
-                    -Width $script:restoreConsoleSize.Width `
-                    -Height $script:restoreConsoleSize.Height
-                Set-ConsoleWindowSize -Width $script:resizeTarget.Width `
-                    -Height $script:resizeTarget.Height
+                $script:restoreConsoleSize = Get-ConsoleWindowSizeNative
+                foreach ($candidate in (
+                    Get-AlternateConsoleWindowSizeCandidates `
+                        -Width $script:restoreConsoleSize.Width `
+                        -Height $script:restoreConsoleSize.Height
+                )) {
+                    $observed = Invoke-ObservedConsoleResize `
+                        -OriginalWidth $script:restoreConsoleSize.Width `
+                        -OriginalHeight $script:restoreConsoleSize.Height `
+                        -RequestedWidth $candidate.Width `
+                        -RequestedHeight $candidate.Height `
+                        -TimeoutMs 2000
+                    if ($observed -ne $null) {
+                        $script:resizeTarget = $observed
+                        $script:resizeConsoleObserved = $observed
+                        break
+                    }
+                }
+                if ($script:resizeConsoleObserved -eq $null) {
+                    throw "Timed out waiting for native console resize away from $($script:restoreConsoleSize.Width)x$($script:restoreConsoleSize.Height)"
+                }
+                $clientResizePattern = (
+                    "console size is now " +
+                    "$($script:resizeTarget.Width)x$($script:resizeTarget.Height)"
+                )
+                $serverResizePattern = (
+                    "server_client_win32_resize: client-$AttachPid now " +
+                    "$($script:resizeTarget.Width)x$($script:resizeTarget.Height)"
+                )
+                if (-not (Wait-LogMatch -Path $root `
+                    -Pattern $clientResizePattern -TimeoutMs 5000)) {
+                    throw "Timed out waiting for client resize log: $clientResizePattern"
+                }
+                if (-not (Wait-LogMatch -Path $root `
+                    -Pattern $serverResizePattern -TimeoutMs 5000)) {
+                    throw "Timed out waiting for server resize log: $serverResizePattern"
+                }
                 $script:resizeObserved = Wait-TmuxClientSize `
                     -Config $config `
                     -Label $label `
                     -ClientPid $AttachPid `
                     -Width $script:resizeTarget.Width `
                     -Height $script:resizeTarget.Height `
-                    -TimeoutMs 3000
+                    -TimeoutMs 5000
                 Start-Sleep -Milliseconds 500
                 Invoke-Tmux -Arguments @(
                     "-f",
@@ -1282,6 +1505,11 @@ try {
         if ($resizeTarget -ne $null) {
             Write-Host "  resize target: $($resizeTarget.Width)x$($resizeTarget.Height)"
         }
+        if ($resizeConsoleObserved -ne $null) {
+            Write-Host "  native console resize observed: $($resizeConsoleObserved.Width)x$($resizeConsoleObserved.Height)"
+        } else {
+            Write-Host "  native console resize observed: <none>"
+        }
         if ($resizeObserved -ne $null) {
             Write-Host "  resize observed by server query: $($resizeObserved.Width)x$($resizeObserved.Height)"
         } else {
@@ -1349,9 +1577,9 @@ try {
     } elseif ($ExerciseResizeBacklog) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $resizeTarget -ne $null -and
-            $resizeObserved -ne $null -and
-            $resizeObserved.Width -eq $resizeTarget.Width -and
-            $resizeObserved.Height -eq $resizeTarget.Height -and
+            $resizeConsoleObserved -ne $null -and
+            $resizeConsoleObserved.Width -eq $resizeTarget.Width -and
+            $resizeConsoleObserved.Height -eq $resizeTarget.Height -and
             $resizeClientLog -and $resizeServerLog -and
             $outputProgressCount -ge 1 -and $redrawDeferredCount -ge 1 -and
             $failures.Count -eq 0
@@ -1412,6 +1640,11 @@ try {
             invalidUtf8Failure = $invalidUtf8Failure
             resizeClientLog = $resizeClientLog
             resizeServerLog = $resizeServerLog
+            resizeConsoleObserved = if ($resizeConsoleObserved -ne $null) {
+                "{0}x{1}" -f $resizeConsoleObserved.Width, $resizeConsoleObserved.Height
+            } else {
+                $null
+            }
             resizeTarget = if ($resizeTarget -ne $null) {
                 "{0}x{1}" -f $resizeTarget.Width, $resizeTarget.Height
             } else {
@@ -1483,6 +1716,11 @@ try {
         invalidUtf8Failure = $invalidUtf8Failure
         resizeClientLog = $resizeClientLog
         resizeServerLog = $resizeServerLog
+        resizeConsoleObserved = if ($resizeConsoleObserved -ne $null) {
+            "{0}x{1}" -f $resizeConsoleObserved.Width, $resizeConsoleObserved.Height
+        } else {
+            $null
+        }
         resizeTarget = if ($resizeTarget -ne $null) {
             "{0}x{1}" -f $resizeTarget.Width, $resizeTarget.Height
         } else {

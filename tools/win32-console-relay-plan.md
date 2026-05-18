@@ -492,9 +492,10 @@ under MSYS2.
   threshold deferral and redraw release once the heavy phase crosses it.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseResizeBacklog`
   Relay resize-under-backlog coverage. It generates sustained console output,
-  resizes the real console while relay output is still pending, verifies that
-  tmux updates the attached client's size through `list-clients`, and checks
-  both client-side and server-side relay resize logs before detach.
+  resizes the real console while relay output is still pending, verifies the
+  native console's observed size change directly, and checks both client-side
+  and server-side relay resize logs before detach. A `list-clients` size query
+  is now secondary evidence rather than the primary observation path.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseInputCredit`
   Relay input-credit coverage. It injects more than the 64 KiB credit window
   through `CONIN$`, verifies that console input pauses and resumes at the
