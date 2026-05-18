@@ -252,9 +252,10 @@ The main gaps that still matter are:
    paths produce one live server and never remove a live endpoint.
 
 5. Relay-first native-console coverage:
-   reader loss, output loss, resize-under-backlog, input credit, detach under
-   backlog, UTF-8 split, invalid UTF-8, and transport loss all need continued
-   native-host validation.
+   a redirected-runner launcher now exists for baseline attach, input credit,
+   detach under backlog, UTF-8 split, invalid UTF-8, output loss, and
+   transport loss, but resize-under-backlog and output-progress remain
+   host-sensitive and still need continued native-host validation.
 
 6. Popup PTY jobs:
    popup PTY job completion and replacement still need native coverage so the

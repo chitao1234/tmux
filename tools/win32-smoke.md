@@ -37,3 +37,10 @@ expected:
 actual:
 log file:
 ```
+
+For native-console relay automation from a redirected runner, use
+`tools/win32-console-relay-coverage.ps1`. It launches the real-console relay
+smoke in fresh console windows and records per-case result files under a temp
+artifact root. Its default suite covers the stable relay cases; use
+`-IncludeBacklogCases` to add the more host-sensitive output-progress and
+resize-backlog probes.

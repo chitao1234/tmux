@@ -1,6 +1,9 @@
 param(
     [string]$TmuxPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "tmux.exe"),
     [string]$LabelPrefix = "win32-console-relay-smoke",
+    [string]$RootPath,
+    [string]$ResultPath,
+    [int]$AutoDetachAfterMs = 0,
     [switch]$ExerciseInputCredit,
     [switch]$SimulateOutputLoss,
     [switch]$SimulateTransportLost,
@@ -566,6 +569,55 @@ function Write-TextFileUtf8NoBom {
     )
 }
 
+function Write-SmokeResult {
+    param(
+        [string]$Path,
+        [object]$Result
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    $directory = Split-Path -Parent $Path
+    if ($directory -ne "" -and -not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    Write-TextFileUtf8NoBom -Path $Path -Content ($Result | ConvertTo-Json -Depth 8)
+}
+
+function Get-SmokeScenarioName {
+    if ($ExerciseInputCredit) {
+        return "input-credit"
+    }
+    if ($SimulateOutputLoss) {
+        return "simulate-output-loss"
+    }
+    if ($SimulateTransportLost) {
+        return "simulate-transport-lost"
+    }
+    if ($ExerciseDetachBacklog) {
+        return "detach-backlog"
+    }
+    if ($ExerciseOutputProgress) {
+        return "output-progress"
+    }
+    if ($ExerciseResizeBacklog) {
+        return "resize-backlog"
+    }
+    if ($ExerciseUtf8Split) {
+        return "utf8-split"
+    }
+    if ($ExerciseInvalidUtf8) {
+        return "invalid-utf8"
+    }
+    if ($AutoDetachAfterMs -gt 0) {
+        return "baseline-auto-detach"
+    }
+    return "baseline-manual-detach"
+}
+
 function Write-Utf8SplitHelperScript {
     param([string]$Path)
 
@@ -608,12 +660,16 @@ $savedEnv = @{
     TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8 = $env:TMUX_WIN32_CONSOLE_RELAY_TEST_INVALID_UTF8
 }
 
-$root = Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-relay-smoke-" + [Guid]::NewGuid().ToString("N"))
+$root = if ([string]::IsNullOrWhiteSpace($RootPath)) {
+    Join-Path ([System.IO.Path]::GetTempPath()) ("tmux-win32-console-relay-smoke-" + [Guid]::NewGuid().ToString("N"))
+} else {
+    $RootPath
+}
 $label = "$LabelPrefix-" + [Guid]::NewGuid().ToString("N")
 $config = Join-Path $root "empty.conf"
 $utf8SplitMarker = ([string][char]0x6587) + "UTF8-SPLIT-OK"
 $invalidUtf8Prefix = "UTF8-INVALID-PREFIX-"
-New-Item -ItemType Directory -Path $root | Out-Null
+New-Item -ItemType Directory -Path $root -Force | Out-Null
 New-Item -ItemType File -Path $config | Out-Null
 
 try {
@@ -865,7 +921,7 @@ try {
                 "attach-session",
                 "-t",
                 "relay"
-            ) -TimeoutMs 20000 -AfterStart {
+            ) -TimeoutMs 30000 -AfterStart {
                 param([int]$AttachPid)
 
                 Start-Sleep -Milliseconds 500
@@ -976,7 +1032,7 @@ try {
                     "-t",
                     "relay",
                     "-l",
-                    "for /L %i in (1,1,6000) do @echo relay-progress-0123456789abcdefghijklmnopqrstuvwxyz"
+                    "for /L %i in (1,1,20000) do @echo relay-progress-0123456789abcdefghijklmnopqrstuvwxyz"
                 ) | Out-Null
                 Invoke-Tmux -Arguments @(
                     "-f",
@@ -988,7 +1044,7 @@ try {
                     "relay",
                     "Enter"
                 ) | Out-Null
-                Start-Sleep -Milliseconds 250
+                Start-Sleep -Milliseconds 100
                 Invoke-Tmux -Arguments @(
                     "-f",
                     $config,
@@ -1034,7 +1090,7 @@ try {
                 "attach-session",
                 "-t",
                 "relay"
-            ) -TimeoutMs 20000 -AfterStart {
+            ) -TimeoutMs 30000 -AfterStart {
                 param([int]$AttachPid)
 
                 Start-Sleep -Milliseconds 750
@@ -1047,7 +1103,7 @@ try {
                     "-t",
                     "relay",
                     "-l",
-                    "for /L %i in (1,1,9000) do @echo relay-resize-backlog-0123456789abcdefghijklmnopqrstuvwxyz"
+                    "for /L %i in (1,1,20000) do @echo relay-resize-backlog-0123456789abcdefghijklmnopqrstuvwxyz"
                 ) | Out-Null
                 Invoke-Tmux -Arguments @(
                     "-f",
@@ -1059,7 +1115,7 @@ try {
                     "relay",
                     "Enter"
                 ) | Out-Null
-                Start-Sleep -Milliseconds 250
+                Start-Sleep -Milliseconds 100
                 $script:restoreConsoleSize = Get-ConsoleWindowSize
                 $script:resizeTarget = Get-AlternateConsoleWindowSize `
                     -Width $script:restoreConsoleSize.Width `
@@ -1086,6 +1142,10 @@ try {
             }
         } else {
             Write-Host "Press Ctrl-b then d to detach. Logs will be checked afterward: $root"
+            $attachTimeoutMs = 0
+            if ($AutoDetachAfterMs -gt 0) {
+                $attachTimeoutMs = $AutoDetachAfterMs + 15000
+            }
             $attach = Invoke-TmuxInteractive -Arguments @(
                 "-f",
                 $config,
@@ -1095,7 +1155,22 @@ try {
                 "attach-session",
                 "-t",
                 "relay"
-            )
+            ) -TimeoutMs $attachTimeoutMs -AfterStart {
+                param([int]$AttachPid)
+
+                if ($AutoDetachAfterMs -gt 0) {
+                    Start-Sleep -Milliseconds $AutoDetachAfterMs
+                    Invoke-Tmux -Arguments @(
+                        "-f",
+                        $config,
+                        "-L",
+                        $label,
+                        "detach-client",
+                        "-t",
+                        "client-$AttachPid"
+                    ) | Out-Null
+                }
+            }
         }
 
         $attachCode = $attach.ExitCode
@@ -1305,6 +1380,51 @@ try {
         } else {
             Write-Host "Native-console relay smoke passed."
         }
+        Write-SmokeResult -Path $ResultPath -Result ([ordered]@{
+            scenario = Get-SmokeScenarioName
+            passed = $true
+            attachExitCode = $attachCode
+            relayMode = $relayMode
+            relayIdentify = $relayIdentify
+            inputCredit = $inputCredit
+            directOutput = $directOutput
+            outputAbort = $outputAbort
+            transportLost = $transportLost
+            closePending = $closePending
+            inputPauseCount = $inputPauseCount
+            inputResumeCount = $inputResumeCount
+            inputReturnedCount = $inputReturnedCount
+            inputPeakReserved = $inputPeakReserved
+            inputPeakBuffered = $inputPeakBuffered
+            outputProgressCount = $outputProgressCount
+            redrawDeferredCount = $redrawDeferredCount
+            waitingForRedrawCount = $waitingForRedrawCount
+            statusRedrawCount = $statusRedrawCount
+            outputProgressSmallProgressCount = $outputProgressSmallProgressCount
+            outputProgressSmallStatusRedrawCount = $outputProgressSmallStatusRedrawCount
+            outputProgressSmallThresholdDeferredCount = $outputProgressSmallThresholdDeferredCount
+            outputProgressLargeProgressCount = $outputProgressLargeProgressCount
+            outputProgressLargeStatusRedrawCount = $outputProgressLargeStatusRedrawCount
+            outputProgressLargeThresholdDeferredCount = $outputProgressLargeThresholdDeferredCount
+            utf8SplitVisible = $utf8SplitVisible
+            utf8SplitCarryLogged = $utf8SplitCarryLogged
+            invalidUtf8PrefixVisible = $invalidUtf8PrefixVisible
+            invalidUtf8Failure = $invalidUtf8Failure
+            resizeClientLog = $resizeClientLog
+            resizeServerLog = $resizeServerLog
+            resizeTarget = if ($resizeTarget -ne $null) {
+                "{0}x{1}" -f $resizeTarget.Width, $resizeTarget.Height
+            } else {
+                $null
+            }
+            resizeObserved = if ($resizeObserved -ne $null) {
+                "{0}x{1}" -f $resizeObserved.Width, $resizeObserved.Height
+            } else {
+                $null
+            }
+            logs = $root
+            failures = @($failures)
+        })
         if ($RemoveLogsOnSuccess) {
             Remove-Item -LiteralPath $root -Recurse -Force
         }
@@ -1331,7 +1451,60 @@ try {
     } else {
         Write-Host "Native-console relay smoke failed."
     }
+    Write-SmokeResult -Path $ResultPath -Result ([ordered]@{
+        scenario = Get-SmokeScenarioName
+        passed = $false
+        attachExitCode = $attachCode
+        relayMode = $relayMode
+        relayIdentify = $relayIdentify
+        inputCredit = $inputCredit
+        directOutput = $directOutput
+        outputAbort = $outputAbort
+        transportLost = $transportLost
+        closePending = $closePending
+        inputPauseCount = $inputPauseCount
+        inputResumeCount = $inputResumeCount
+        inputReturnedCount = $inputReturnedCount
+        inputPeakReserved = $inputPeakReserved
+        inputPeakBuffered = $inputPeakBuffered
+        outputProgressCount = $outputProgressCount
+        redrawDeferredCount = $redrawDeferredCount
+        waitingForRedrawCount = $waitingForRedrawCount
+        statusRedrawCount = $statusRedrawCount
+        outputProgressSmallProgressCount = $outputProgressSmallProgressCount
+        outputProgressSmallStatusRedrawCount = $outputProgressSmallStatusRedrawCount
+        outputProgressSmallThresholdDeferredCount = $outputProgressSmallThresholdDeferredCount
+        outputProgressLargeProgressCount = $outputProgressLargeProgressCount
+        outputProgressLargeStatusRedrawCount = $outputProgressLargeStatusRedrawCount
+        outputProgressLargeThresholdDeferredCount = $outputProgressLargeThresholdDeferredCount
+        utf8SplitVisible = $utf8SplitVisible
+        utf8SplitCarryLogged = $utf8SplitCarryLogged
+        invalidUtf8PrefixVisible = $invalidUtf8PrefixVisible
+        invalidUtf8Failure = $invalidUtf8Failure
+        resizeClientLog = $resizeClientLog
+        resizeServerLog = $resizeServerLog
+        resizeTarget = if ($resizeTarget -ne $null) {
+            "{0}x{1}" -f $resizeTarget.Width, $resizeTarget.Height
+        } else {
+            $null
+        }
+        resizeObserved = if ($resizeObserved -ne $null) {
+            "{0}x{1}" -f $resizeObserved.Width, $resizeObserved.Height
+        } else {
+            $null
+        }
+        logs = $root
+        failures = @($failures)
+    })
     exit 1
+} catch {
+    Write-SmokeResult -Path $ResultPath -Result ([ordered]@{
+        scenario = Get-SmokeScenarioName
+        passed = $false
+        error = $_.Exception.ToString()
+        logs = if (Test-Path -LiteralPath $root) { $root } else { $null }
+    })
+    throw
 } finally {
     if ($restoreConsoleSize -ne $null) {
         try {

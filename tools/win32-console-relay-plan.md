@@ -475,6 +475,14 @@ under MSYS2.
 - `tools/win32-console-relay-smoke.ps1`
   Baseline attach and detach on the native-console relay path. It now also
   checks that relay-mode logs include Win32 input credit activity.
+- `tools/win32-console-relay-coverage.ps1`
+  Programmatic real-console harness. It launches the relay smoke in fresh
+  native console windows from a redirected runner, collects structured result
+  files, and covers a stable default suite of baseline attach, input-credit,
+  detach-under-backlog, UTF-8, invalid UTF-8, output-loss, and
+  transport-loss cases without manual `Ctrl-b d`. The
+  `output-progress` and `resize-backlog` cases remain available as explicit
+  opt-in backlog-sensitive probes.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseOutputProgress`
   Relay output-progress coverage. It generates sustained console output,
   forces status redraws across both a lighter output phase and a heavy backlog
