@@ -837,19 +837,12 @@ input_key_mouse(struct window_pane *wp, struct mouse_event *m)
 	size_t		 len;
 
 	/* Ignore events if no mouse mode or the pane is not visible. */
-	if (m->ignore || (s->mode & ALL_MOUSE_MODES) == 0) {
-		log_debug("%s: ignoring mouse for %%%u (ignore=%d, mode=%s)",
-		    __func__, wp->id, m->ignore, screen_mode_to_string(s->mode));
+	if (m->ignore || (s->mode & ALL_MOUSE_MODES) == 0)
 		return;
-	}
-	if (cmd_mouse_at(wp, m, &x, &y, 0) != 0) {
-		log_debug("%s: mouse not in pane %%%u", __func__, wp->id);
+	if (cmd_mouse_at(wp, m, &x, &y, 0) != 0)
 		return;
-	}
-	if (!window_pane_visible(wp)) {
-		log_debug("%s: pane %%%u not visible for mouse", __func__, wp->id);
+	if (!window_pane_visible(wp))
 		return;
-	}
 	if (!input_key_get_mouse(s, m, x, y, &buf, &len))
 		return;
 	log_debug("writing mouse %.*s to %%%u", (int)len, buf, wp->id);

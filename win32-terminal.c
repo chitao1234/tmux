@@ -33,7 +33,7 @@ win32_terminal_client_input_mode(int mouse_active)
 	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
 	mode &= ~(ENABLE_ECHO_INPUT|ENABLE_LINE_INPUT|ENABLE_PROCESSED_INPUT);
 	if (mouse_active) {
-		mode |= ENABLE_EXTENDED_FLAGS|ENABLE_MOUSE_INPUT;
+		mode |= ENABLE_EXTENDED_FLAGS;
 #ifdef ENABLE_QUICK_EDIT_MODE
 		mode &= ~ENABLE_QUICK_EDIT_MODE;
 #endif

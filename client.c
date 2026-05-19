@@ -682,9 +682,6 @@ client_win32_input_start(void)
 	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
-	else
-		win32_io_reader_set_console_mouse_mode(client_win32_input,
-		    client_win32_mouse_mode);
 	client_win32_input_update_reading();
 }
 
@@ -721,9 +718,6 @@ client_win32_set_mouse_mode(uint32_t mouse_mode)
 		return;
 	if (client_console_ready)
 		(void)win32_terminal_set_client_mouse_mode(
-		    client_win32_mouse_mode);
-	if (client_win32_input != NULL)
-		win32_io_reader_set_console_mouse_mode(client_win32_input,
 		    client_win32_mouse_mode);
 }
 

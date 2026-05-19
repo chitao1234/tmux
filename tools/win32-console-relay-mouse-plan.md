@@ -2,7 +2,10 @@
 
 Date: 2026-05-19
 
-Status: Implemented; native relay path fixed, pane-app mode coverage still needs a dedicated native helper
+Status: Implemented as a direct byte-path migration. Relay mouse-state
+plumbing and runtime console-mode toggles landed; the console reader no
+longer performs Win32 mouse-record translation. Real native-console mouse
+generation still needs a stronger desktop-input validation harness.
 
 Related docs:
 
@@ -11,71 +14,67 @@ Related docs:
 
 ## Goal
 
-Make mouse work for native-console tmux clients on the Win32 console relay
-path, including TUI applications inside tmux that rely on SGR mouse.
+Keep relay mouse on Win32 inside tmux's normal tty byte-stream model.
 
-This plan keeps the existing tmux tty input model:
+That means:
 
-- the client still relays terminal input to the server;
-- the server still parses ordinary tty byte streams;
-- tmux's existing mouse parser and pane-side mouse forwarding remain the
-  authoritative implementation.
+- the client continues to relay terminal input bytes to the server;
+- the server continues to parse normal tty input, including mouse;
+- tmux's existing tty and pane-side mouse logic stays authoritative.
 
-The Win32 change is only at the native console boundary.
+The Win32 work is only at the native console boundary.
 
-## Current Problem
+## Problem Statement
 
-Today the native-console relay client reads console input as a byte stream via
-`ReadFile()`. That works for keyboard input, but Windows mouse input is not
-delivered on that path. Mouse arrives as console input records and is currently
-not translated into the xterm/SGR mouse sequences that tmux already expects.
+The earlier Win32 relay mouse work translated `MOUSE_EVENT_RECORD`s into SGR
+inside the client console reader. That fixed one host behavior, but it was
+still a low-quality port boundary:
 
-That produces this split:
+- it duplicated tty mouse semantics in a Win32-specific translator;
+- it split keyboard and mouse across two different native input paths;
+- it made relay mouse depend on console-record behavior rather than the same
+  tty byte contract tmux already uses everywhere else.
 
-- resize works because the relay has an explicit `MSG_WIN32_TTY_RESIZE` path;
-- mouse does not work because no mouse event reaches `tty_keys_mouse()`.
+For the final product direction, relay input should stay byte-oriented.
 
 ## Non-Goals
 
-- Do not add a separate Win32-only mouse protocol carrying parsed tmux mouse
-  events.
-- Do not redesign the relay away from AF_UNIX.
+- Do not add a separate Win32-only mouse protocol.
+- Do not redesign relay away from AF_UNIX here.
 - Do not move native-console input handling into the detached server.
-- Do not do a full focus-event design pass here.
+- Do not solve full auth or focus-event policy in this document.
 
-## Design
+## Chosen Design
 
 ### 1. Keep the tty byte-stream contract
 
-The relay must continue to feed normal tty input bytes into the server.
+Relay continues to feed ordinary tty bytes into the server.
 
 Reason:
 
 - tmux already parses mouse in tty code;
-- pane applications inside tmux already receive mouse through the existing
-  input path;
-- a new Win32-only mouse protocol would duplicate tmux semantics in a second
-  transport layer.
+- pane applications already receive mouse through that path;
+- a second Win32-only mouse interpretation layer is unnecessary duplication.
 
-### 2. Add relay mouse state from server to client
+### 2. Keep relay mouse state from server to client
 
-The client needs to know when tmux wants outer-terminal mouse capture.
+The client still needs to know when the outer terminal should be in mouse
+capture mode.
 
-Add a small server-to-client message that carries the current relay mouse mode:
+That state is carried through `MSG_WIN32_TTY_STATE` and continues to represent
+tmux's outer-terminal mouse mode:
 
-- off
-- standard
-- button
-- all-motion
+- off;
+- standard;
+- button;
+- all-motion.
 
-This state is derived from the tty mode that tmux already computes for the
-outer terminal.
+### 3. Toggle console mode only
 
-### 3. Toggle native console mouse capture explicitly
+When relay mouse is active on the native console client:
 
-When relay mouse is active on the client console:
-
-- enable `ENABLE_MOUSE_INPUT`;
+- keep `ENABLE_VIRTUAL_TERMINAL_INPUT`;
+- keep raw-input behavior;
 - set `ENABLE_EXTENDED_FLAGS`;
 - clear `ENABLE_QUICK_EDIT_MODE`.
 
@@ -83,121 +82,113 @@ When relay mouse is inactive:
 
 - restore the normal raw-input baseline derived from the saved console mode.
 
-This makes relay mouse first-class without permanently stealing normal console
-selection behavior when tmux is not using mouse capture.
+This keeps relay mouse first-class without permanently stealing selection
+behavior when tmux is not requesting mouse capture.
 
-### 4. Translate native mouse records into SGR mouse
+### 4. Keep the console reader on `ReadFile()` only
 
-Inside the Win32 console reader:
+The native console reader no longer switches into a Win32 mouse-record path.
 
-- inspect console input records when relay mouse is active;
-- consume `MOUSE_EVENT_RECORD` entries with `ReadConsoleInputW()`;
-- translate them into SGR mouse sequences;
-- append those bytes into the existing relay input buffer.
+Specifically:
 
-SGR is the right synthesized format because tmux already preserves richer
-release semantics when the outer event is SGR-form.
+- no `ReadConsoleInputW()` mouse handling;
+- no `MOUSE_EVENT_RECORD` to SGR translation;
+- no relay-reader mouse state attached to the reader endpoint.
 
-### 5. Keep keyboard input on the current path
+The reader stays a pure byte reader and relies on the native console host to
+produce VT input bytes when mouse capture is enabled.
 
-Do not replace the current keyboard byte path with a full custom key
-translator in this change.
+### 5. Treat synthetic console-record injection as non-authoritative
 
-When relay mouse is active, the console reader may need to filter obvious
-non-byte records such as:
+`WriteConsoleInputW()` mouse-record injection is still useful as a lightweight
+probe, but it is no longer treated as authoritative coverage for direct
+`ReadFile()` VT mouse generation.
 
-- mouse records;
-- window records;
-- menu/focus records;
-- key-up and modifier-only key records that would otherwise stall the byte
-  reader.
+Reason:
 
-But ordinary keyboard bytes should still come from the existing `ReadFile()`
-path so this work stays scoped to the mouse gap.
+- direct VT mouse generation is a host behavior at the real console boundary;
+- synthetic `MOUSE_EVENT_RECORD` injection may not surface as VT bytes even if
+  real desktop mouse input does.
 
-## Implementation Stages
+So automated smoke can still verify relay mouse-state plumbing, but real
+end-to-end generation needs a true desktop-input harness or manual validation.
+
+## Implemented Work
 
 ### Stage 1. Relay state plumbing
 
-- Add a new protocol message for relay tty state.
-- Add a small state struct carrying mouse mode.
-- Teach the server to send state updates for Win32 relay clients when outer
-  mouse mode changes.
-- Teach the client to receive and cache that state.
+Completed.
+
+- `MSG_WIN32_TTY_STATE` carries relay mouse mode from server to client.
+- the client caches that state and applies it at runtime.
 
 ### Stage 2. Console mode management
 
-- Refactor Win32 client console input mode setup so runtime mouse-mode toggles
-  reuse one helper.
-- Apply the relay mouse state to console mode changes at runtime.
+Completed.
 
-### Stage 3. Console reader translation
+- Win32 client console input mode uses one helper for runtime toggles.
+- relay mouse state drives console-mode changes on the client.
 
-- Extend the Win32 console reader endpoint with relay mouse state.
-- Add a console-reader setter so the client can update that state.
-- When relay mouse is active, inspect console input records before falling back
-  to `ReadFile()`.
-- Translate:
-  - button press;
-  - button release;
-  - drag;
-  - all-motion hover;
-  - wheel.
-- Feed translated SGR bytes into the existing reader buffer and event path.
+### Stage 3. Direct byte-path reader
+
+Completed.
+
+- the console reader no longer stores relay mouse mode;
+- the reader no longer peeks or consumes console input records;
+- the reader stays on the existing `ReadFile()` byte path.
 
 ### Stage 4. Validation
 
-Implemented for the relay boundary.
+Current state:
 
-- Build with MSYS2 UCRT64 `make`.
-- Re-run native PowerShell smoke for the relay path to catch regressions.
-- Extend `tools/win32-console-relay-smoke.ps1` with `-ExerciseMouse` so it:
-  - injects native mouse records through `CONIN$`;
-  - verifies relay mouse-state toggles on the client;
-  - verifies the server logs parsed SGR mouse input and reaches the pane mouse
-    binding path.
+- build validation works with MSYS2 UCRT64 `make`;
+- baseline native relay smoke still passes;
+- relay mouse-state toggles are observable in native attach logs;
+- synthetic `CONIN$` mouse-record injection is now only best-effort evidence.
 
-Remaining coverage gap:
+Current validation gap:
 
-- the current PowerShell pane helper used by the smoke does not successfully
-  establish pane mouse mode (`mouse_any_flag` stays `0`), so end-to-end
-  pane-side byte capture still needs a smaller dedicated native helper rather
-  than a PowerShell host.
+- a synthetic mouse record can fail to produce VT bytes on the direct path even
+  when the product design is correct;
+- real native-console mouse generation still needs a desktop-input harness or
+  explicit manual verification on supported console hosts.
 
 ## Risks
 
-### 1. Console queue ordering
+### 1. Console-host variability
 
-Mixing `ReadConsoleInputW()` for mouse records with `ReadFile()` for keyboard
-bytes must not strand the reader on non-byte records.
-
-Mitigation:
-
-- only enter record-aware mode when relay mouse is active;
-- explicitly consume records that cannot produce tty bytes.
-
-### 2. Coordinate mismatch
-
-Windows console mouse positions are screen-buffer coordinates, not necessarily
-visible-window coordinates.
+Different native console hosts may differ in when and how VT mouse bytes are
+generated for real mouse input.
 
 Mitigation:
 
-- convert against `GetConsoleScreenBufferInfo()` before synthesizing SGR
-  coordinates.
+- keep the product boundary byte-oriented;
+- validate on supported real native console hosts with actual desktop input.
 
-### 3. Quick Edit interaction
+### 2. Quick Edit interaction
 
-Quick Edit can steal mouse interaction from the relay client.
+Quick Edit can still steal mouse interaction from the relay client.
 
 Mitigation:
 
 - disable it only while relay mouse capture is active;
 - restore the normal raw-input baseline otherwise.
 
+### 3. False confidence from synthetic probes
+
+A failing synthetic mouse-record probe does not necessarily mean real mouse
+input is broken on the direct VT path.
+
+Mitigation:
+
+- keep smoke output explicit about what was and was not covered;
+- treat real desktop-input coverage as a separate validation target.
+
 ## Exit Criteria
 
-- Native-console relay clients can drive tmux mouse bindings.
-- TUI applications inside tmux receive SGR mouse on Win32 relay.
-- Relay keyboard behavior is not regressed.
-- Existing relay resize behavior remains unchanged.
+- relay mouse state is carried from server to client;
+- the native console client toggles runtime console mode correctly;
+- the console reader remains a pure byte path;
+- baseline relay keyboard and resize behavior remain intact;
+- real native-console VT mouse generation is validated separately with a
+  desktop-input harness or manual native-host testing.

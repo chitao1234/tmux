@@ -227,28 +227,35 @@ The main gaps that still matter are:
    transport loss, but resize-under-backlog and output-progress remain
    host-sensitive and still need continued native-host validation.
 
-6. `pipe-pane` lifecycle:
+6. Real relay mouse generation:
+   the relay mouse path is now intentionally direct `ReadFile()` VT input,
+   so synthetic `WriteConsoleInputW()` mouse-record injection is no longer an
+   authoritative test. A desktop-input harness or equivalent real-console
+   validation is still needed to prove that supported native console hosts
+   produce VT mouse bytes for actual mouse interaction.
+
+7. `pipe-pane` lifecycle:
    ordinary pane death with Win32 `pipe-pane -O`, `-I`, and `-IO` helpers
    still needs native coverage; current smoke only covers explicit pipe close.
 
-7. ConPTY resize rejection path:
+8. ConPTY resize rejection path:
    injected or teardown-time `ResizePseudoConsole()` failure still needs
    targeted validation so the new logging and guard behavior stays correct.
 
-8. Command quoting:
+9. Command quoting:
    keep broadening `cmd.exe` texts containing quotes, `|`, `^`, and
    parentheses beyond the popup editor and popup PTY argv baseline.
 
-9. Win32 path-policy regression matrix:
+10. Win32 path-policy regression matrix:
     keep verifying `/foo`, `\foo`, drive-qualified paths, UNC paths, `~/...`,
     `~\...`, and drive-letter path lists so future changes do not regress the
     now-shared Win32 path grammar.
 
-10. Long and Unicode path shapes:
+11. Long and Unicode path shapes:
     start tmux from long and non-ASCII cwd / executable / config paths and
     verify spawn, config lookup, logs, `PWD`, and reconnect behavior.
 
-11. Glob semantics:
+12. Glob semantics:
     test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names,
     and mixed slash/backslash input for `source-file`.
 
