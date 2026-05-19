@@ -55,6 +55,7 @@ static void	tty_win32_out_callback(void *);
 static void	tty_win32_out_error_callback(void *);
 static void	tty_win32_out_event_callback(void *, uint32_t);
 static int	tty_win32_out_drained(struct tty *);
+static void	tty_win32_update_relay_state(struct tty *, int, int);
 #endif
 static void	tty_start_timer_callback(tmux_event_fd, short, void *);
 static void	tty_clipboard_query_callback(tmux_event_fd, short, void *);
@@ -973,6 +974,22 @@ tty_raw(struct tty *tty, const char *s)
 	}
 }
 
+#ifdef TMUX_WIN32
+static void
+tty_win32_update_relay_state(struct tty *tty, int mode, int changed)
+{
+	struct client			*c = tty->client;
+	struct msg_win32_tty_state	 state;
+
+	if (!c->win32_console || c->peer == NULL || c->win32_tty_transport_lost)
+		return;
+	if ((changed & ALL_MOUSE_MODES) == 0)
+		return;
+	state.mouse_mode = mode & ALL_MOUSE_MODES;
+	proc_send(c->peer, MSG_WIN32_TTY_STATE, -1, &state, sizeof state);
+}
+#endif
+
 void
 tty_putcode(struct tty *tty, enum tty_code_code code)
 {
@@ -1283,6 +1300,9 @@ tty_update_mode(struct tty *tty, int mode, struct screen *s)
 		    screen_mode_to_string(mode));
 	}
 
+#ifdef TMUX_WIN32
+	tty_win32_update_relay_state(tty, mode, changed);
+#endif
 	if ((changed & ALL_MOUSE_MODES) && tty_term_has(term, TTYC_KMOUS)) {
 		/*
 		 * If the mouse modes have changed, clear then all and apply

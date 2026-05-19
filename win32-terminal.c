@@ -24,6 +24,23 @@ static UINT	saved_input_cp;
 static UINT	saved_output_cp;
 static int	saved_modes;
 
+static DWORD
+win32_terminal_client_input_mode(int mouse_active)
+{
+	DWORD	mode;
+
+	mode = saved_in_mode;
+	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+	mode &= ~(ENABLE_ECHO_INPUT|ENABLE_LINE_INPUT|ENABLE_PROCESSED_INPUT);
+	if (mouse_active) {
+		mode |= ENABLE_EXTENDED_FLAGS|ENABLE_MOUSE_INPUT;
+#ifdef ENABLE_QUICK_EDIT_MODE
+		mode &= ~ENABLE_QUICK_EDIT_MODE;
+#endif
+	}
+	return (mode);
+}
+
 int
 win32_terminal_is_client_console(void)
 {
@@ -67,9 +84,7 @@ win32_terminal_init_client(char **cause)
 	    saved_input_cp, saved_output_cp);
 	saved_modes = 1;
 
-	mode = saved_in_mode;
-	mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-	mode &= ~(ENABLE_ECHO_INPUT|ENABLE_LINE_INPUT|ENABLE_PROCESSED_INPUT);
+	mode = win32_terminal_client_input_mode(0);
 	if (!SetConsoleMode(hin, mode)) {
 		xasprintf(cause, "couldn't set console input mode: %s",
 		    win32_strerror(GetLastError()));
@@ -129,6 +144,28 @@ win32_terminal_restore_client(void)
 	win32_log_handle("client stdin after restore", hin);
 	win32_log_handle("client stdout after restore", hout);
 	saved_modes = 0;
+}
+
+int
+win32_terminal_set_client_mouse_mode(uint32_t mouse_mode)
+{
+	HANDLE	hin;
+	DWORD	mode;
+
+	if (!saved_modes)
+		return (0);
+	hin = GetStdHandle(STD_INPUT_HANDLE);
+	if (hin == INVALID_HANDLE_VALUE)
+		return (-1);
+	mode = win32_terminal_client_input_mode(mouse_mode != 0);
+	if (!SetConsoleMode(hin, mode)) {
+		log_debug("%s: couldn't set console input mode: %s", __func__,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	log_debug("%s: console mouse mode %#x -> input mode %#lx", __func__,
+	    mouse_mode, (unsigned long)mode);
+	return (0);
 }
 
 int

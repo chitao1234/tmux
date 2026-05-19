@@ -54,6 +54,7 @@ static int		 client_win32_relay_test_output_loss_fired;
 static int		 client_win32_relay_test_transport_lost;
 static int		 client_win32_relay_test_transport_lost_fired;
 static int		 client_win32_transport_lost_flag;
+static uint32_t		 client_win32_mouse_mode;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
 static HANDLE		 client_win32_auth_mapping;
@@ -111,6 +112,7 @@ static void		 client_win32_resize_timer_start(void);
 static void		 client_win32_resize_timer_stop(void);
 static void		 client_win32_input_add_credit(size_t);
 static void		 client_win32_input_dispatch_credit(char *, ssize_t);
+static void		 client_win32_tty_state_dispatch(char *, ssize_t);
 static void		 client_win32_input_note_buffers(const char *);
 static void		 client_win32_input_update_reading(void);
 static int		 client_win32_input_flush_pending(void);
@@ -136,6 +138,7 @@ static int		 client_win32_handle_tty_enabled(void);
 static int		 client_win32_handle_tty_forced(void);
 static int		 client_win32_handle_tty_output_available(void);
 static int		 client_win32_handle_tty_input_available(void);
+static void		 client_win32_set_mouse_mode(uint32_t);
 static void		 client_win32_get_terminal_size(
 			     struct msg_win32_terminal_size *);
 static const char	*client_win32_console_ctrl_name(DWORD);
@@ -679,6 +682,9 @@ client_win32_input_start(void)
 	    client_win32_input_event_callback, NULL);
 	if (client_win32_input == NULL)
 		log_debug("%s: couldn't create console input event", __func__);
+	else
+		win32_io_reader_set_console_mouse_mode(client_win32_input,
+		    client_win32_mouse_mode);
 	client_win32_input_update_reading();
 }
 
@@ -705,6 +711,32 @@ clear_pending:
 		evbuffer_free(client_win32_input_pending);
 		client_win32_input_pending = NULL;
 	}
+}
+
+static void
+client_win32_set_mouse_mode(uint32_t mouse_mode)
+{
+	client_win32_mouse_mode = mouse_mode & ALL_MOUSE_MODES;
+	if (!client_win32_console_relay)
+		return;
+	if (client_console_ready)
+		(void)win32_terminal_set_client_mouse_mode(
+		    client_win32_mouse_mode);
+	if (client_win32_input != NULL)
+		win32_io_reader_set_console_mouse_mode(client_win32_input,
+		    client_win32_mouse_mode);
+}
+
+static void
+client_win32_tty_state_dispatch(char *data, ssize_t datalen)
+{
+	struct msg_win32_tty_state	state;
+
+	if (datalen != sizeof state)
+		fatalx("bad MSG_WIN32_TTY_STATE size");
+	memcpy(&state, data, sizeof state);
+	log_debug("%s: relay mouse mode %#x", __func__, state.mouse_mode);
+	client_win32_set_mouse_mode(state.mouse_mode);
 }
 
 static void
@@ -1727,6 +1759,9 @@ client_dispatch_wait(struct imsg *imsg)
 	case MSG_WIN32_TTY_OUTPUT:
 		client_win32_tty_output(data, datalen);
 		break;
+	case MSG_WIN32_TTY_STATE:
+		client_win32_tty_state_dispatch(data, datalen);
+		break;
 #endif
 	case MSG_OLDSTDERR:
 	case MSG_OLDSTDIN:
@@ -1838,6 +1873,9 @@ client_dispatch_attached(struct imsg *imsg)
 		break;
 	case MSG_WIN32_TTY_OUTPUT:
 		client_win32_tty_output(data, datalen);
+		break;
+	case MSG_WIN32_TTY_STATE:
+		client_win32_tty_state_dispatch(data, datalen);
 		break;
 #endif
 	}

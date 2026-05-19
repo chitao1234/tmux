@@ -77,6 +77,8 @@ void		 win32_io_reader_drain_bev(struct win32_io_endpoint *,
 		     struct bufferevent *);
 void		 win32_io_reader_set_reading(struct win32_io_endpoint *,
 		     int);
+void		 win32_io_reader_set_console_mouse_mode(
+		     struct win32_io_endpoint *, uint32_t);
 size_t		 win32_io_reader_buffered(struct win32_io_endpoint *);
 int		 win32_io_reader_done(struct win32_io_endpoint *);
 int		 win32_io_reader_eof(struct win32_io_endpoint *);
@@ -136,6 +138,7 @@ int		 win32_server_spawn(const char *, uint64_t, char **);
 int		 win32_terminal_prepare_terminfo(void);
 int		 win32_terminal_is_client_console(void);
 int		 win32_terminal_init_client(char **);
+int		 win32_terminal_set_client_mouse_mode(uint32_t);
 int		 win32_terminal_get_size(struct client *, u_int *, u_int *,
 		     u_int *, u_int *);
 void		 win32_terminal_restore_client(void);

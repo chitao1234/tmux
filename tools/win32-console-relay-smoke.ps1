@@ -4,6 +4,7 @@ param(
     [string]$RootPath,
     [string]$ResultPath,
     [int]$AutoDetachAfterMs = 0,
+    [switch]$ExerciseMouse,
     [switch]$ExerciseInputCredit,
     [switch]$SimulateOutputLoss,
     [switch]$SimulateTransportLost,
@@ -142,6 +143,7 @@ public static class Win32ConsoleInput
     {
         [FieldOffset(0)] public ushort EventType;
         [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
+        [FieldOffset(4)] public MOUSE_EVENT_RECORD MouseEvent;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -155,7 +157,24 @@ public static class Win32ConsoleInput
         public uint dwControlKeyState;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct COORD
+    {
+        public short X;
+        public short Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSE_EVENT_RECORD
+    {
+        public COORD dwMousePosition;
+        public uint dwButtonState;
+        public uint dwControlKeyState;
+        public uint dwEventFlags;
+    }
+
     const ushort KEY_EVENT = 0x0001;
+    const ushort MOUSE_EVENT = 0x0002;
     const uint GENERIC_READ = 0x80000000;
     const uint GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 0x00000001;
@@ -174,17 +193,23 @@ public static class Win32ConsoleInput
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr handle);
 
-    public static void WriteText(string text)
+    static IntPtr OpenConsoleInput()
     {
-        if (string.IsNullOrEmpty(text))
-            return;
-
         IntPtr handle = CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0,
             IntPtr.Zero);
         if (handle == new IntPtr(-1))
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 "CreateFileW(CONIN$) failed");
+        return handle;
+    }
+
+    public static void WriteText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        IntPtr handle = OpenConsoleInput();
 
         try
         {
@@ -215,6 +240,36 @@ public static class Win32ConsoleInput
             CloseHandle(handle);
         }
     }
+
+    public static void WriteMouse(short x, short y, uint buttonState,
+        uint controlKeyState, uint eventFlags)
+    {
+        IntPtr handle = OpenConsoleInput();
+
+        try
+        {
+            INPUT_RECORD[] records = new INPUT_RECORD[1];
+            records[0].EventType = MOUSE_EVENT;
+            records[0].MouseEvent.dwMousePosition.X = x;
+            records[0].MouseEvent.dwMousePosition.Y = y;
+            records[0].MouseEvent.dwButtonState = buttonState;
+            records[0].MouseEvent.dwControlKeyState = controlKeyState;
+            records[0].MouseEvent.dwEventFlags = eventFlags;
+
+            uint written;
+            if (!WriteConsoleInputW(handle, records, 1, out written))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "WriteConsoleInputW(mouse) failed");
+            if (written != 1)
+                throw new InvalidOperationException(
+                    "WriteConsoleInputW(mouse) wrote " + written +
+                    " of 1 events");
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
 }
 "@
 }
@@ -237,6 +292,26 @@ function Write-ConsoleInputText {
             Start-Sleep -Milliseconds $ChunkDelayMs
         }
     }
+}
+
+function Write-ConsoleInputMouse {
+    param(
+        [int]$X,
+        [int]$Y,
+        [uint32]$ButtonState,
+        [uint32]$EventFlags = 0,
+        [uint32]$ControlKeyState = 0
+    )
+
+    Initialize-ConsoleInputInterop
+
+    [Win32ConsoleInput]::WriteMouse(
+        [int16]$X,
+        [int16]$Y,
+        $ButtonState,
+        $ControlKeyState,
+        $EventFlags
+    )
 }
 
 function Initialize-ConsoleOutputInterop {
@@ -779,6 +854,9 @@ function Write-SmokeResult {
 }
 
 function Get-SmokeScenarioName {
+    if ($ExerciseMouse) {
+        return "mouse"
+    }
     if ($ExerciseInputCredit) {
         return "input-credit"
     }
@@ -833,6 +911,52 @@ Start-Sleep -Seconds 30
     Write-TextFileUtf8NoBom -Path $Path -Content $content
 }
 
+function Write-MouseHelperScript {
+    param(
+        [string]$Path,
+        [string]$ResultPath
+    )
+
+    $escapedResultPath = $ResultPath.Replace("'", "''")
+    $content = @"
+Start-Sleep -Milliseconds 750
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+`$stdout = [Console]::OpenStandardOutput()
+`$enable = [System.Text.Encoding]::ASCII.GetBytes(
+    ([string][char]27) + '[?1000h' +
+    ([string][char]27) + '[?1002h' +
+    ([string][char]27) + '[?1006h'
+)
+`$stdout.Write(`$enable, 0, `$enable.Length)
+`$stdout.Flush()
+[Console]::Out.WriteLine('MOUSE-READY')
+
+`$input = [Console]::OpenStandardInput()
+`$buffer = New-Object byte[] 256
+`$captured = New-Object 'System.Collections.Generic.List[byte]'
+`$escape = [string][char]27
+
+while (`$true) {
+    `$nread = `$input.Read(`$buffer, 0, `$buffer.Length)
+    if (`$nread -le 0) {
+        break
+    }
+    for (`$i = 0; `$i -lt `$nread; `$i++) {
+        [void]`$captured.Add(`$buffer[`$i])
+    }
+    `$text = [System.Text.Encoding]::ASCII.GetString(`$captured.ToArray())
+    if (`$text.Contains("`${escape}[<0;")) {
+        break
+    }
+}
+
+[System.IO.File]::WriteAllBytes('$escapedResultPath', `$captured.ToArray())
+[Console]::Out.WriteLine('MOUSE-CAPTURED')
+Start-Sleep -Seconds 30
+"@
+    Write-TextFileUtf8NoBom -Path $Path -Content $content
+}
+
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
     throw "This smoke must be run from a real Windows console, not redirected output or the Codex runner."
 }
@@ -860,6 +984,8 @@ $label = "$LabelPrefix-" + [Guid]::NewGuid().ToString("N")
 $config = Join-Path $root "empty.conf"
 $utf8SplitMarker = ([string][char]0x6587) + "UTF8-SPLIT-OK"
 $invalidUtf8Prefix = "UTF8-INVALID-PREFIX-"
+$mouseReadyMarker = "MOUSE-READY"
+$mouseCapturedMarker = "MOUSE-CAPTURED"
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 New-Item -ItemType File -Path $config | Out-Null
 
@@ -876,6 +1002,11 @@ try {
     $utf8SplitVisible = $false
     $utf8SplitCarryLogged = $false
     $invalidUtf8PrefixVisible = $false
+    $mouseResultBytes = [byte[]]@()
+    $mouseResultText = ""
+    $mouseReadyVisible = $false
+    $mouseCapturedVisible = $false
+    $mousePaneFlags = $null
     $resizeConsoleObserved = $null
 
     $env:TMUX = $null
@@ -905,7 +1036,22 @@ try {
     Push-Location $root
     try {
         $sessionCommandArgs = @("cmd.exe")
-        if ($ExerciseInputCredit) {
+        $mouseHelper = $null
+        $mouseHelperCommand = $null
+        if ($ExerciseMouse) {
+            $mouseHelper = Join-Path $root "mouse-helper.ps1"
+            $mouseResult = Join-Path $root "mouse-result.bin"
+            Write-MouseHelperScript -Path $mouseHelper -ResultPath $mouseResult
+            $mouseHelperCommand = Join-Win32Arguments @(
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $mouseHelper
+            )
+        } elseif ($ExerciseInputCredit) {
             $sessionCommandArgs = @("cmd.exe", "/Q", "/K", "findstr .* >nul")
         } elseif ($ExerciseUtf8Split) {
             $splitHelper = Join-Path $root "utf8-split-helper.ps1"
@@ -944,7 +1090,7 @@ try {
             "-s",
             "relay"
         ) + $sessionCommandArgs) | Out-Null
-        if ($ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
+        if ($ExerciseMouse -or $ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
             Invoke-Tmux -Arguments @(
                 "-f",
                 $config,
@@ -956,9 +1102,103 @@ try {
                 "off"
             ) | Out-Null
         }
+        if ($ExerciseMouse) {
+            Invoke-Tmux -Arguments @(
+                "-f",
+                $config,
+                "-L",
+                $label,
+                "set-option",
+                "-g",
+                "mouse",
+                "on"
+            ) | Out-Null
+        }
 
         Write-Host "Launching native-console relay attach."
-        if ($ExerciseInputCredit) {
+        if ($ExerciseMouse) {
+            Write-Host "Relay mouse exercise is enabled. Mouse records will be injected through CONIN$ and pane-side SGR bytes must be captured."
+            Write-Host "Logs will be checked afterward: $root"
+            Clear-Host
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 15000 -AfterStart {
+                param([int]$AttachPid)
+
+                $mouseResult = Join-Path $root "mouse-result.bin"
+
+                Start-Sleep -Milliseconds 500
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "-l",
+                    $mouseHelperCommand
+                ) | Out-Null
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "send-keys",
+                    "-t",
+                    "relay",
+                    "Enter"
+                ) | Out-Null
+
+                if (-not (Wait-ConsoleVisibleText -Needle $script:mouseReadyMarker -TimeoutMs 5000)) {
+                    throw "timed out waiting for mouse helper readiness marker"
+                }
+                $script:mouseReadyVisible = $true
+                $paneFlags = Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "relay:0.0",
+                    "#{mouse_any_flag} #{mouse_button_flag} #{mouse_sgr_flag}"
+                )
+                if ($paneFlags.ExitCode -eq 0 -and $paneFlags.Output.Count -ge 1) {
+                    $script:mousePaneFlags = $paneFlags.Output[0]
+                }
+                Start-Sleep -Milliseconds 500
+
+                Write-ConsoleInputMouse -X 5 -Y 5 -ButtonState 1
+                Start-Sleep -Milliseconds 750
+
+                if (Test-Path -LiteralPath $mouseResult -PathType Leaf) {
+                    $script:mouseResultBytes = [System.IO.File]::ReadAllBytes($mouseResult)
+                    $script:mouseResultText = [System.Text.Encoding]::ASCII.GetString($script:mouseResultBytes)
+                }
+                if (Wait-ConsoleVisibleText -Needle $script:mouseCapturedMarker -TimeoutMs 250) {
+                    $script:mouseCapturedVisible = $true
+                }
+
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
+        } elseif ($ExerciseInputCredit) {
             Write-Host "Relay input-credit exercise is enabled. Large native console input will be injected and the attach client will be detached automatically."
             Write-Host "Logs will be checked afterward: $root"
             $attach = Invoke-TmuxInteractive -Arguments @(
@@ -1445,6 +1685,14 @@ try {
     $utf8SplitCarryLogged = Test-AnyLogMatch $attachLogs `
         "preserving [0-9]+ trailing UTF-8 bytes|resuming with [0-9]+ carried UTF-8 bytes"
     $invalidUtf8Failure = Test-AnyLogMatch $attachLogs "MultiByteToWideChar failed"
+    $relayMouseState = Test-AnyLogMatch $attachLogs "relay mouse mode 0x"
+    $mouseSgrLogged = Test-AnyLogMatch $logs "mouse input"
+    $mousePaneBinding = Test-AnyLogMatch $logs "key MouseDown1Pane: send-keys -M|writing key 0x400000100 \\(MouseDown1Pane\\) to %"
+    $mouseSequencePress = $false
+    if ($ExerciseMouse -and $mouseResultBytes.Length -ne 0) {
+        $mouseSequencePress =
+            $mouseResultText.Contains(([string][char]27) + "[<0;")
+    }
     $resizeClientLog = $false
     $resizeServerLog = $false
     if ($ExerciseResizeBacklog -and $resizeTarget -ne $null) {
@@ -1481,6 +1729,15 @@ try {
         Write-Host "  invalid UTF-8 failure logged: $invalidUtf8Failure"
         Write-Host "  output abort observed: $outputAbort"
         Write-Host "  transport lost observed: $transportLost"
+    }
+    if ($ExerciseMouse) {
+        Write-Host "  mouse ready marker visible: $mouseReadyVisible"
+        Write-Host "  mouse captured marker visible: $mouseCapturedVisible"
+        Write-Host "  pane mouse flags: $mousePaneFlags"
+        Write-Host "  relay mouse state logged: $relayMouseState"
+        Write-Host "  relay SGR mouse logged: $mouseSgrLogged"
+        Write-Host "  pane mouse binding logged: $mousePaneBinding"
+        Write-Host "  pane mouse press captured: $mouseSequencePress"
     }
     if ($SimulateTransportLost) {
         Write-Host "  transport lost observed: $transportLost"
@@ -1531,7 +1788,13 @@ try {
         $failures | ForEach-Object { Write-Host "  $_" }
     }
 
-    if ($ExerciseInputCredit) {
+    if ($ExerciseMouse) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $mouseReadyVisible -and
+            $relayMouseState -and $mouseSgrLogged -and
+            $mousePaneBinding -and
+            $failures.Count -eq 0
+    } elseif ($ExerciseInputCredit) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $inputPauseCount -ge 1 -and
             $inputResumeCount -ge 2 -and $inputReturnedCount -ge 2 -and
@@ -1589,7 +1852,9 @@ try {
     }
     if ($passed) {
         Write-Host ""
-        if ($ExerciseInputCredit) {
+        if ($ExerciseMouse) {
+            Write-Host "Native-console relay mouse smoke passed."
+        } elseif ($ExerciseInputCredit) {
             Write-Host "Native-console relay input-credit smoke passed."
         } elseif ($ExerciseUtf8Split) {
             Write-Host "Native-console relay UTF-8 split smoke passed."
@@ -1638,6 +1903,13 @@ try {
             utf8SplitCarryLogged = $utf8SplitCarryLogged
             invalidUtf8PrefixVisible = $invalidUtf8PrefixVisible
             invalidUtf8Failure = $invalidUtf8Failure
+            mouseReadyVisible = $mouseReadyVisible
+            mouseCapturedVisible = $mouseCapturedVisible
+            mousePaneFlags = $mousePaneFlags
+            relayMouseState = $relayMouseState
+            mouseSgrLogged = $mouseSgrLogged
+            mousePaneBinding = $mousePaneBinding
+            mouseSequencePress = $mouseSequencePress
             resizeClientLog = $resizeClientLog
             resizeServerLog = $resizeServerLog
             resizeConsoleObserved = if ($resizeConsoleObserved -ne $null) {
@@ -1665,7 +1937,9 @@ try {
     }
 
     Write-Host ""
-    if ($ExerciseInputCredit) {
+    if ($ExerciseMouse) {
+        Write-Host "Native-console relay mouse smoke failed."
+    } elseif ($ExerciseInputCredit) {
         Write-Host "Native-console relay input-credit smoke failed."
     } elseif ($ExerciseUtf8Split) {
         Write-Host "Native-console relay UTF-8 split smoke failed."
@@ -1714,6 +1988,13 @@ try {
         utf8SplitCarryLogged = $utf8SplitCarryLogged
         invalidUtf8PrefixVisible = $invalidUtf8PrefixVisible
         invalidUtf8Failure = $invalidUtf8Failure
+        mouseReadyVisible = $mouseReadyVisible
+        mouseCapturedVisible = $mouseCapturedVisible
+        mousePaneFlags = $mousePaneFlags
+        relayMouseState = $relayMouseState
+        mouseSgrLogged = $mouseSgrLogged
+        mousePaneBinding = $mousePaneBinding
+        mouseSequencePress = $mouseSequencePress
         resizeClientLog = $resizeClientLog
         resizeServerLog = $resizeServerLog
         resizeConsoleObserved = if ($resizeConsoleObserved -ne $null) {

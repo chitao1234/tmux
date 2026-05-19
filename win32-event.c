@@ -180,6 +180,9 @@ struct win32_handle_event {
 	int		 throttled;
 	int		 console_queued;
 	int		 console_active;
+	uint32_t	 console_mouse_mode;
+	DWORD		 console_mouse_buttons;
+	DWORD		 console_mouse_active_button;
 	enum win32_handle_event_state state;
 	DWORD		 error;
 };
@@ -305,6 +308,8 @@ static int	win32_handle_event_prepare_console_wait(
 static uint32_t	win32_handle_event_iocp_start(struct win32_handle_event *);
 static void	win32_handle_event_iocp_complete(
 		     struct win32_handle_event *, DWORD, DWORD);
+static int	win32_handle_event_append_input(
+		     struct win32_handle_event *, const void *, size_t);
 static int	win32_handle_event_read_once(struct win32_handle_event *);
 static DWORD WINAPI win32_handle_event_thread(void *);
 static int	win32_console_reader_service_init(void);
@@ -313,6 +318,8 @@ static DWORD WINAPI win32_console_reader_thread(void *);
 static void	win32_console_reader_enqueue_locked(
 		     struct win32_handle_event *);
 static void	win32_console_reader_enqueue(struct win32_handle_event *);
+static int	win32_console_reader_prepare_input(
+		     struct win32_handle_event *);
 static void	win32_console_reader_run(struct win32_handle_event *);
 static int	win32_console_writer_service_init(void);
 static int	win32_console_writer_service_fini(const char *);
@@ -336,6 +343,18 @@ static int	win32_handle_write_console_sanitized(HANDLE, const u_char *,
 		     size_t);
 static int	win32_handle_write_console_utf8(struct win32_handle_writer *,
 		     HANDLE, const void *, size_t);
+static int	win32_console_key_record_ignore(const KEY_EVENT_RECORD *);
+static int	win32_console_read_one_record(HANDLE, INPUT_RECORD *);
+static int	win32_console_peek_one_record(HANDLE, INPUT_RECORD *);
+static int	win32_console_mouse_coord(
+		     const MOUSE_EVENT_RECORD *, u_int *, u_int *);
+static u_int	win32_console_mouse_modifiers(DWORD);
+static int	win32_console_mouse_button_code(DWORD, u_int *);
+static DWORD	win32_console_mouse_first_button(DWORD);
+static int	win32_console_mouse_emit(struct win32_handle_event *, u_int,
+		     u_int, u_int, u_char);
+static int	win32_console_mouse_handle(
+		     struct win32_handle_event *, const MOUSE_EVENT_RECORD *);
 static int	win32_console_test_env_enabled(const char *);
 static size_t	win32_console_test_utf8_split_at(const u_char *, size_t);
 static u_char	*win32_console_test_invalid_utf8(const u_char *, size_t);
@@ -1201,6 +1220,291 @@ out:
 }
 
 static int
+win32_handle_event_append_input(struct win32_handle_event *whe,
+    const void *data, size_t size)
+{
+	enum win32_handle_event_state	state;
+
+	if (size == 0)
+		return (0);
+	EnterCriticalSection(&whe->lock);
+	if (evbuffer_add(whe->input, data, size) != 0) {
+		whe->state = WIN32_HANDLE_EVENT_ERROR;
+		whe->error = ERROR_NOT_ENOUGH_MEMORY;
+	}
+	if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
+		whe->throttled = 1;
+	win32_handle_event_update_ready(whe);
+	state = whe->state;
+	LeaveCriticalSection(&whe->lock);
+	win32_io_service_enqueue_reader(whe);
+	if (state != WIN32_HANDLE_EVENT_RUNNING)
+		return (-1);
+	return (0);
+}
+
+static int
+win32_console_key_record_ignore(const KEY_EVENT_RECORD *key)
+{
+	if (!key->bKeyDown)
+		return (1);
+	switch (key->wVirtualKeyCode) {
+	case VK_SHIFT:
+	case VK_LSHIFT:
+	case VK_RSHIFT:
+	case VK_CONTROL:
+	case VK_LCONTROL:
+	case VK_RCONTROL:
+	case VK_MENU:
+	case VK_LMENU:
+	case VK_RMENU:
+	case VK_CAPITAL:
+	case VK_NUMLOCK:
+	case VK_SCROLL:
+		return (1);
+	}
+	return (0);
+}
+
+static int
+win32_console_read_one_record(HANDLE handle, INPUT_RECORD *record)
+{
+	DWORD	nread;
+
+	if (!ReadConsoleInputW(handle, record, 1, &nread)) {
+		log_debug("%s: ReadConsoleInputW failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	if (nread != 1)
+		return (-1);
+	return (0);
+}
+
+static int
+win32_console_peek_one_record(HANDLE handle, INPUT_RECORD *record)
+{
+	DWORD	nread;
+
+	if (!PeekConsoleInputW(handle, record, 1, &nread)) {
+		log_debug("%s: PeekConsoleInputW failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	if (nread != 1)
+		return (1);
+	return (0);
+}
+
+static int
+win32_console_mouse_coord(const MOUSE_EVENT_RECORD *mouse, u_int *x, u_int *y)
+{
+	CONSOLE_SCREEN_BUFFER_INFO	csbi;
+	HANDLE				hout;
+	int				rx, ry;
+
+	hout = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (hout != INVALID_HANDLE_VALUE &&
+	    GetConsoleScreenBufferInfo(hout, &csbi)) {
+		rx = mouse->dwMousePosition.X - csbi.srWindow.Left;
+		ry = mouse->dwMousePosition.Y - csbi.srWindow.Top;
+		if (rx < 0 || ry < 0 ||
+		    rx > csbi.srWindow.Right - csbi.srWindow.Left ||
+		    ry > csbi.srWindow.Bottom - csbi.srWindow.Top)
+			return (-1);
+		*x = rx;
+		*y = ry;
+		return (0);
+	}
+	if (mouse->dwMousePosition.X < 0 || mouse->dwMousePosition.Y < 0)
+		return (-1);
+	*x = mouse->dwMousePosition.X;
+	*y = mouse->dwMousePosition.Y;
+	return (0);
+}
+
+static u_int
+win32_console_mouse_modifiers(DWORD state)
+{
+	u_int	modifiers = 0;
+
+	if (state & SHIFT_PRESSED)
+		modifiers |= MOUSE_MASK_SHIFT;
+	if (state & (LEFT_CTRL_PRESSED|RIGHT_CTRL_PRESSED))
+		modifiers |= MOUSE_MASK_CTRL;
+	if (state & (LEFT_ALT_PRESSED|RIGHT_ALT_PRESSED))
+		modifiers |= MOUSE_MASK_META;
+	return (modifiers);
+}
+
+static int
+win32_console_mouse_button_code(DWORD button, u_int *code)
+{
+	switch (button) {
+	case FROM_LEFT_1ST_BUTTON_PRESSED:
+		*code = MOUSE_BUTTON_1;
+		return (0);
+	case FROM_LEFT_2ND_BUTTON_PRESSED:
+		*code = MOUSE_BUTTON_2;
+		return (0);
+	case RIGHTMOST_BUTTON_PRESSED:
+		*code = MOUSE_BUTTON_3;
+		return (0);
+#ifdef FROM_LEFT_3RD_BUTTON_PRESSED
+	case FROM_LEFT_3RD_BUTTON_PRESSED:
+		*code = MOUSE_BUTTON_6;
+		return (0);
+#endif
+#ifdef FROM_LEFT_4TH_BUTTON_PRESSED
+	case FROM_LEFT_4TH_BUTTON_PRESSED:
+		*code = MOUSE_BUTTON_7;
+		return (0);
+#endif
+	}
+	return (-1);
+}
+
+static DWORD
+win32_console_mouse_first_button(DWORD buttons)
+{
+	static const DWORD order[] = {
+		FROM_LEFT_1ST_BUTTON_PRESSED,
+		FROM_LEFT_2ND_BUTTON_PRESSED,
+		RIGHTMOST_BUTTON_PRESSED,
+#ifdef FROM_LEFT_3RD_BUTTON_PRESSED
+		FROM_LEFT_3RD_BUTTON_PRESSED,
+#endif
+#ifdef FROM_LEFT_4TH_BUTTON_PRESSED
+		FROM_LEFT_4TH_BUTTON_PRESSED,
+#endif
+	};
+	u_int i;
+
+	for (i = 0; i < nitems(order); i++) {
+		if (buttons & order[i])
+			return (order[i]);
+	}
+	return (0);
+}
+
+static int
+win32_console_mouse_emit(struct win32_handle_event *whe, u_int sgr_b, u_int x,
+    u_int y, u_char type)
+{
+	char	buf[64];
+	size_t	len;
+
+	len = xsnprintf(buf, sizeof buf, "\033[<%u;%u;%u%c", sgr_b, x + 1,
+	    y + 1, type);
+	return (win32_handle_event_append_input(whe, buf, len));
+}
+
+static int
+win32_console_mouse_handle(struct win32_handle_event *whe,
+    const MOUSE_EVENT_RECORD *mouse)
+{
+	static const DWORD order[] = {
+		FROM_LEFT_1ST_BUTTON_PRESSED,
+		FROM_LEFT_2ND_BUTTON_PRESSED,
+		RIGHTMOST_BUTTON_PRESSED,
+#ifdef FROM_LEFT_3RD_BUTTON_PRESSED
+		FROM_LEFT_3RD_BUTTON_PRESSED,
+#endif
+#ifdef FROM_LEFT_4TH_BUTTON_PRESSED
+		FROM_LEFT_4TH_BUTTON_PRESSED,
+#endif
+	};
+	DWORD	buttons, changed, active;
+	u_int	x, y, code, modifiers, sgr_b;
+	u_int	i;
+	int	appended = 0;
+	SHORT	delta;
+
+	if (win32_console_mouse_coord(mouse, &x, &y) != 0)
+		return (0);
+	modifiers = win32_console_mouse_modifiers(mouse->dwControlKeyState);
+	buttons = mouse->dwButtonState &
+	    (FROM_LEFT_1ST_BUTTON_PRESSED|RIGHTMOST_BUTTON_PRESSED|
+	    FROM_LEFT_2ND_BUTTON_PRESSED
+#ifdef FROM_LEFT_3RD_BUTTON_PRESSED
+	    |FROM_LEFT_3RD_BUTTON_PRESSED
+#endif
+#ifdef FROM_LEFT_4TH_BUTTON_PRESSED
+	    |FROM_LEFT_4TH_BUTTON_PRESSED
+#endif
+	    );
+
+	switch (mouse->dwEventFlags) {
+	case 0:
+	case DOUBLE_CLICK:
+		changed = whe->console_mouse_buttons ^ buttons;
+		for (i = 0; i < nitems(order); i++) {
+			if (~changed & order[i])
+				continue;
+			if (win32_console_mouse_button_code(order[i], &code) != 0)
+				continue;
+			sgr_b = code | modifiers;
+			if (buttons & order[i]) {
+				if (win32_console_mouse_emit(whe, sgr_b, x, y,
+				    'M') != 0)
+					return (-1);
+				whe->console_mouse_active_button = order[i];
+			} else {
+				if (win32_console_mouse_emit(whe, sgr_b, x, y,
+				    'm') != 0)
+					return (-1);
+				if (whe->console_mouse_active_button == order[i])
+					whe->console_mouse_active_button = 0;
+			}
+			appended = 1;
+		}
+		whe->console_mouse_buttons = buttons;
+		if (whe->console_mouse_active_button == 0)
+			whe->console_mouse_active_button =
+			    win32_console_mouse_first_button(buttons);
+		return (appended);
+	case MOUSE_MOVED:
+		whe->console_mouse_buttons = buttons;
+		active = whe->console_mouse_active_button;
+		if (active == 0 || (~buttons & active))
+			active = win32_console_mouse_first_button(buttons);
+		whe->console_mouse_active_button = active;
+		if (buttons == 0) {
+			if (~whe->console_mouse_mode & MODE_MOUSE_ALL)
+				return (0);
+			sgr_b = MOUSE_MASK_DRAG|3|modifiers;
+			return (win32_console_mouse_emit(whe, sgr_b, x, y,
+			    'M') == 0);
+		}
+		if ((whe->console_mouse_mode &
+		    (MODE_MOUSE_BUTTON|MODE_MOUSE_ALL)) == 0)
+			return (0);
+		if (active == 0 ||
+		    win32_console_mouse_button_code(active, &code) != 0)
+			return (0);
+		sgr_b = code|MOUSE_MASK_DRAG|modifiers;
+		return (win32_console_mouse_emit(whe, sgr_b, x, y, 'M') == 0);
+	case MOUSE_WHEELED:
+		if (whe->console_mouse_mode == 0)
+			return (0);
+		delta = (SHORT)HIWORD(mouse->dwButtonState);
+		sgr_b = (delta > 0 ? MOUSE_WHEEL_UP : MOUSE_WHEEL_DOWN) |
+		    modifiers;
+		return (win32_console_mouse_emit(whe, sgr_b, x, y, 'M') == 0);
+#ifdef MOUSE_HWHEELED
+	case MOUSE_HWHEELED:
+		if (whe->console_mouse_mode == 0)
+			return (0);
+		delta = (SHORT)HIWORD(mouse->dwButtonState);
+		sgr_b = (delta > 0 ? MOUSE_BUTTON_7 : MOUSE_BUTTON_6) |
+		    modifiers;
+		return (win32_console_mouse_emit(whe, sgr_b, x, y, 'M') == 0);
+#endif
+	}
+	return (0);
+}
+
+static int
 win32_console_test_env_enabled(const char *name)
 {
 	char	*value;
@@ -1263,7 +1567,6 @@ static int
 win32_handle_event_read_once(struct win32_handle_event *whe)
 {
 	DWORD				 nread;
-	enum win32_handle_event_state	 state;
 	char				 buf[8192];
 	u_int				 i;
 
@@ -1312,18 +1615,7 @@ win32_handle_event_read_once(struct win32_handle_event *whe)
 			}
 		}
 	}
-	EnterCriticalSection(&whe->lock);
-	if (evbuffer_add(whe->input, buf, nread) != 0) {
-		whe->state = WIN32_HANDLE_EVENT_ERROR;
-		whe->error = ERROR_NOT_ENOUGH_MEMORY;
-	}
-	if (EVBUFFER_LENGTH(whe->input) >= WIN32_HANDLE_EVENT_HIGH)
-		whe->throttled = 1;
-	win32_handle_event_update_ready(whe);
-	state = whe->state;
-	LeaveCriticalSection(&whe->lock);
-	win32_io_service_enqueue_reader(whe);
-	if (state != WIN32_HANDLE_EVENT_RUNNING)
+	if (win32_handle_event_append_input(whe, buf, nread) != 0)
 		return (-1);
 	return (0);
 }
@@ -1426,6 +1718,47 @@ win32_console_reader_enqueue(struct win32_handle_event *whe)
 	LeaveCriticalSection(&win32_console_reader.lock);
 }
 
+static int
+win32_console_reader_prepare_input(struct win32_handle_event *whe)
+{
+	INPUT_RECORD	record;
+	int		rc;
+
+	for (;;) {
+		rc = win32_console_peek_one_record(whe->handle, &record);
+		if (rc != 0)
+			return (1);
+		switch (record.EventType) {
+		case KEY_EVENT:
+			if (!win32_console_key_record_ignore(&record.Event.KeyEvent))
+				return (1);
+			if (win32_console_read_one_record(whe->handle, &record) != 0)
+				return (1);
+			continue;
+		case MOUSE_EVENT:
+			if (win32_console_read_one_record(whe->handle, &record) != 0)
+				return (1);
+			rc = win32_console_mouse_handle(whe,
+			    &record.Event.MouseEvent);
+			if (rc < 0)
+				return (2);
+			if (rc > 0)
+				return (2);
+			continue;
+		case WINDOW_BUFFER_SIZE_EVENT:
+		case MENU_EVENT:
+		case FOCUS_EVENT:
+			if (win32_console_read_one_record(whe->handle, &record) != 0)
+				return (1);
+			continue;
+		default:
+			if (win32_console_read_one_record(whe->handle, &record) != 0)
+				return (1);
+			continue;
+		}
+	}
+}
+
 static DWORD WINAPI
 win32_console_reader_thread(__unused void *arg)
 {
@@ -1490,6 +1823,18 @@ win32_console_reader_run(struct win32_handle_event *whe)
 		return;
 	if (!win32_handle_event_reading_enabled(whe))
 		return;
+	if (whe->console_mouse_mode != 0) {
+		switch (win32_console_reader_prepare_input(whe)) {
+		case 1:
+			break;
+		case 2:
+			return;
+		default:
+			return;
+		}
+		if (!win32_handle_event_reading_enabled(whe))
+			return;
+	}
 	(void)win32_handle_event_read_once(whe);
 }
 
@@ -2031,6 +2376,25 @@ win32_io_reader_set_reading(struct win32_io_endpoint *endpoint, int enabled)
 		return;
 	EnterCriticalSection(&whe->lock);
 	whe->paused = !enabled;
+	win32_handle_event_update_ready(whe);
+	LeaveCriticalSection(&whe->lock);
+}
+
+void
+win32_io_reader_set_console_mouse_mode(struct win32_io_endpoint *endpoint,
+    uint32_t mouse_mode)
+{
+	struct win32_handle_event	*whe;
+
+	if (endpoint == NULL)
+		return;
+	whe = endpoint->owner;
+	if (whe == NULL || whe->backend != WIN32_HANDLE_EVENT_CONSOLE)
+		return;
+	EnterCriticalSection(&whe->lock);
+	whe->console_mouse_mode = mouse_mode & ALL_MOUSE_MODES;
+	whe->console_mouse_buttons = 0;
+	whe->console_mouse_active_button = 0;
 	win32_handle_event_update_ready(whe);
 	LeaveCriticalSection(&whe->lock);
 }
