@@ -323,7 +323,7 @@ win32_build_argv_command(int argc, char **argv)
 	for (i = 0; i < argc; i++) {
 		quoted = win32_quote_argument(argv[i]);
 		if (quoted == NULL)
-			continue;
+			goto fail;
 		qlen = wcslen(quoted);
 		len = used + qlen + 2;
 		line = xreallocarray(line, len, sizeof *line);
@@ -334,6 +334,9 @@ win32_build_argv_command(int argc, char **argv)
 		free(quoted);
 	}
 	return (line);
+fail:
+	free(line);
+	return (NULL);
 }
 
 static int
@@ -1220,6 +1223,10 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 
 	wcmd = win32_build_command(wp);
+	if (wcmd == NULL) {
+		xasprintf(cause, "couldn't build pane command line");
+		goto fail;
+	}
 	if (win32_validate_cwd(cwd, cause) != 0)
 		goto fail;
 	wcwd = win32_utf8_to_wide(cwd);
@@ -1711,6 +1718,11 @@ win32_job_spawn(const char *cmd, const char *shell, int argc, char **argv,
 	memset(&six, 0, sizeof six);
 	memset(&pi, 0, sizeof pi);
 	wcmd = win32_build_job_command(cmd, shell, argc, argv);
+	if (wcmd == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't build job command line");
+		goto fail;
+	}
 	if (win32_validate_cwd(cwd, cause) != 0)
 		goto fail;
 	if (cwd != NULL)
