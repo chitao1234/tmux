@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-18
+Date: 2026-05-22
 
 Scope: current codebase-wide Win32 implementation review after the AF_UNIX
 auth work landed. This document reflects the current tree, not earlier design
@@ -45,8 +45,9 @@ The remaining problems are the second-order gaps around that progress:
 2. Relay is now explicitly a first-class transport for native console clients,
    not just a fallback. Detached server-side native-console handle I/O still
    does not work.
-3. Several Win32 filesystem and regression-coverage edges remain incomplete,
-   especially glob matching and native Windows path coverage.
+3. Several Win32 filesystem and regression-coverage edges remain incomplete.
+   Basic `source-file` glob expansion now has tmux-side segment matching, but
+   glob escape policy and native Windows path coverage still need more work.
 
 ## Active Priority Findings
 
@@ -82,34 +83,40 @@ Required direction:
 - Treat future relay replacement as gated on usable detached-server console
   handles, not merely on handle transfer.
 
-### P2: Win32 glob and case folding remain incomplete
+### P2: Win32 glob escape policy and path matrix coverage remain incomplete
 
 Files:
 
-- [`win32-glob.c`](../win32-glob.c): `fnmatch()` still uses byte-wise
-  `tolower()` for `FNM_CASEFOLD`.
-- [`win32-glob.c`](../win32-glob.c): globbing still delegates much of the
-  matching shape to `FindFirstFileW`.
+- [`win32-glob.c`](../win32-glob.c): `fnmatch()` now matches UTF-8 input via
+  the Win32 wide-character boundary, and `glob()` now enumerates directories
+  and applies tmux-side segment matching instead of handing the full pattern to
+  `FindFirstFileW`.
 - [`cmd-source-file.c`](../cmd-source-file.c): `source-file` consumes globbed
   paths.
+- [`tools/win32-glob-smoke.ps1`](win32-glob-smoke.ps1): covers bracket
+  expressions, wildcard directory components, ordinary case-insensitive
+  matching, mixed slash/backslash input, and a Unicode filename baseline.
 
 Problem:
 
-Case folding is still ASCII-only over bytes, and the Win32 glob path still
-does not implement full tmux/POSIX matching semantics for Unicode names,
-bracket expressions, escapes, UNC paths, or slash/backslash normalization.
+The raw Windows wildcard delegation problem is fixed for the covered
+`source-file` cases, but the port still does not have a complete product policy
+for glob escaping with native backslash paths, UNC path edge cases, literal
+glob metacharacters in filenames, POSIX character classes/collation, or
+case-sensitive Windows directory configurations.
 
 Why it matters:
 
-Globbed path consumers can still behave differently on Win32 than on Unix,
-especially for non-ASCII filenames and more structured patterns.
+Globbed path consumers can still behave differently on Win32 than on Unix at
+the edges where Windows path syntax and POSIX glob escape syntax overlap.
 
 Required direction:
 
-- Enumerate entries with `FindFirstFileW`, but apply matching with a deliberate
-  tmux/POSIX policy.
-- Add tests for `*`, `?`, bracket expressions, escapes, drive paths, UNC
-  paths, Unicode names, and mixed slash/backslash input.
+- Decide and document how `source-file` should distinguish a native backslash
+  path separator from a glob escape before normalizing the path for `glob()`.
+- Expand native PowerShell coverage for escapes, literal `[` / `]` filenames,
+  drive paths, UNC paths, long paths, and any case-sensitive directory
+  configurations this port needs to support.
 
 ## Retired Findings
 
@@ -256,8 +263,12 @@ The main gaps that still matter are:
     verify spawn, config lookup, logs, `PWD`, and reconnect behavior.
 
 12. Glob semantics:
-    test `*`, `?`, `[abc]`, escapes, drive paths, UNC paths, Unicode names,
-    and mixed slash/backslash input for `source-file`.
+    baseline coverage now exists for `*`, `?`-style segment matching through
+    bracket/wildcard cases, wildcard directory components, ordinary
+    case-insensitive matching, mixed slash/backslash input, and Unicode
+    filenames through `tools/win32-glob-smoke.ps1`. Remaining coverage should
+    target escapes, literal glob metacharacter filenames, drive paths, UNC
+    paths, long paths, and case-sensitive directories.
 
 ## Recommended Implementation Order
 
