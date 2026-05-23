@@ -54,14 +54,15 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	if (flags & CLIENT_WIN32_HELPER)
 		argv[i++] = xstrdup("-w");
 	cmd = win32_build_argv_command(i, argv);
+	wexe = win32_utf8_to_wide(exe_utf8);
 	while (i-- > 0)
 		free(argv[i]);
 	free(argv);
 	if (cmd == NULL) {
+		free(wexe);
 		xasprintf(cause, "couldn't build server command line");
 		return (-1);
 	}
-	wexe = win32_utf8_to_wide(exe_utf8);
 	if (wexe == NULL) {
 		free(cmd);
 		xasprintf(cause, "couldn't convert executable path");
