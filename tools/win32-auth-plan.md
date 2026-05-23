@@ -120,19 +120,22 @@ This is the only missing primitive. Everything else should stay tmux-shaped.
 
 1. Client connects to the AF_UNIX socket.
 2. Server puts the connection in `auth-pending` state.
-3. Server sends a fresh random nonce to the client.
+3. Server sends a fresh random nonce and its PID to the client.
 4. Client creates a small unnamed kernel object in its own process and writes
    the nonce into it.
-5. Client sends:
+5. Client opens the server process for handle duplication.
+6. Client duplicates the proof object and a limited-query client process handle
+   into the server process.
+7. Client sends:
    - its PID;
-   - the handle value for that proof object.
-6. Server opens the claimed process.
-7. Server duplicates the proof handle from that process.
-8. Server reads back the nonce from the duplicated object.
-9. If the nonce matches, the server treats that process as the authenticated
-   peer process for the connection.
-10. Server opens the token from that same process and applies admission policy.
-11. Only then does normal tmux identify traffic continue.
+   - the server-local handle value for that proof object;
+   - the server-local handle value for the limited-query client process.
+8. Server reads back the nonce from the proof object.
+9. Server verifies that the supplied process handle belongs to the claimed PID.
+10. If the nonce and process binding match, the server treats that process as
+   the authenticated peer process for the connection.
+11. Server opens the token from that same process and applies admission policy.
+12. Only then does normal tmux identify traffic continue.
 
 This is not "extra auth policy." It is only a peer-credential substitute for
 Win32 AF_UNIX.
@@ -144,8 +147,8 @@ to trust it. The server must prove to itself that the connecting client can send
 both:
 
 - a PID;
-- a handle that really lives inside that process and contains the server's
-  challenge value.
+- a proof handle that the client can place into the server process and that
+  contains the server's challenge value.
 
 That is the minimum shape of a trustworthy process bind.
 
@@ -223,6 +226,13 @@ That means:
 
 This keeps direct-handle transfer small and consistent with the peer-credential
 model.
+
+The current implementation lets the server reopen the authenticated process for
+`PROCESS_DUP_HANDLE` when Windows permits it, preserving the same-integrity
+direct-handle path. When the client is higher integrity than the server, the
+auth step still succeeds because the client pushed the proof and identity
+handles into the server; direct-handle reopen may fail in that direction, so
+ordinary native-console clients must continue to use the console relay path.
 
 Relay clients still go through the same admission step. Authentication is about
 who may become a tmux client, not just who may transfer direct terminal handles.

@@ -501,6 +501,28 @@ function Test-ExplicitMissingParentStartup {
     return "explicit -S startup with missing parent"
 }
 
+function Test-ExplicitLocalAppDataStartup {
+    $root = Join-Path $env:LOCALAPPDATA ("tmux-explicit-" + [guid]::NewGuid().ToString("N"))
+    $socketPath = Join-Path $root "default"
+
+    try {
+        Invoke-Tmux -Arguments @("-S", $socketPath, "start-server") | Out-Null
+        $socketResult = Invoke-Tmux -Arguments @("-S", $socketPath, "display-message", "-p", "#{socket_path}")
+        $resolved = ($socketResult.Output | Select-Object -Last 1).Trim()
+
+        Assert-True (Test-ComparablePathEquals $resolved $socketPath) "resolved socket path '$resolved' did not match expected '$socketPath'"
+        Assert-True (Test-Path -LiteralPath $socketPath) "explicit LOCALAPPDATA startup did not create socket path: $socketPath"
+
+        Invoke-Tmux -Arguments @("-S", $socketPath, "kill-server") | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath ($socketPath + ".lock"))) "explicit LOCALAPPDATA startup left a .lock file: $socketPath.lock"
+    } finally {
+        if (Test-Path -LiteralPath $root) {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
+    }
+    return "explicit -S startup under LOCALAPPDATA"
+}
+
 function Test-InheritedSocketStartup {
     $socketPath = Join-Path $script:ArtifactRoot "Env\Sock"
     $tmuxValue = $socketPath + ",123,0"
@@ -520,7 +542,7 @@ function Test-UnsafeExplicitSocketRejected {
     $output = $result.Output -join "`n"
 
     Assert-True ($result.ExitCode -ne 0) "unsafe explicit socket path unexpectedly succeeded: $socketPath"
-    Assert-True ($output -match "user-owned|reparse|existing directory|not a directory") "unsafe explicit socket path failed without a trust-policy error: $output"
+    Assert-True ($output -match "trusted user|user-owned|reparse|existing directory|not a directory") "unsafe explicit socket path failed without a trust-policy error: $output"
     Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $socketPath))) "unsafe explicit socket path unexpectedly created parent directories: $socketPath"
     return "unsafe explicit -S startup rejection"
 }
@@ -636,6 +658,7 @@ try {
     $results.Add((Test-DefaultLabelStartup))
     $results.Add((Test-ExplicitSocketAliasing))
     $results.Add((Test-ExplicitMissingParentStartup))
+    $results.Add((Test-ExplicitLocalAppDataStartup))
     $results.Add((Test-InheritedSocketStartup))
     $results.Add((Test-UnsafeExplicitSocketRejected))
     $results.Add((Test-StaleDetachedStartup))

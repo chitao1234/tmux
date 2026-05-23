@@ -2898,9 +2898,11 @@ static int
 server_client_win32_auth_start(struct client *c)
 {
 	c->win32_auth_pending = 1;
+	memset(&c->win32_auth_nonce, 0, sizeof c->win32_auth_nonce);
 	if (win32_random_bytes(c->win32_auth_nonce.nonce,
 	    sizeof c->win32_auth_nonce.nonce, NULL) != 0)
 		return (-1);
+	c->win32_auth_nonce.pid = GetCurrentProcessId();
 	if (proc_send(c->peer, MSG_WIN32_AUTH_CHALLENGE, -1,
 	    &c->win32_auth_nonce, sizeof c->win32_auth_nonce) != 0)
 		return (-1);

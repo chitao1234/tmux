@@ -982,19 +982,34 @@ client_win32_auth_cleanup(void)
 	client_win32_auth_mapping = NULL;
 }
 
+static void
+client_win32_close_server_handle(HANDLE server, HANDLE handle)
+{
+	if (server == NULL || handle == NULL || handle == INVALID_HANDLE_VALUE)
+		return;
+	(void)DuplicateHandle(server, handle, NULL, NULL, 0, FALSE,
+	    DUPLICATE_CLOSE_SOURCE);
+}
+
 static int
 client_send_win32_auth_bind(struct imsg *imsg)
 {
 	struct msg_win32_auth_challenge	 challenge;
 	struct msg_win32_auth_bind	 bind;
 	HANDLE				 mapping = NULL;
+	HANDLE				 server = NULL;
+	HANDLE				 server_mapping = NULL;
+	HANDLE				 server_process = NULL;
 	void				*view = NULL;
+	DWORD				 error;
 	pid_t				 pid;
 	int				 retval = -1;
 
 	if ((size_t)(imsg->hdr.len - IMSG_HEADER_SIZE) != sizeof challenge)
 		return (-1);
 	memcpy(&challenge, imsg->data, sizeof challenge);
+	if (challenge.pid == 0)
+		return (-1);
 	client_win32_auth_cleanup();
 
 	mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
@@ -1009,12 +1024,37 @@ client_send_win32_auth_bind(struct imsg *imsg)
 	UnmapViewOfFile(view);
 	view = NULL;
 
+	server = OpenProcess(PROCESS_DUP_HANDLE, FALSE, challenge.pid);
+	if (server == NULL) {
+		error = GetLastError();
+		log_debug("%s: couldn't open server process %u: %s", __func__,
+		    challenge.pid, win32_strerror(error));
+		goto out;
+	}
+	if (!DuplicateHandle(GetCurrentProcess(), mapping, server,
+	    &server_mapping, FILE_MAP_READ, FALSE, 0)) {
+		error = GetLastError();
+		log_debug("%s: couldn't duplicate auth proof into server: %s",
+		    __func__, win32_strerror(error));
+		goto out;
+	}
+	if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), server,
+	    &server_process, PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+		error = GetLastError();
+		log_debug("%s: couldn't duplicate client process into server: %s",
+		    __func__, win32_strerror(error));
+		goto out;
+	}
+
 	pid = getpid();
 	bind.pid = (uint32_t)pid;
-	bind.handle = (uint64_t)(uintptr_t)mapping;
+	bind.handle = (uint64_t)(uintptr_t)server_mapping;
+	bind.process_handle = (uint64_t)(uintptr_t)server_process;
 	if (proc_send(client_peer, MSG_WIN32_AUTH_BIND, -1, &bind,
 	    sizeof bind) != 0)
 		goto out;
+	server_mapping = NULL;
+	server_process = NULL;
 	client_win32_auth_mapping = mapping;
 	mapping = NULL;
 	retval = 0;
@@ -1022,6 +1062,12 @@ client_send_win32_auth_bind(struct imsg *imsg)
 out:
 	if (view != NULL)
 		UnmapViewOfFile(view);
+	if (server_mapping != NULL)
+		client_win32_close_server_handle(server, server_mapping);
+	if (server_process != NULL)
+		client_win32_close_server_handle(server, server_process);
+	if (server != NULL)
+		CloseHandle(server);
 	if (mapping != NULL)
 		CloseHandle(mapping);
 	return (retval);

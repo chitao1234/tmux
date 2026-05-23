@@ -20,7 +20,7 @@
 #define TMUX_PROTOCOL_H
 
 /* Protocol version. */
-#define PROTOCOL_VERSION 18
+#define PROTOCOL_VERSION 19
 
 /* Message types. */
 enum msgtype {
@@ -102,11 +102,13 @@ struct msg_win32_handle {
 
 struct msg_win32_auth_challenge {
 	uint8_t		nonce[32];
+	uint32_t	pid;
 };
 
 struct msg_win32_auth_bind {
 	uint32_t	pid;
 	uint64_t	handle;
+	uint64_t	process_handle;
 };
 
 struct msg_win32_auth_result {

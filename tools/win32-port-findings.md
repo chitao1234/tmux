@@ -1,6 +1,6 @@
 # Win32 Port Findings
 
-Date: 2026-05-22
+Date: 2026-05-23
 
 Scope: current codebase-wide Win32 implementation review after the AF_UNIX
 auth work landed. This document reflects the current tree, not earlier design
@@ -8,10 +8,15 @@ states. It is a findings document only; it does not imply source changes.
 
 Current baseline:
 
-- AF_UNIX auth is implemented in the current tree: protocol `17`,
+- AF_UNIX auth is implemented in the current tree: protocol `19`,
   `MSG_WIN32_AUTH_CHALLENGE` / `MSG_WIN32_AUTH_BIND` /
   `MSG_WIN32_AUTH_RESULT`, same-user SID admission, integrity-floor checks,
-  and direct handle duplication bound to the authenticated peer process.
+  and direct handle duplication bound to the authenticated peer process when
+  Windows grants the server duplicate access to that process.
+- The Win32 auth proof is client-pushed into the server process, so a
+  higher-integrity same-user client can authenticate to a lower-integrity
+  server without requiring the lower-integrity server to open the elevated
+  client for `PROCESS_DUP_HANDLE`.
 - Win32 ACL now consumes authenticated SIDs for peer admission:
   `struct tmuxpeer` stores the authenticated SID, `server_acl_join()` is
   SID-keyed on Win32, `server_acl_init()` seeds the ACL from the server SID,
@@ -149,9 +154,11 @@ current implementation:
   `start-server`, `-D` versus client races, and `.lock` cleanup.
 - Explicit `-S` and inherited `$TMUX` startup mutation on Win32 is no longer
   unchecked. The current tree validates the parent chain before directory
-  creation, `.lock` acquisition, stale cleanup, or bind recovery, and native
-  PowerShell smoke now covers safe inherited startup plus unsafe explicit
-  rejection without parent creation.
+  creation, `.lock` acquisition, stale cleanup, or bind recovery, accepts
+  `%LOCALAPPDATA%` profile directories whose owner/DACL writer set is trusted,
+  and native PowerShell smoke now covers safe inherited startup, explicit
+  `%LOCALAPPDATA%` startup, and unsafe explicit rejection without parent
+  creation.
 - Win32 startup coordination no longer depends on sibling `.lock` files beside
   explicit endpoints. Startup guards now live in a backend-owned shared root
   under `LOCALAPPDATA`, keyed by endpoint comparison identity, and native

@@ -571,12 +571,13 @@ Completed outcome:
 - explicit `-S` and inherited `$TMUX` paths now validate the nearest existing
   parent chain before any startup-side mutation;
 - validation rejects non-directory ancestors, reparse points in the validated
-  chain, and parents whose nearest existing directory is not owned by the
-  current user;
+  chain, and parents whose nearest existing directory is not controlled by a
+  trusted owner/DACL writer set for the current user;
 - startup-side failures now surface the trust-policy cause back through the
   client instead of collapsing to generic `Permission denied`;
-- native PowerShell startup smoke now verifies safe inherited startup and
-  unsafe explicit rejection without parent creation.
+- native PowerShell startup smoke now verifies safe inherited startup, explicit
+  startup under `%LOCALAPPDATA%`, and unsafe explicit rejection without parent
+  creation.
 
 ### Stage 6: Decouple coordination from sibling `.lock` when needed
 

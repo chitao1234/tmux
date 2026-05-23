@@ -63,8 +63,9 @@ static int	win32_ipc_get_path_attributes(const char *, DWORD *, DWORD *,
 		    char **);
 static int	win32_ipc_make_managed_root(char **, char **);
 static int	win32_ipc_make_shared_root(char **, char **);
-static int	win32_ipc_path_owner_is_current_user(const char *, int *,
+static int	win32_ipc_path_has_trusted_writers(const char *, int *,
 		    char **);
+static int	win32_ipc_sid_string_is_trusted_writer(const char *);
 static int	win32_ipc_hash_text_hex(const char *, char **, char **);
 static const char *win32_ipc_shared_coordination_dir(char **);
 static int	win32_ipc_set_path_security_with_label(const char *,
@@ -554,43 +555,31 @@ win32_ipc_verify_auth_bind(
     const struct msg_win32_auth_bind *bind,
     struct win32_ipc_peer_identity **peer_out, char **cause)
 {
+	HANDLE				 auth = NULL;
 	HANDLE				 process = NULL;
-	HANDLE				 duplicate = NULL;
+	HANDLE				 duplicate_process = NULL;
 	struct win32_ipc_peer_identity	*peer = NULL;
 	void				*view = NULL;
+	DWORD				 error, process_id;
+	int				 auth_owned = 0, process_owned = 0;
 	int				 retval = -1;
 
 	*peer_out = NULL;
 	if (challenge == NULL || bind == NULL || bind->pid == 0 ||
 	    bind->handle == 0 ||
-	    bind->handle == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
+	    bind->handle == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE ||
+	    bind->process_handle == 0 || bind->process_handle ==
+	    (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
 		if (cause != NULL)
 			xasprintf(cause, "invalid auth bind");
 		errno = EINVAL;
 		return (-1);
 	}
 
-	process = OpenProcess(PROCESS_DUP_HANDLE|
-	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, bind->pid);
-	if (process == NULL) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't open client process: %s",
-			    win32_strerror(GetLastError()));
-		}
-		errno = EACCES;
-		return (-1);
-	}
-	if (!DuplicateHandle(process, (HANDLE)(uintptr_t)bind->handle,
-	    GetCurrentProcess(), &duplicate, FILE_MAP_READ, FALSE, 0)) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't duplicate auth proof: %s",
-			    win32_strerror(GetLastError()));
-		}
-		errno = EACCES;
-		goto out;
-	}
-	view = MapViewOfFile(duplicate, FILE_MAP_READ, 0, 0,
-	    sizeof challenge->nonce);
+	auth = (HANDLE)(uintptr_t)bind->handle;
+	process = (HANDLE)(uintptr_t)bind->process_handle;
+
+	view = MapViewOfFile(auth, FILE_MAP_READ, 0, 0, sizeof challenge->nonce);
 	if (view == NULL) {
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't map auth proof: %s",
@@ -605,10 +594,51 @@ win32_ipc_verify_auth_bind(
 		errno = EACCES;
 		goto out;
 	}
-	peer = win32_ipc_peer_identity_create((pid_t)bind->pid, process, cause);
+	auth_owned = 1;
+
+	process_id = GetProcessId(process);
+	if (process_id == 0) {
+		error = GetLastError();
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't inspect client process: %s",
+			    win32_strerror(error));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (process_id != bind->pid) {
+		if (cause != NULL) {
+			xasprintf(cause, "auth process pid mismatch: %lu != %u",
+			    (unsigned long)process_id, bind->pid);
+		}
+		errno = EACCES;
+		goto out;
+	}
+	process_owned = 1;
+
+	duplicate_process = OpenProcess(PROCESS_DUP_HANDLE|
+	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, bind->pid);
+	if (duplicate_process == NULL) {
+		error = GetLastError();
+		log_debug("%s: couldn't open client process for handle "
+		    "duplication: %s", __func__, win32_strerror(error));
+	}
+	if (duplicate_process != NULL) {
+		peer = win32_ipc_peer_identity_create((pid_t)bind->pid,
+		    duplicate_process, cause);
+		if (peer == NULL)
+			goto out;
+		duplicate_process = NULL;
+	} else {
+		peer = win32_ipc_peer_identity_create((pid_t)bind->pid, process,
+		    cause);
+		if (peer == NULL)
+			goto out;
+		process = NULL;
+		process_owned = 0;
+	}
 	if (peer == NULL)
 		goto out;
-	process = NULL;
 	*peer_out = peer;
 	peer = NULL;
 	retval = 0;
@@ -616,10 +646,12 @@ win32_ipc_verify_auth_bind(
 out:
 	if (view != NULL)
 		UnmapViewOfFile(view);
-	if (duplicate != NULL)
-		CloseHandle(duplicate);
-	if (process != NULL)
+	if (auth_owned && auth != NULL)
+		CloseHandle(auth);
+	if (process_owned && process != NULL)
 		CloseHandle(process);
+	if (duplicate_process != NULL)
+		CloseHandle(duplicate_process);
 	win32_ipc_peer_identity_free(peer);
 	return (retval);
 }
@@ -769,16 +801,40 @@ win32_ipc_get_path_attributes(const char *path, DWORD *attrp, DWORD *errorp,
 }
 
 static int
-win32_ipc_path_owner_is_current_user(const char *path, int *same, char **cause)
+win32_ipc_sid_string_is_trusted_writer(const char *sid)
+{
+	if (sid == NULL)
+		return (0);
+	if (win32_ipc_current_user_sid_value != NULL &&
+	    strcmp(sid, win32_ipc_current_user_sid_value) == 0)
+		return (1);
+	if (strcmp(sid, "S-1-5-18") == 0)
+		return (1);
+	if (strcmp(sid, "S-1-5-32-544") == 0)
+		return (1);
+	if (strcmp(sid, "S-1-3-0") == 0 || strcmp(sid, "S-1-3-4") == 0)
+		return (1);
+	return (0);
+}
+
+static int
+win32_ipc_path_has_trusted_writers(const char *path, int *trusted,
+    char **cause)
 {
 	PSECURITY_DESCRIPTOR	 sd = NULL;
 	PSID			 owner = NULL;
+	PACL			 dacl = NULL;
 	wchar_t			*wpath = NULL;
-	char			*owner_sid = NULL;
+	char			*sid = NULL;
 	DWORD			 error;
+	BOOL			 dacl_present, dacl_defaulted;
+	ACE_HEADER		*header;
+	ACCESS_MASK		 mask, mutation_mask;
+	PSID			 ace_sid;
+	WORD			 i;
 	int			 retval = -1;
 
-	*same = 0;
+	*trusted = 0;
 	if (cause != NULL)
 		*cause = NULL;
 	if (win32_ipc_cache_current_identity() != 0 ||
@@ -797,11 +853,12 @@ win32_ipc_path_owner_is_current_user(const char *path, int *same, char **cause)
 		goto out;
 	}
 	error = GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
-	    OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &sd);
+	    OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION, &owner, NULL,
+	    &dacl, NULL, &sd);
 	if (error != ERROR_SUCCESS) {
 		if (cause != NULL) {
-			xasprintf(cause, "couldn't read owner for %s: %s", path,
-			    win32_strerror(error));
+			xasprintf(cause, "couldn't read security for %s: %s",
+			    path, win32_strerror(error));
 		}
 		errno = EACCES;
 		goto out;
@@ -813,19 +870,96 @@ win32_ipc_path_owner_is_current_user(const char *path, int *same, char **cause)
 		goto out;
 	}
 
-	owner_sid = win32_ipc_sid_to_string(owner);
-	if (owner_sid == NULL) {
+	sid = win32_ipc_sid_to_string(owner);
+	if (sid == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't convert owner SID for %s", path);
 		errno = EACCES;
 		goto out;
 	}
+	if (strcmp(sid, win32_ipc_current_user_sid_value) == 0) {
+		free(sid);
+		sid = NULL;
+		*trusted = 1;
+		retval = 0;
+		goto out;
+	}
+	if (!win32_ipc_sid_string_is_trusted_writer(sid)) {
+		free(sid);
+		sid = NULL;
+		retval = 0;
+		goto out;
+	}
+	free(sid);
+	sid = NULL;
+	if (!GetSecurityDescriptorDacl(sd, &dacl_present, &dacl,
+	    &dacl_defaulted)) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't inspect DACL for %s: %s",
+			    path, win32_strerror(GetLastError()));
+		}
+		errno = EACCES;
+		goto out;
+	}
+	if (!dacl_present || dacl == NULL) {
+		retval = 0;
+		goto out;
+	}
 
-	*same = (strcmp(owner_sid, win32_ipc_current_user_sid_value) == 0);
+	mutation_mask = FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY|FILE_DELETE_CHILD|
+	    FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|
+	    FILE_WRITE_ATTRIBUTES|DELETE|WRITE_DAC|WRITE_OWNER|GENERIC_WRITE|
+	    GENERIC_ALL;
+	for (i = 0; i < dacl->AceCount; i++) {
+		if (!GetAce(dacl, i, (void **)&header)) {
+			if (cause != NULL) {
+				xasprintf(cause, "couldn't read DACL for %s: %s",
+				    path, win32_strerror(GetLastError()));
+			}
+			errno = EACCES;
+			goto out;
+		}
+		switch (header->AceType) {
+		case ACCESS_ALLOWED_ACE_TYPE:
+		case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
+			mask = ((ACCESS_ALLOWED_ACE *)header)->Mask;
+			ace_sid = &((ACCESS_ALLOWED_ACE *)header)->SidStart;
+			break;
+		case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+		case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+			mask = ((ACCESS_ALLOWED_OBJECT_ACE *)header)->Mask;
+			ace_sid = &((ACCESS_ALLOWED_OBJECT_ACE *)header)->SidStart;
+			break;
+		default:
+			continue;
+		}
+		if ((mask & mutation_mask) == 0)
+			continue;
+
+		sid = win32_ipc_sid_to_string(ace_sid);
+		if (sid == NULL) {
+			if (cause != NULL) {
+				xasprintf(cause,
+				    "couldn't convert DACL SID for %s", path);
+			}
+			errno = EACCES;
+			goto out;
+		}
+		if (!win32_ipc_sid_string_is_trusted_writer(sid)) {
+			free(sid);
+			sid = NULL;
+			retval = 0;
+			goto out;
+		}
+		free(sid);
+		sid = NULL;
+	}
+
+	*trusted = 1;
 	retval = 0;
 
 out:
-	free(owner_sid);
+	free(sid);
 	free(wpath);
 	if (sd != NULL)
 		LocalFree(sd);
@@ -1276,7 +1410,7 @@ win32_ipc_validate_socket_parent(const char *path, char **cause)
 {
 	char	*parent = NULL, *current = NULL, *next = NULL;
 	DWORD	 attr, error;
-	int	 owner_is_current;
+	int	 trusted_writers;
 	int	 state;
 
 	if (cause != NULL)
@@ -1337,13 +1471,13 @@ win32_ipc_validate_socket_parent(const char *path, char **cause)
 		errno = EACCES;
 		goto fail;
 	}
-	if (win32_ipc_path_owner_is_current_user(current, &owner_is_current,
+	if (win32_ipc_path_has_trusted_writers(current, &trusted_writers,
 	    cause) != 0)
 		goto fail;
-	if (!owner_is_current) {
+	if (!trusted_writers) {
 		if (cause != NULL) {
 			xasprintf(cause,
-			    "socket path is not under a user-owned directory:"
+			    "socket path is not under a trusted user directory:"
 			    " %s", current);
 		}
 		errno = EACCES;
