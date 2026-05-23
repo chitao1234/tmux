@@ -110,18 +110,34 @@ function Start-TmuxProcess {
 
     $stdout = Join-Path $script:ArtifactRoot ($Name + ".out.txt")
     $stderr = Join-Path $script:ArtifactRoot ($Name + ".err.txt")
-    $process = Start-Process -FilePath $script:TmuxPath `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $WorkingDirectory `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+    $outStream = [System.IO.File]::Open(
+        $stdout, [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $errStream = [System.IO.File]::Open(
+        $stderr, [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $script:TmuxPath
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = Join-Win32Arguments $Arguments
+    $null = $psi.Environment.Remove("TMUX")
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $outTask = $process.StandardOutput.BaseStream.CopyToAsync($outStream)
+    $errTask = $process.StandardError.BaseStream.CopyToAsync($errStream)
 
     [pscustomobject]@{
         Process = $process
         Stdout = $stdout
         Stderr = $stderr
+        StdoutStream = $outStream
+        StderrStream = $errStream
+        StdoutTask = $outTask
+        StderrTask = $errTask
         Name = $Name
     }
 }
@@ -137,8 +153,16 @@ function Wait-TmuxProcess {
             $Run.Process.Kill()
         } catch {
         }
+        [System.Threading.Tasks.Task]::WaitAll(@($Run.StdoutTask,
+            $Run.StderrTask), 1000) | Out-Null
+        $Run.StdoutStream.Dispose()
+        $Run.StderrStream.Dispose()
         throw "process $($Run.Name) did not exit within ${TimeoutMs}ms"
     }
+    [System.Threading.Tasks.Task]::WaitAll(@($Run.StdoutTask,
+        $Run.StderrTask)) | Out-Null
+    $Run.StdoutStream.Dispose()
+    $Run.StderrStream.Dispose()
 
     $stdout = ""
     $stderr = ""
