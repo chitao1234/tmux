@@ -48,6 +48,13 @@ enum win32_handle_event_backend {
 	WIN32_HANDLE_EVENT_IOCP
 };
 
+enum win32_console_input_action {
+	WIN32_CONSOLE_INPUT_WAIT,
+	WIN32_CONSOLE_INPUT_READ,
+	WIN32_CONSOLE_INPUT_APPENDED,
+	WIN32_CONSOLE_INPUT_ERROR
+};
+
 enum win32_handle_writer_backend {
 	WIN32_HANDLE_WRITER_WORKER,
 	WIN32_HANDLE_WRITER_CONSOLE,
@@ -180,6 +187,7 @@ struct win32_handle_event {
 	int		 throttled;
 	int		 console_queued;
 	int		 console_active;
+	DWORD		 console_key_state;
 	enum win32_handle_event_state state;
 	DWORD		 error;
 };
@@ -308,6 +316,18 @@ static void	win32_handle_event_iocp_complete(
 static int	win32_handle_event_append_input(
 		     struct win32_handle_event *, const void *, size_t);
 static int	win32_handle_event_read_once(struct win32_handle_event *);
+static void	win32_console_key_record_update_state(
+		     struct win32_handle_event *, const KEY_EVENT_RECORD *);
+static int	win32_console_key_record_ignore(const KEY_EVENT_RECORD *);
+static int	win32_console_key_record_ctrl_j(const KEY_EVENT_RECORD *,
+		     DWORD);
+static int	win32_console_read_one_record(HANDLE, INPUT_RECORD *);
+static int	win32_console_peek_one_record(HANDLE, INPUT_RECORD *);
+static int	win32_console_emit_ctrl_j(struct win32_handle_event *,
+		     const KEY_EVENT_RECORD *);
+static enum win32_console_input_action
+		win32_console_reader_prepare_key_input(
+		     struct win32_handle_event *);
 static DWORD WINAPI win32_handle_event_thread(void *);
 static int	win32_console_reader_service_init(void);
 static int	win32_console_reader_service_fini(const char *);
@@ -1227,6 +1247,213 @@ win32_handle_event_append_input(struct win32_handle_event *whe,
 }
 
 static int
+win32_console_key_record_ctrl_mask(WORD virtual_key)
+{
+	switch (virtual_key) {
+	case VK_CONTROL:
+		return (LEFT_CTRL_PRESSED|RIGHT_CTRL_PRESSED);
+	case VK_LCONTROL:
+		return (LEFT_CTRL_PRESSED);
+	case VK_RCONTROL:
+		return (RIGHT_CTRL_PRESSED);
+	}
+	return (0);
+}
+
+static int
+win32_console_key_record_alt_mask(WORD virtual_key)
+{
+	switch (virtual_key) {
+	case VK_MENU:
+		return (LEFT_ALT_PRESSED|RIGHT_ALT_PRESSED);
+	case VK_LMENU:
+		return (LEFT_ALT_PRESSED);
+	case VK_RMENU:
+		return (RIGHT_ALT_PRESSED);
+	}
+	return (0);
+}
+
+static void
+win32_console_key_record_update_state(struct win32_handle_event *whe,
+    const KEY_EVENT_RECORD *key)
+{
+	DWORD	mask;
+
+	mask = win32_console_key_record_ctrl_mask(key->wVirtualKeyCode);
+	if (mask == 0)
+		mask = win32_console_key_record_alt_mask(key->wVirtualKeyCode);
+	if (mask == 0)
+		return;
+
+	if (key->bKeyDown)
+		whe->console_key_state |= mask;
+	else
+		whe->console_key_state &= ~mask;
+}
+
+static int
+win32_console_key_record_ignore(const KEY_EVENT_RECORD *key)
+{
+	if (!key->bKeyDown)
+		return (1);
+	switch (key->wVirtualKeyCode) {
+	case VK_SHIFT:
+	case VK_LSHIFT:
+	case VK_RSHIFT:
+	case VK_CONTROL:
+	case VK_LCONTROL:
+	case VK_RCONTROL:
+	case VK_MENU:
+	case VK_LMENU:
+	case VK_RMENU:
+	case VK_CAPITAL:
+	case VK_NUMLOCK:
+	case VK_SCROLL:
+		return (1);
+	}
+	return (0);
+}
+
+static int
+win32_console_key_record_ctrl_j(const KEY_EVENT_RECORD *key, DWORD state)
+{
+	DWORD	ctrl, alt;
+
+	if (!key->bKeyDown)
+		return (0);
+
+	ctrl = LEFT_CTRL_PRESSED|RIGHT_CTRL_PRESSED;
+	alt = LEFT_ALT_PRESSED|RIGHT_ALT_PRESSED;
+	state |= key->dwControlKeyState;
+	if ((state & ctrl) == 0 || (state & alt) != 0)
+		return (0);
+
+	if (key->wVirtualKeyCode == 'J' || key->uChar.UnicodeChar == L'\n')
+		return (1);
+	return (0);
+}
+
+static int
+win32_console_read_one_record(HANDLE handle, INPUT_RECORD *record)
+{
+	DWORD	nread;
+
+	if (!ReadConsoleInputW(handle, record, 1, &nread)) {
+		log_debug("%s: ReadConsoleInputW failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	if (nread != 1)
+		return (-1);
+	return (0);
+}
+
+static int
+win32_console_peek_one_record(HANDLE handle, INPUT_RECORD *record)
+{
+	DWORD	nread;
+
+	if (!PeekConsoleInputW(handle, record, 1, &nread)) {
+		log_debug("%s: PeekConsoleInputW failed: %s", __func__,
+		    win32_strerror(GetLastError()));
+		return (-1);
+	}
+	if (nread != 1)
+		return (1);
+	return (0);
+}
+
+static int
+win32_console_emit_ctrl_j(struct win32_handle_event *whe,
+    const KEY_EVENT_RECORD *key)
+{
+	char	buf[64];
+	WORD	repeat, chunk;
+
+	repeat = key->wRepeatCount;
+	if (repeat == 0)
+		repeat = 1;
+	memset(buf, '\n', sizeof buf);
+
+	while (repeat != 0) {
+		chunk = repeat;
+		if (chunk > (WORD)sizeof buf)
+			chunk = (WORD)sizeof buf;
+		if (win32_handle_event_append_input(whe, buf, chunk) != 0)
+			return (-1);
+		repeat -= chunk;
+	}
+	if (log_get_level() > 1)
+		log_debug("%s: translated Ctrl-J key record to LF", __func__);
+	return (0);
+}
+
+static enum win32_console_input_action
+win32_console_reader_prepare_key_input(struct win32_handle_event *whe)
+{
+	INPUT_RECORD	record;
+	int		rc, appended = 0;
+
+	/*
+	 * Keep mouse and ordinary key input on the ReadFile byte path, but
+	 * translate Ctrl-J key records that some console hosts do not expose as
+	 * bytes. Modifier state is tracked across ignored modifier records so a
+	 * physical Ctrl-down, J-down sequence still produces LF.
+	 */
+	for (;;) {
+		rc = win32_console_peek_one_record(whe->handle, &record);
+		if (rc < 0)
+			return (appended ? WIN32_CONSOLE_INPUT_APPENDED :
+			    WIN32_CONSOLE_INPUT_READ);
+		if (rc > 0)
+			return (appended ? WIN32_CONSOLE_INPUT_APPENDED :
+			    WIN32_CONSOLE_INPUT_WAIT);
+
+		switch (record.EventType) {
+		case KEY_EVENT:
+			win32_console_key_record_update_state(whe,
+			    &record.Event.KeyEvent);
+			if (win32_console_key_record_ignore(
+			    &record.Event.KeyEvent)) {
+				if (win32_console_read_one_record(whe->handle,
+				    &record) != 0)
+					return (appended ?
+					    WIN32_CONSOLE_INPUT_APPENDED :
+					    WIN32_CONSOLE_INPUT_READ);
+				continue;
+			}
+			if (!win32_console_key_record_ctrl_j(
+			    &record.Event.KeyEvent, whe->console_key_state))
+				return (appended ? WIN32_CONSOLE_INPUT_APPENDED :
+				    WIN32_CONSOLE_INPUT_READ);
+			if (win32_console_read_one_record(whe->handle,
+			    &record) != 0)
+				return (appended ? WIN32_CONSOLE_INPUT_APPENDED :
+				    WIN32_CONSOLE_INPUT_READ);
+			if (win32_console_emit_ctrl_j(whe,
+			    &record.Event.KeyEvent) != 0)
+				return (WIN32_CONSOLE_INPUT_ERROR);
+			appended = 1;
+			continue;
+		case MOUSE_EVENT:
+			return (appended ? WIN32_CONSOLE_INPUT_APPENDED :
+			    WIN32_CONSOLE_INPUT_READ);
+		case WINDOW_BUFFER_SIZE_EVENT:
+		case MENU_EVENT:
+		case FOCUS_EVENT:
+		default:
+			if (win32_console_read_one_record(whe->handle,
+			    &record) != 0)
+				return (appended ?
+				    WIN32_CONSOLE_INPUT_APPENDED :
+				    WIN32_CONSOLE_INPUT_READ);
+			continue;
+		}
+	}
+}
+
+static int
 win32_console_test_env_enabled(const char *name)
 {
 	char	*value;
@@ -1486,8 +1713,9 @@ win32_console_reader_thread(__unused void *arg)
 static void
 win32_console_reader_run(struct win32_handle_event *whe)
 {
-	HANDLE	events[4];
-	DWORD	wait;
+	HANDLE				events[4];
+	DWORD				wait;
+	enum win32_console_input_action	action;
 
 	events[0] = win32_console_reader.stop;
 	events[1] = whe->stop;
@@ -1504,6 +1732,16 @@ win32_console_reader_run(struct win32_handle_event *whe)
 		return;
 	if (!win32_handle_event_reading_enabled(whe))
 		return;
+
+	action = win32_console_reader_prepare_key_input(whe);
+	switch (action) {
+	case WIN32_CONSOLE_INPUT_READ:
+		break;
+	case WIN32_CONSOLE_INPUT_WAIT:
+	case WIN32_CONSOLE_INPUT_APPENDED:
+	case WIN32_CONSOLE_INPUT_ERROR:
+		return;
+	}
 	(void)win32_handle_event_read_once(whe);
 }
 

@@ -5,6 +5,7 @@ param(
     [string[]]$Cases = @(
         "baseline",
         "input-credit",
+        "ctrl-j",
         "utf8-split",
         "invalid-utf8",
         "detach-backlog",
@@ -184,6 +185,7 @@ function Get-SmokeArgumentsForCase {
     switch ($Case) {
         "baseline" { return @("-AutoDetachAfterMs", "1500") }
         "input-credit" { return @("-ExerciseInputCredit") }
+        "ctrl-j" { return @("-ExerciseCtrlJ") }
         "output-progress" { return @("-ExerciseOutputProgress") }
         "resize-backlog" { return @("-ExerciseResizeBacklog") }
         "utf8-split" { return @("-ExerciseUtf8Split") }
@@ -201,6 +203,7 @@ function Get-SmokeLabelForCase {
     $suffix = switch ($Case) {
         "baseline" { "base" }
         "input-credit" { "ic" }
+        "ctrl-j" { "cj" }
         "output-progress" { "op" }
         "resize-backlog" { "rz" }
         "utf8-split" { "u8s" }

@@ -436,6 +436,10 @@ In progress.
   pause and resume, checks that the server returns credit repeatedly while
   attach still exits cleanly, and records peak tmux-owned reserved plus reader-
   buffered bytes so bounded relay memory is measured directly.
+- Native Ctrl-J smoke now injects a console key record with `Ctrl` state and
+  `J` virtual key, verifies that the relay key-record fallback translates it,
+  and checks that tmux writes `C-j` to the pane through the normal input-credit
+  path.
 - Native output-progress smoke now also forces a status redraw while output
   backlog is active and verifies redraw deferral plus redraw-release behavior,
   not only the existence of progress ACKs. It now also snapshots live logs
@@ -479,7 +483,7 @@ under MSYS2.
   Programmatic real-console harness. It launches the relay smoke in fresh
   native console windows from a redirected runner, collects structured result
   files, and covers a stable default suite of baseline attach, input-credit,
-  detach-under-backlog, UTF-8, invalid UTF-8, output-loss, and
+  Ctrl-J, detach-under-backlog, UTF-8, invalid UTF-8, output-loss, and
   transport-loss cases without manual `Ctrl-b d`. The
   `output-progress` and `resize-backlog` cases remain available as explicit
   opt-in backlog-sensitive probes.
@@ -502,6 +506,10 @@ under MSYS2.
   client when credit is exhausted and returned, checks that the server returns
   credit repeatedly, and records peak tmux-owned reserved plus reader-buffered
   bytes.
+- `tools/win32-console-relay-smoke.ps1 -ExerciseCtrlJ`
+  Relay Ctrl-J coverage. It injects a native console key sequence shaped like a
+  physical `Ctrl+j`, requires the key-record fallback translation log, and
+  checks that the server logs the `C-j` write to the attached pane.
 - `tools/win32-console-relay-smoke.ps1 -ExerciseUtf8Split`
   Relay UTF-8 split coverage. It forces a multibyte character to cross relay
   output chunk boundaries inside the client writer, checks that the visible

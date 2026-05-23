@@ -178,6 +178,9 @@ current implementation:
   longer lose wakeups in the previously observed ways.
 - Terminal relay now has input credit, incremental output progress, explicit
   output abort, and explicit transport-loss handling.
+- Native-console relay now has a narrow key-record compatibility path for
+  physical-style `Ctrl+j` records that carry control state but no byte; these
+  are translated to LF before entering tmux's normal tty key parser.
 - The relay UTF-8 writer boundary now carries multibyte splits incrementally
   and fails closed on invalid UTF-8 instead of silently pushing malformed data
   into the native console path.
@@ -237,7 +240,7 @@ The main gaps that still matter are:
 
 5. Relay-first native-console coverage:
    a redirected-runner launcher now exists for baseline attach, input credit,
-   detach under backlog, UTF-8 split, invalid UTF-8, output loss, and
+   Ctrl-J, detach under backlog, UTF-8 split, invalid UTF-8, output loss, and
    transport loss, but resize-under-backlog and output-progress remain
    host-sensitive and still need continued native-host validation.
 

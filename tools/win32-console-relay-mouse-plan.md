@@ -85,7 +85,7 @@ When relay mouse is inactive:
 This keeps relay mouse first-class without permanently stealing selection
 behavior when tmux is not requesting mouse capture.
 
-### 4. Keep the console reader on `ReadFile()` only
+### 4. Keep mouse input on `ReadFile()` bytes
 
 The native console reader no longer switches into a Win32 mouse-record path.
 
@@ -95,8 +95,11 @@ Specifically:
 - no `MOUSE_EVENT_RECORD` to SGR translation;
 - no relay-reader mouse state attached to the reader endpoint.
 
-The reader stays a pure byte reader and relies on the native console host to
-produce VT input bytes when mouse capture is enabled.
+The mouse path stays a pure byte reader and relies on the native console host
+to produce VT input bytes when mouse capture is enabled. The reader may still
+consume non-mouse console key records for narrow keyboard compatibility fixes,
+such as translating a physical-style `Ctrl+J` record that carries no byte into
+the LF byte expected by tmux and panes.
 
 ### 5. Treat synthetic console-record injection as non-authoritative
 

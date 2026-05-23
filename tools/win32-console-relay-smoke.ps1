@@ -6,6 +6,7 @@ param(
     [int]$AutoDetachAfterMs = 0,
     [switch]$ExerciseMouse,
     [switch]$ExerciseInputCredit,
+    [switch]$ExerciseCtrlJ,
     [switch]$SimulateOutputLoss,
     [switch]$SimulateTransportLost,
     [switch]$ExerciseDetachBacklog,
@@ -146,15 +147,16 @@ public static class Win32ConsoleInput
         [FieldOffset(4)] public MOUSE_EVENT_RECORD MouseEvent;
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
     public struct KEY_EVENT_RECORD
     {
+        [FieldOffset(0)]
         [MarshalAs(UnmanagedType.Bool)] public bool bKeyDown;
-        public ushort wRepeatCount;
-        public ushort wVirtualKeyCode;
-        public ushort wVirtualScanCode;
-        public char UnicodeChar;
-        public uint dwControlKeyState;
+        [FieldOffset(4)] public ushort wRepeatCount;
+        [FieldOffset(6)] public ushort wVirtualKeyCode;
+        [FieldOffset(8)] public ushort wVirtualScanCode;
+        [FieldOffset(10)] public char UnicodeChar;
+        [FieldOffset(12)] public uint dwControlKeyState;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -175,6 +177,9 @@ public static class Win32ConsoleInput
 
     const ushort KEY_EVENT = 0x0001;
     const ushort MOUSE_EVENT = 0x0002;
+    const ushort VK_CONTROL = 0x0011;
+    const ushort VK_J = 0x004a;
+    const uint LEFT_CTRL_PRESSED = 0x0008;
     const uint GENERIC_READ = 0x80000000;
     const uint GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ = 0x00000001;
@@ -204,41 +209,69 @@ public static class Win32ConsoleInput
         return handle;
     }
 
-    public static void WriteText(string text)
+    static INPUT_RECORD KeyRecord(bool keyDown, ushort virtualKey,
+        ushort scanCode, char unicodeChar, uint controlKeyState)
     {
-        if (string.IsNullOrEmpty(text))
-            return;
+        INPUT_RECORD record = new INPUT_RECORD();
+        record.EventType = KEY_EVENT;
+        record.KeyEvent.bKeyDown = keyDown;
+        record.KeyEvent.wRepeatCount = 1;
+        record.KeyEvent.wVirtualKeyCode = virtualKey;
+        record.KeyEvent.wVirtualScanCode = scanCode;
+        record.KeyEvent.UnicodeChar = unicodeChar;
+        record.KeyEvent.dwControlKeyState = controlKeyState;
+        return record;
+    }
 
+    static void WriteRecords(INPUT_RECORD[] records, string what)
+    {
         IntPtr handle = OpenConsoleInput();
 
         try
         {
-            INPUT_RECORD[] records = new INPUT_RECORD[text.Length];
-            for (int i = 0; i < text.Length; i++)
-            {
-                records[i].EventType = KEY_EVENT;
-                records[i].KeyEvent.bKeyDown = true;
-                records[i].KeyEvent.wRepeatCount = 1;
-                records[i].KeyEvent.wVirtualKeyCode = 0;
-                records[i].KeyEvent.wVirtualScanCode = 0;
-                records[i].KeyEvent.UnicodeChar = text[i];
-                records[i].KeyEvent.dwControlKeyState = 0;
-            }
-
             uint written;
             if (!WriteConsoleInputW(handle, records, (uint)records.Length,
                 out written))
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
-                    "WriteConsoleInputW failed");
+                    "WriteConsoleInputW(" + what + ") failed");
             if (written != (uint)records.Length)
                 throw new InvalidOperationException(
-                    "WriteConsoleInputW wrote " + written + " of " +
-                    records.Length + " events");
+                    "WriteConsoleInputW(" + what + ") wrote " + written +
+                    " of " + records.Length + " events");
         }
         finally
         {
             CloseHandle(handle);
         }
+    }
+
+    public static void WriteText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        INPUT_RECORD[] records = new INPUT_RECORD[text.Length];
+        for (int i = 0; i < text.Length; i++)
+        {
+            records[i] = KeyRecord(true, 0, 0, text[i], 0);
+        }
+
+        WriteRecords(records, "text");
+    }
+
+    public static void WriteCtrlJ()
+    {
+        INPUT_RECORD[] records = new INPUT_RECORD[4];
+
+        records[0] = KeyRecord(true, VK_CONTROL, 0, '\0',
+            LEFT_CTRL_PRESSED);
+        records[1] = KeyRecord(true, VK_J, 0, '\n',
+            LEFT_CTRL_PRESSED);
+        records[2] = KeyRecord(false, VK_J, 0, '\0',
+            LEFT_CTRL_PRESSED);
+        records[3] = KeyRecord(false, VK_CONTROL, 0, '\0', 0);
+
+        WriteRecords(records, "ctrl-j");
     }
 
     public static void WriteMouse(short x, short y, uint buttonState,
@@ -292,6 +325,12 @@ function Write-ConsoleInputText {
             Start-Sleep -Milliseconds $ChunkDelayMs
         }
     }
+}
+
+function Write-ConsoleInputCtrlJ {
+    Initialize-ConsoleInputInterop
+
+    [Win32ConsoleInput]::WriteCtrlJ()
 }
 
 function Write-ConsoleInputMouse {
@@ -860,6 +899,9 @@ function Get-SmokeScenarioName {
     if ($ExerciseInputCredit) {
         return "input-credit"
     }
+    if ($ExerciseCtrlJ) {
+        return "ctrl-j"
+    }
     if ($SimulateOutputLoss) {
         return "simulate-output-loss"
     }
@@ -906,6 +948,75 @@ function Write-InvalidUtf8HelperScript {
 Start-Sleep -Milliseconds 750
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
 [Console]::Out.WriteLine('UTF8-INVALID-PREFIX-OK')
+Start-Sleep -Seconds 30
+"@
+    Write-TextFileUtf8NoBom -Path $Path -Content $content
+}
+
+function Write-CtrlJHelperScript {
+    param(
+        [string]$Path,
+        [string]$ResultPath
+    )
+
+    $escapedResultPath = $ResultPath.Replace("'", "''")
+    $content = @"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+[Console]::Out.WriteLine('CTRLJ-READY')
+
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class CtrlJNativeInput
+{
+    const int STD_INPUT_HANDLE = -10;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadFile(IntPtr handle, byte[] buffer,
+        uint bytesToRead, out uint bytesRead, IntPtr overlapped);
+
+    public static uint Read(byte[] buffer)
+    {
+        IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
+        if (handle == new IntPtr(-1) || handle == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "GetStdHandle(STD_INPUT_HANDLE) failed");
+
+        uint bytesRead;
+        if (!ReadFile(handle, buffer, (uint)buffer.Length, out bytesRead,
+            IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "ReadFile(STDIN) failed");
+        return bytesRead;
+    }
+}
+'@
+
+`$buffer = New-Object byte[] 16
+`$captured = New-Object 'System.Collections.Generic.List[byte]'
+
+while (`$captured.Count -lt 1) {
+    `$nread = [CtrlJNativeInput]::Read(`$buffer)
+    if (`$nread -le 0) {
+        break
+    }
+    for (`$i = 0; `$i -lt `$nread; `$i++) {
+        [void]`$captured.Add(`$buffer[`$i])
+    }
+    if (`$captured.Contains([byte]10)) {
+        break
+    }
+}
+
+[System.IO.File]::WriteAllBytes('$escapedResultPath', `$captured.ToArray())
+if (`$captured.Contains([byte]10)) {
+    [Console]::Out.WriteLine('CTRLJ-CAPTURED')
+}
 Start-Sleep -Seconds 30
 "@
     Write-TextFileUtf8NoBom -Path $Path -Content $content
@@ -986,6 +1097,8 @@ $utf8SplitMarker = ([string][char]0x6587) + "UTF8-SPLIT-OK"
 $invalidUtf8Prefix = "UTF8-INVALID-PREFIX-"
 $mouseReadyMarker = "MOUSE-READY"
 $mouseCapturedMarker = "MOUSE-CAPTURED"
+$ctrlJReadyMarker = "CTRLJ-READY"
+$ctrlJCapturedMarker = "CTRLJ-CAPTURED"
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 New-Item -ItemType File -Path $config | Out-Null
 
@@ -1007,6 +1120,9 @@ try {
     $mouseReadyVisible = $false
     $mouseCapturedVisible = $false
     $mousePaneFlags = $null
+    $ctrlJReadyVisible = $false
+    $ctrlJCapturedVisible = $false
+    $ctrlJResultBytes = [byte[]]@()
     $resizeConsoleObserved = $null
 
     $env:TMUX = $null
@@ -1038,6 +1154,7 @@ try {
         $sessionCommandArgs = @("cmd.exe")
         $mouseHelper = $null
         $mouseHelperCommand = $null
+        $ctrlJResult = $null
         if ($ExerciseMouse) {
             $mouseHelper = Join-Path $root "mouse-helper.ps1"
             $mouseResult = Join-Path $root "mouse-result.bin"
@@ -1050,6 +1167,19 @@ try {
                 "Bypass",
                 "-File",
                 $mouseHelper
+            )
+        } elseif ($ExerciseCtrlJ) {
+            $ctrlJHelper = Join-Path $root "ctrl-j-helper.ps1"
+            $ctrlJResult = Join-Path $root "ctrl-j-result.bin"
+            Write-CtrlJHelperScript -Path $ctrlJHelper -ResultPath $ctrlJResult
+            $sessionCommandArgs = @(
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $ctrlJHelper
             )
         } elseif ($ExerciseInputCredit) {
             $sessionCommandArgs = @("cmd.exe", "/Q", "/K", "findstr .* >nul")
@@ -1090,7 +1220,8 @@ try {
             "-s",
             "relay"
         ) + $sessionCommandArgs) | Out-Null
-        if ($ExerciseMouse -or $ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
+        if ($ExerciseMouse -or $ExerciseCtrlJ -or $ExerciseUtf8Split -or
+            $ExerciseInvalidUtf8) {
             Invoke-Tmux -Arguments @(
                 "-f",
                 $config,
@@ -1187,6 +1318,49 @@ try {
                 }
                 if (Wait-ConsoleVisibleText -Needle $script:mouseCapturedMarker -TimeoutMs 250) {
                     $script:mouseCapturedVisible = $true
+                }
+
+                Invoke-Tmux -Arguments @(
+                    "-f",
+                    $config,
+                    "-L",
+                    $label,
+                    "detach-client",
+                    "-t",
+                    "client-$AttachPid"
+                ) | Out-Null
+            }
+        } elseif ($ExerciseCtrlJ) {
+            Write-Host "Relay Ctrl-J exercise is enabled. A physical-style Ctrl+J console key record will be injected."
+            Write-Host "Logs will be checked afterward: $root"
+            Clear-Host
+            $attach = Invoke-TmuxInteractive -Arguments @(
+                "-f",
+                $config,
+                "-vv",
+                "-L",
+                $label,
+                "attach-session",
+                "-t",
+                "relay"
+            ) -TimeoutMs 15000 -AfterStart {
+                param([int]$AttachPid)
+
+                if (-not (Wait-ConsoleVisibleText -Needle $script:ctrlJReadyMarker -TimeoutMs 5000)) {
+                    throw "timed out waiting for Ctrl-J helper readiness marker"
+                }
+                $script:ctrlJReadyVisible = $true
+
+                Write-ConsoleInputCtrlJ
+                Start-Sleep -Milliseconds 500
+                if (Test-Path -LiteralPath $ctrlJResult -PathType Leaf) {
+                    $script:ctrlJResultBytes = [System.IO.File]::ReadAllBytes($ctrlJResult)
+                }
+                if (Wait-ConsoleVisibleText -Needle $script:ctrlJCapturedMarker -TimeoutMs 250) {
+                    $script:ctrlJCapturedVisible = $true
+                }
+                if (Test-Path -LiteralPath $ctrlJResult -PathType Leaf) {
+                    $script:ctrlJResultBytes = [System.IO.File]::ReadAllBytes($ctrlJResult)
                 }
 
                 Invoke-Tmux -Arguments @(
@@ -1639,6 +1813,10 @@ try {
 
         $attachCode = $attach.ExitCode
         $attachPid = $attach.ProcessId
+        if ($ExerciseCtrlJ -and $ctrlJResult -ne $null -and
+            (Test-Path -LiteralPath $ctrlJResult -PathType Leaf)) {
+            $ctrlJResultBytes = [System.IO.File]::ReadAllBytes($ctrlJResult)
+        }
         if ($ExerciseUtf8Split -or $ExerciseInvalidUtf8) {
             Start-Sleep -Milliseconds 200
             $visibleText = Get-ConsoleVisibleText
@@ -1689,6 +1867,8 @@ try {
     $relayMouseState = Test-AnyLogMatch $attachLogs "relay mouse mode 0x"
     $mouseSgrLogged = Test-AnyLogMatch $logs "mouse input"
     $mousePaneBinding = Test-AnyLogMatch $logs "key MouseDown1Pane: send-keys -M|writing key 0x400000100 \\(MouseDown1Pane\\) to %"
+    $ctrlJTranslated = Test-AnyLogMatch $attachLogs "translated Ctrl-J key record to LF"
+    $ctrlJPaneWrite = Test-AnyLogMatch $logs "writing key .*C-j.* to %"
     $mouseSequencePress = $false
     if ($ExerciseMouse -and $mouseResultBytes.Length -ne 0) {
         $mouseSequencePress =
@@ -1696,6 +1876,7 @@ try {
     }
     $mouseSyntheticInjectionObserved = $mouseCapturedVisible -or
         $mouseSgrLogged -or $mousePaneBinding -or $mouseSequencePress
+    $ctrlJByteCaptured = $ctrlJResultBytes -contains [byte]10
     $resizeClientLog = $false
     $resizeServerLog = $false
     if ($ExerciseResizeBacklog -and $resizeTarget -ne $null) {
@@ -1722,6 +1903,13 @@ try {
         Write-Host "  returned credit events: $inputReturnedCount"
         Write-Host "  peak reserved bytes: $inputPeakReserved"
         Write-Host "  peak reader buffered bytes: $inputPeakBuffered"
+    }
+    if ($ExerciseCtrlJ) {
+        Write-Host "  Ctrl-J helper ready: $ctrlJReadyVisible"
+        Write-Host "  Ctrl-J key record translated: $ctrlJTranslated"
+        Write-Host "  Ctrl-J pane write logged: $ctrlJPaneWrite"
+        Write-Host "  Ctrl-J captured marker visible: $ctrlJCapturedVisible"
+        Write-Host "  Ctrl-J LF byte captured: $ctrlJByteCaptured"
     }
     if ($ExerciseUtf8Split) {
         Write-Host "  UTF-8 split marker visible: $utf8SplitVisible"
@@ -1807,6 +1995,11 @@ try {
             $inputPeakReserved -ge 0 -and $inputPeakReserved -le 65536 -and
             $inputPeakBuffered -ge 0 -and $inputPeakBuffered -le 65536 -and
             $failures.Count -eq 0
+    } elseif ($ExerciseCtrlJ) {
+        $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
+            $inputCredit -and -not $directOutput -and $ctrlJReadyVisible -and
+            $ctrlJTranslated -and $ctrlJPaneWrite -and
+            $failures.Count -eq 0
     } elseif ($ExerciseUtf8Split) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $utf8SplitVisible -and
@@ -1862,6 +2055,8 @@ try {
             Write-Host "Native-console relay mouse smoke passed."
         } elseif ($ExerciseInputCredit) {
             Write-Host "Native-console relay input-credit smoke passed."
+        } elseif ($ExerciseCtrlJ) {
+            Write-Host "Native-console relay Ctrl-J smoke passed."
         } elseif ($ExerciseUtf8Split) {
             Write-Host "Native-console relay UTF-8 split smoke passed."
         } elseif ($ExerciseInvalidUtf8) {
@@ -1895,6 +2090,11 @@ try {
             inputReturnedCount = $inputReturnedCount
             inputPeakReserved = $inputPeakReserved
             inputPeakBuffered = $inputPeakBuffered
+            ctrlJReadyVisible = $ctrlJReadyVisible
+            ctrlJTranslated = $ctrlJTranslated
+            ctrlJPaneWrite = $ctrlJPaneWrite
+            ctrlJCapturedVisible = $ctrlJCapturedVisible
+            ctrlJByteCaptured = $ctrlJByteCaptured
             outputProgressCount = $outputProgressCount
             redrawDeferredCount = $redrawDeferredCount
             waitingForRedrawCount = $waitingForRedrawCount
@@ -1948,6 +2148,8 @@ try {
         Write-Host "Native-console relay mouse smoke failed."
     } elseif ($ExerciseInputCredit) {
         Write-Host "Native-console relay input-credit smoke failed."
+    } elseif ($ExerciseCtrlJ) {
+        Write-Host "Native-console relay Ctrl-J smoke failed."
     } elseif ($ExerciseUtf8Split) {
         Write-Host "Native-console relay UTF-8 split smoke failed."
     } elseif ($ExerciseInvalidUtf8) {
@@ -1981,6 +2183,11 @@ try {
         inputReturnedCount = $inputReturnedCount
         inputPeakReserved = $inputPeakReserved
         inputPeakBuffered = $inputPeakBuffered
+        ctrlJReadyVisible = $ctrlJReadyVisible
+        ctrlJTranslated = $ctrlJTranslated
+        ctrlJPaneWrite = $ctrlJPaneWrite
+        ctrlJCapturedVisible = $ctrlJCapturedVisible
+        ctrlJByteCaptured = $ctrlJByteCaptured
         outputProgressCount = $outputProgressCount
         redrawDeferredCount = $redrawDeferredCount
         waitingForRedrawCount = $waitingForRedrawCount
