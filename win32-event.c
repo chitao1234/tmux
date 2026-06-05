@@ -155,8 +155,10 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 				errno = win32_socket_errno(WSAGetLastError());
 				return (total == 0 ? -1 : total);
 			}
-			if (n == 0)
-				return (total);
+			if (n == 0) {
+				errno = ECONNRESET;
+				return (total == 0 ? -1 : total);
+			}
 			total += n;
 			base += n;
 			len -= n;
