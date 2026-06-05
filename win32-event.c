@@ -437,8 +437,12 @@ win32_io_service_init(void)
 
 	if (win32_socketpair(pair) != 0)
 		return (-1);
-	ioctlsocket(pair[0], FIONBIO, &nonblock);
-	ioctlsocket(pair[1], FIONBIO, &nonblock);
+	if (ioctlsocket(pair[0], FIONBIO, &nonblock) == SOCKET_ERROR ||
+	    ioctlsocket(pair[1], FIONBIO, &nonblock) == SOCKET_ERROR) {
+		closesocket(pair[0]);
+		closesocket(pair[1]);
+		return (-1);
+	}
 
 	win32_io.notify_read = pair[0];
 	win32_io.notify_write = pair[1];
@@ -616,7 +620,7 @@ win32_io_service_iocp_thread(__unused void *arg)
 			error = GetLastError();
 		if (overlapped == NULL && key == WIN32_IOCP_STOP_KEY)
 			break;
-		if (overlapped == NULL)
+		if (overlapped == NULL || key == 0)
 			continue;
 		endpoint = (struct win32_io_endpoint *)key;
 		if (endpoint->type == WIN32_IO_ENDPOINT_READER) {
