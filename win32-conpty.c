@@ -234,24 +234,27 @@ static win32_nt_query_information_process
 win32_get_nt_query_information_process(void)
 {
 	static win32_nt_query_information_process	 fn;
-	static int					 loaded;
+	static LONG					 loaded;
 	HMODULE						 ntdll;
 	union {
 		FARPROC					 proc;
 		win32_nt_query_information_process	 fn;
 	}						 cast;
 
-	if (loaded)
+	/* Spin until whoever wins the CAS finishes loading. */
+	if (InterlockedCompareExchange(&loaded, 1, 0) != 0) {
+		while (InterlockedCompareExchange(&loaded, 2, 2) != 2)
+			Sleep(0);
 		return (fn);
-	loaded = 1;
+	}
 
 	ntdll = GetModuleHandleW(L"ntdll.dll");
-	if (ntdll == NULL)
-		return (NULL);
-	cast.proc = GetProcAddress(ntdll, "NtQueryInformationProcess");
-	if (cast.proc == NULL)
-		return (NULL);
-	fn = cast.fn;
+	if (ntdll != NULL) {
+		cast.proc = GetProcAddress(ntdll, "NtQueryInformationProcess");
+		if (cast.proc != NULL)
+			fn = cast.fn;
+	}
+	InterlockedExchange(&loaded, 2);
 	return (fn);
 }
 
@@ -665,7 +668,10 @@ win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
 			size += (assigned - 1) * sizeof(ULONG_PTR);
 	}
 
+	/* Clamp to what was actually allocated (TOCTOU: job may have grown). */
 	count = list->NumberOfProcessIdsInList;
+	if (count > assigned)
+		count = assigned;
 	processes = xcalloc(count == 0 ? 1 : count, sizeof *processes);
 	for (i = 0; i < count; i++) {
 		pid = (DWORD)list->ProcessIdList[i];
