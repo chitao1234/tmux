@@ -268,12 +268,21 @@ win32_quote_argument(const char *arg)
 	if (!quote)
 		return (win32_utf8_to_wide(arg));
 
-	len = 3;
-	for (src = arg; *src != '\0'; src++) {
-		if (*src == '\\' || *src == '"')
-			len += 2;
+	len = 3; /* opening ", closing ", NUL */
+	for (src = arg; ; src++) {
+		bs = 0;
+		while (*src == '\\') {
+			bs++;
+			src++;
+		}
+		if (*src == '\0') {
+			len += 2 * bs; /* trailing backslashes doubled */
+			break;
+		}
+		if (*src == '"')
+			len += 2 * bs + 2; /* doubled backslashes + \" */
 		else
-			len++;
+			len += bs + 1;
 	}
 	out = xmalloc(len);
 	dst = out;
