@@ -12,6 +12,8 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 
 - Root source clusters:
   `cmd-*.c` command handlers; `server-*.c`; `screen-*.c`; `tty-*.c`; `window-*.c`; `layout-*.c`; `grid*.c`; `input*.c`; `format*.c`; plus central files such as `tmux.c`, `tmux.h`, `client.c`, `cfg.c`, `proc.c`, `spawn.c`, and `job.c`.
+- Protocol and process files:
+  `tmux-protocol.h`, `proc.c`, `ipc-startup.c`, `server.c`, `server-client.c`, and `client.c` define the client/server protocol, server lifecycle, and client attach behavior.
 - Portability layers:
   root `osdep-*.c` files for platform selection, `compat/` for replacement libc/system pieces, and the native Windows layer in `win32-*.c` plus `win32-platform.h`.
 - Header overlay directories:
@@ -33,9 +35,15 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
   `./configure && make`
 - If Autotools inputs changed or the tree came from version control without fresh generated files:
   `sh autogen.sh`, then `./configure && make`
+- On this Windows host, run build/configure commands only through MSYS2 bash with UCRT64 first in `PATH`. From PowerShell, the normal build command is:
+  `C:\msys64\usr\bin\bash.exe -lc 'source /c/ddev/tmux4win/sysroot-env.sh; export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /c/ddev/tmux4win/tmux; make -j4'`
+- If configure must be rerun on this host, use the same MSYS2/UCRT64 environment:
+  `C:\msys64\usr\bin\bash.exe -lc 'source /c/ddev/tmux4win/sysroot-env.sh; export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /c/ddev/tmux4win/tmux; ./configure && make -j4'`
 - Main regression harness:
   `cd regress && make`
   The harness is shell-driven and intentionally serialized by `regress/Makefile`.
+- On this Windows host, run the regression harness through MSYS2 bash with the same environment:
+  `C:\msys64\usr\bin\bash.exe -lc 'source /c/ddev/tmux4win/sysroot-env.sh; export PATH=/ucrt64/bin:/usr/bin:$PATH; cd /c/ddev/tmux4win/tmux/regress; make'`
 - Optional fuzzing lives under `fuzz/` and is enabled through `--enable-fuzzing`.
 - tmux debug logs are normally produced with `tmux -v` or `tmux -vv` in the working directory.
 
@@ -81,6 +89,11 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 
 - `tools/win32-console-relay-smoke.ps1` and `tools/win32-console-direct-probe.ps1` require a real Windows console. Do not expect them to work under redirected CI or a non-interactive runner.
 - `tools/win32-direct-handle-smoke.ps1` covers the redirected or non-console path.
+- `tools/win32-console-relay-coverage.ps1` launches real-console relay smoke cases from a native PowerShell runner. Useful cases include:
+  `baseline`, `input-credit`, `ctrl-j`, `utf8-split`, `invalid-utf8`, `detach-backlog`, `output-loss`, and `transport-loss`.
+- Typical native PowerShell smoke commands:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\win32-console-relay-coverage.ps1 -Cases baseline,input-credit,ctrl-j -RemoveArtifactsOnSuccess`
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\win32-direct-handle-smoke.ps1`
 - `tools/win32-smoke.md` is the general manual MVP checklist.
 - Toolchain and probe helpers live in:
   `tools/win32-build-sysroot.sh`,
