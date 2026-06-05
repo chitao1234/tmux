@@ -132,7 +132,7 @@ win32_refresh_environ(void)
 const char *
 win32_strerror(DWORD error)
 {
-	static char	buffer[512];
+	static __declspec(thread) char	buffer[512];
 	wchar_t		*wmsg = NULL;
 	char		*msg;
 	DWORD		 flags;
