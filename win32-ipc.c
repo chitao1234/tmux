@@ -34,7 +34,7 @@ struct win32_ipc_socket_entry {
 
 static TAILQ_HEAD(, win32_ipc_socket_entry) win32_ipc_sockets =
     TAILQ_HEAD_INITIALIZER(win32_ipc_sockets);
-static int win32_ipc_next_id = 3;
+static unsigned int win32_ipc_next_id = 3;
 static char *win32_ipc_socket_dir;
 static char *win32_ipc_shared_dir;
 static char *win32_ipc_current_user_sid_value;
