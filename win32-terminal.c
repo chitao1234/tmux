@@ -49,7 +49,8 @@ win32_terminal_is_client_console(void)
 
 	hin = GetStdHandle(STD_INPUT_HANDLE);
 	hout = GetStdHandle(STD_OUTPUT_HANDLE);
-	if (hin == INVALID_HANDLE_VALUE || hout == INVALID_HANDLE_VALUE)
+	if (hin == NULL || hin == INVALID_HANDLE_VALUE ||
+	    hout == NULL || hout == INVALID_HANDLE_VALUE)
 		return (0);
 	if (!GetConsoleMode(hin, &mode) || !GetConsoleMode(hout, &mode))
 		return (0);
