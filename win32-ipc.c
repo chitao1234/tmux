@@ -1607,6 +1607,7 @@ win32_ipc_server_create(const char *path, char **cause)
 	if (win32_ipc_set_cleanup_path(wrapped_fd, normalized) != 0) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't track Win32 IPC socket path");
+		win32_unlink_utf8(normalized);
 		free(normalized);
 		win32_ipc_close(wrapped_fd);
 		return (-1);
