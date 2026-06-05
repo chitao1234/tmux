@@ -104,6 +104,7 @@ void		 win32_io_process_notify(struct win32_io_endpoint *);
 void		 win32_log_handle(const char *, HANDLE);
 
 const char	*win32_default_socket_dir(void);
+int		 win32_ipc_errno(int);
 int		 win32_ipc_ensure_socket_dir(const char *, char **);
 int		 win32_ipc_ensure_parent_dir(const char *, char **);
 int		 win32_ipc_validate_socket_parent(const char *, char **);

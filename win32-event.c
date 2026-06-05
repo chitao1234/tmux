@@ -78,41 +78,7 @@ struct win32_io_endpoint {
 	int		 active;
 };
 
-static int
-win32_socket_errno(int error)
-{
-	switch (error) {
-	case WSAEACCES:
-		return (EACCES);
-	case WSAEADDRINUSE:
-		return (EADDRINUSE);
-	case WSAEADDRNOTAVAIL:
-		return (EADDRNOTAVAIL);
-	case WSAEAFNOSUPPORT:
-		return (EAFNOSUPPORT);
-	case WSAEWOULDBLOCK:
-		return (EAGAIN);
-	case WSAEINTR:
-		return (EINTR);
-	case WSAECONNABORTED:
-		return (ECONNABORTED);
-	case WSAECONNREFUSED:
-		return (ECONNREFUSED);
-	case WSAECONNRESET:
-	case WSAENETRESET:
-		return (ECONNRESET);
-	case WSAENOTCONN:
-		return (ENOTCONN);
-	case WSAETIMEDOUT:
-		return (ETIMEDOUT);
-	case WSAEMFILE:
-		return (EMFILE);
-	case WSAEINVAL:
-		return (EINVAL);
-	default:
-		return (error);
-	}
-}
+
 
 ssize_t
 readv(int fd, const struct iovec *iov, int iovcnt)
@@ -131,7 +97,7 @@ readv(int fd, const struct iovec *iov, int iovcnt)
 		len = INT_MAX;
 	n = recv(win32_ipc_socket(fd), base, len, 0);
 	if (n == SOCKET_ERROR) {
-		errno = win32_socket_errno(WSAGetLastError());
+		errno = win32_ipc_errno(WSAGetLastError());
 		return (-1);
 	}
 	return (n);
@@ -152,7 +118,7 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 			n = send(win32_ipc_socket(fd), base,
 			    len > INT_MAX ? INT_MAX : len, 0);
 			if (n == SOCKET_ERROR) {
-				errno = win32_socket_errno(WSAGetLastError());
+				errno = win32_ipc_errno(WSAGetLastError());
 				return (total == 0 ? -1 : total);
 			}
 			if (n == 0) {
@@ -445,7 +411,7 @@ win32_socketpair(SOCKET pair[2])
 
 fail:
 	error = WSAGetLastError();
-	saved_errno = win32_socket_errno(error);
+	saved_errno = win32_ipc_errno(error);
 	if (client != INVALID_SOCKET)
 		closesocket(client);
 	if (server != INVALID_SOCKET)

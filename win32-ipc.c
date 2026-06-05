@@ -48,7 +48,6 @@ struct win32_ipc_peer_identity {
 	DWORD		 integrity_rid;
 };
 
-static int	win32_ipc_errno(int);
 static int	win32_ipc_set_blocking(SOCKET, int, char **);
 static int	win32_ipc_path_to_sockaddr(const char *, struct sockaddr_un *,
 		    char **);
@@ -127,7 +126,7 @@ win32_ipc_socket(int fd)
 	return (entry->socket);
 }
 
-static int
+int
 win32_ipc_errno(int error)
 {
 	switch (error) {
