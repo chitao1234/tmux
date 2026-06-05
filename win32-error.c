@@ -913,10 +913,26 @@ ttyname(__unused int fd)
 int
 wcwidth(wchar_t wc)
 {
+	/* Combining and zero-width characters */
 	if (wc == 0)
 		return (0);
 	if ((wc < 0x20) || (wc >= 0x7f && wc < 0xa0))
 		return (-1);
+	/* Wide (fullwidth) East Asian ranges */
+	if ((wc >= 0x1100 && wc <= 0x115f) ||   /* Hangul Jamo */
+	    wc == 0x2329 || wc == 0x232a ||
+	    (wc >= 0x2e80 && wc <= 0x303e) ||   /* CJK Radicals .. CJK Symbols */
+	    (wc >= 0x3040 && wc <= 0x33ff) ||   /* Hiragana .. CJK Compatibility */
+	    (wc >= 0x3400 && wc <= 0x4dbf) ||   /* CJK Ext-A */
+	    (wc >= 0x4e00 && wc <= 0xa4cf) ||   /* CJK Unified .. Yi */
+	    (wc >= 0xa960 && wc <= 0xa97f) ||   /* Hangul Jamo Ext-A */
+	    (wc >= 0xac00 && wc <= 0xd7ff) ||   /* Hangul Syllables + Jamo Ext-B */
+	    (wc >= 0xf900 && wc <= 0xfaff) ||   /* CJK Compatibility Ideographs */
+	    (wc >= 0xfe10 && wc <= 0xfe1f) ||   /* Vertical Forms */
+	    (wc >= 0xfe30 && wc <= 0xfe6f) ||   /* CJK Compatibility Forms */
+	    (wc >= 0xff01 && wc <= 0xff60) ||   /* Fullwidth Forms */
+	    (wc >= 0xffe0 && wc <= 0xffe6))
+		return (2);
 	return (1);
 }
 
