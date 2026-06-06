@@ -34,7 +34,9 @@ static void	 status_message_callback(tmux_event_fd, short, void *);
 static void	 status_timer_callback(tmux_event_fd, short, void *);
 
 static char	*status_prompt_find_history_file(void);
+#ifdef TMUX_WIN32
 static void	 status_prompt_load_history_buffer(const void *, size_t);
+#endif
 static const char *status_prompt_up_history(u_int *, u_int);
 static const char *status_prompt_down_history(u_int *, u_int);
 static void	 status_prompt_add_history(const char *, u_int);
@@ -66,9 +68,8 @@ u_int		  status_prompt_hsize[PROMPT_NTYPES];
 static char *
 status_prompt_find_history_file(void)
 {
-#ifdef TMUX_WIN32
 	char		*path;
-#else
+#ifndef TMUX_WIN32
 	const char	*home;
 #endif
 	const char	*history_file;
@@ -121,6 +122,7 @@ status_prompt_add_typed_history(char *line)
 }
 
 /* Load status prompt history from a buffer. */
+#ifdef TMUX_WIN32
 static void
 status_prompt_load_history_buffer(const void *bdata, size_t bsize)
 {
@@ -153,7 +155,6 @@ status_prompt_load_history_buffer(const void *bdata, size_t bsize)
 	}
 }
 
-#ifdef TMUX_WIN32
 struct status_prompt_load_history_data {
 	struct cmdq_item	*item;
 	struct cmdq_item	**continue_item;
@@ -210,7 +211,7 @@ status_prompt_save_history_done(__unused struct client *c, const char *path,
 
 /* Load status prompt history from file. */
 enum cmd_retval
-status_prompt_load_history(struct cmdq_item *item,
+status_prompt_load_history(__unused struct cmdq_item *item,
     struct cmdq_item **continue_item)
 {
 #ifndef TMUX_WIN32
