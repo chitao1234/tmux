@@ -591,6 +591,35 @@ win32_process_get_cwd(HANDLE process)
 	return (cwd);
 }
 
+static char *
+win32_process_get_name(HANDLE process)
+{
+	wchar_t	*wpath;
+	char	*path, *name;
+	DWORD	 size = MAX_PATH;
+
+	if (process == NULL)
+		return (NULL);
+
+	for (;;) {
+		wpath = xcalloc(size, sizeof *wpath);
+		if (QueryFullProcessImageNameW(process, 0, wpath, &size))
+			break;
+		free(wpath);
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+			return (NULL);
+		size *= 2;
+	}
+
+	path = win32_wide_to_utf8(wpath);
+	free(wpath);
+	if (path == NULL)
+		return (NULL);
+	name = xstrdup(path_basename(path));
+	free(path);
+	return (name);
+}
+
 static ssize_t
 win32_job_find_process(struct win32_job_process *processes, u_int count,
     DWORD pid)
@@ -633,7 +662,8 @@ win32_job_process_depth(struct win32_job_process *processes, u_int count,
 }
 
 static char *
-win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
+win32_job_get_process_value(HANDLE job, HANDLE root_process, DWORD root_pid,
+    char *(*get_value)(HANDLE))
 {
 	JOBOBJECT_BASIC_PROCESS_ID_LIST	*list = NULL;
 	struct win32_job_process	*processes = NULL;
@@ -642,14 +672,14 @@ win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
 	DWORD				 needed = 0, pid;
 	u_int				 assigned, count, used = 0, i, j, best;
 	int				 depth;
-	char				*cwd = NULL;
 	HANDLE				 process;
 	int				 have_best = 0;
+	char				*value = NULL;
 
 	if (root_process == NULL)
 		return (NULL);
 	if (job == NULL)
-		return (win32_process_get_cwd(root_process));
+		return (get_value(root_process));
 
 	size = sizeof *list + (15 * sizeof(ULONG_PTR));
 	for (;;) {
@@ -657,7 +687,7 @@ win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
 		if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList,
 		    list, (DWORD)size, &needed)) {
 			free(list);
-			return (win32_process_get_cwd(root_process));
+			return (get_value(root_process));
 		}
 		assigned = list->NumberOfAssignedProcesses;
 		if (list->NumberOfProcessIdsInList >= assigned)
@@ -721,16 +751,30 @@ win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
 		}
 	}
 	if (have_best)
-		cwd = win32_process_get_cwd(processes[best].process);
-	if (cwd == NULL)
-		cwd = win32_process_get_cwd(root_process);
+		value = get_value(processes[best].process);
+	if (value == NULL)
+		value = get_value(root_process);
 
 	for (i = 0; i < used; i++) {
 		if (processes[i].close_process)
 			CloseHandle(processes[i].process);
 	}
 	free(processes);
-	return (cwd);
+	return (value);
+}
+
+static char *
+win32_job_get_cwd(HANDLE job, HANDLE root_process, DWORD root_pid)
+{
+	return (win32_job_get_process_value(job, root_process, root_pid,
+	    win32_process_get_cwd));
+}
+
+static char *
+win32_job_get_name(HANDLE job, HANDLE root_process, DWORD root_pid)
+{
+	return (win32_job_get_process_value(job, root_process, root_pid,
+	    win32_process_get_name));
 }
 
 static HANDLE
@@ -1514,6 +1558,15 @@ win32_pane_write(struct window_pane *wp, const void *data, size_t size)
 		return (-1);
 	}
 	return ((int)nwrite);
+}
+
+char *
+win32_pane_get_name(struct window_pane *wp)
+{
+	if (wp == NULL || wp->win32 == NULL)
+		return (NULL);
+	return (win32_job_get_name(wp->win32->job, wp->win32->process,
+	    wp->win32->process_id));
 }
 
 char *

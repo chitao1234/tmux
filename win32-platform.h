@@ -157,6 +157,7 @@ int		 win32_pane_output_eof(struct window_pane *);
 void		 win32_pane_set_reading(struct window_pane *, int);
 int		 win32_pane_reading_paused(struct window_pane *);
 int		 win32_pane_input_ready(struct window_pane *);
+char		*win32_pane_get_name(struct window_pane *);
 char		*win32_pane_get_cwd(struct window_pane *);
 
 struct bufferevent *win32_pane_get_event(struct window_pane *);

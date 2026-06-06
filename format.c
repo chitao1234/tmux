@@ -892,7 +892,12 @@ format_cb_current_command(struct format_tree *ft)
 	if (wp == NULL || wp->shell == NULL)
 		return (NULL);
 
-	cmd = osdep_get_name(wp->fd, wp->tty);
+	cmd = NULL;
+#ifdef TMUX_WIN32
+	cmd = win32_pane_get_name(wp);
+#endif
+	if (cmd == NULL)
+		cmd = osdep_get_name(wp->fd, wp->tty);
 	if (cmd == NULL || *cmd == '\0') {
 		free(cmd);
 		cmd = cmd_stringify_argv(wp->argc, wp->argv);

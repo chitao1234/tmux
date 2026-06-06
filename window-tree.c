@@ -758,7 +758,12 @@ window_tree_search(__unused void *modedata, void *itemdata, const char *ss,
 	case WINDOW_TREE_PANE:
 		if (s == NULL || wl == NULL || wp == NULL)
 			break;
-		cmd = osdep_get_name(wp->fd, wp->tty);
+		cmd = NULL;
+#ifdef TMUX_WIN32
+		cmd = win32_pane_get_name(wp);
+#endif
+		if (cmd == NULL)
+			cmd = osdep_get_name(wp->fd, wp->tty);
 		if (cmd == NULL || *cmd == '\0') {
 			free(cmd);
 			return (0);
