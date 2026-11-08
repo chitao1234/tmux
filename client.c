@@ -1310,6 +1310,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			client_restore_terminal();
 #endif
 			fprintf(stderr, "command too long\n");
+			tty_term_free_list(caps, ncaps);
 			log_close();
 			return (1);
 		}
@@ -1323,6 +1324,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 			fprintf(stderr, "command too long\n");
 			free(data);
+			tty_term_free_list(caps, ncaps);
 			log_close();
 			return (1);
 		}
@@ -1356,6 +1358,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (proc_send(client_peer, msg, -1, data, size) != 0) {
 			fprintf(stderr, "failed to send command\n");
 			free(data);
+			tty_term_free_list(caps, ncaps);
 			log_close();
 			return (1);
 		}
