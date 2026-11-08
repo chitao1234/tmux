@@ -41,6 +41,7 @@ $TMUX kill-server 2>/dev/null || exit 1
 	    grep '^aliascheck:' >/dev/null || exit 1
 ) || exit 1
 $TEST_TMUX -f/dev/null -S "$SOCKET_ABS" kill-server 2>/dev/null || exit 1
+sleep 1
 
 printf stale >"$SOCKET_ABS"
 $TEST_TMUX -f/dev/null -S "$SOCKET_ABS" new -ds stalecheck || exit 1
