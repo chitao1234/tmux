@@ -311,7 +311,16 @@ cmd_new_session_exec(struct cmd *self, struct cmdq_item *item)
 	args_to_vector(args, &sc.argc, &sc.argv);
 
 	sc.idx = -1;
+#ifdef TMUX_WIN32
 	sc.cwd = cwd;
+#else
+	/*
+	 * Keep the raw -c argument: spawn_pane() expands it once with the
+	 * target session. Passing the already expanded cwd here would expand
+	 * it a second time without the session context.
+	 */
+	sc.cwd = args_get(args, 'c');
+#endif
 
 	sc.flags = 0;
 
