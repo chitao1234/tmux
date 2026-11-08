@@ -1151,7 +1151,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		if (ipc_error != NULL) {
 			fprintf(stderr, "%s\n", ipc_error);
 			free(ipc_error);
-		} else if (errno == ECONNREFUSED) {
+		} else if (errno == ECONNREFUSED || errno == ENOENT) {
 			fprintf(stderr, "no server running on %s\n",
 			    socket_path);
 		} else {
