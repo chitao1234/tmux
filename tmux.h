@@ -3123,6 +3123,7 @@ int		 ipc_client_connect_or_start(struct event_base *,
 int	 ipc_server_create(struct ipc_endpoint *, uint64_t,
 	     struct ipc_listener **, char **);
 void		 ipc_listener_destroy(struct ipc_listener *);
+void		 ipc_listener_remove(struct ipc_listener *);
 void	 ipc_coordination_finish(struct ipc_coordination *);
 void	 ipc_coordination_release(struct ipc_coordination *);
 

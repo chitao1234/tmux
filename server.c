@@ -117,6 +117,16 @@ server_create_socket(uint64_t flags, char **cause)
 	struct ipc_listener	*listener = NULL;
 	int			 fd;
 
+	/*
+	 * When recreating the socket, remove the old path before binding the
+	 * replacement. Destroying the old listener after the new one has been
+	 * created would unlink the new socket path.
+	 */
+#ifndef TMUX_WIN32
+	if (server_listener != NULL)
+		ipc_listener_remove(server_listener);
+#endif
+
 	fd = ipc_server_create(socket_endpoint, flags, &listener, cause);
 	if (fd == -1)
 		return (-1);

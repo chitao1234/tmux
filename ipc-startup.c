@@ -405,6 +405,31 @@ ipc_listener_destroy(struct ipc_listener *listener)
 	listener->backend->listener_destroy(listener);
 }
 
+/*
+ * Remove the listener's socket path without closing the listener. This is
+ * used when recreating the socket: unlink before bind so the new listener
+ * can take the same path, but keep the old listener usable until the new
+ * one has been created.
+ */
+void
+ipc_listener_remove(struct ipc_listener *listener)
+{
+#ifndef TMUX_WIN32
+	struct ipc_listener_unix	*data;
+
+	if (listener == NULL)
+		return;
+	data = listener->data;
+	if (data->path != NULL) {
+		(void)unlink(data->path);
+		free(data->path);
+		data->path = NULL;
+	}
+#else
+	(void)listener;
+#endif
+}
+
 void
 ipc_coordination_finish(struct ipc_coordination *coordination)
 {
@@ -784,11 +809,23 @@ static void
 ipc_listener_destroy_unix(struct ipc_listener *listener)
 {
 	struct ipc_listener_unix	*data = listener->data;
+	struct stat			 before, after;
+	int				 have_before = 0;
 
+	if (data->path != NULL && stat(data->path, &before) == 0)
+		have_before = 1;
 	if (listener->fd != -1)
 		(void)close(listener->fd);
-	if (data->path != NULL)
-		(void)unlink(data->path);
+	/*
+	 * Only unlink the path if it still refers to our socket. A successor
+	 * server may already have bound the same path.
+	 */
+	if (data->path != NULL) {
+		if (!have_before || (stat(data->path, &after) == 0 &&
+		    before.st_dev == after.st_dev &&
+		    before.st_ino == after.st_ino))
+			(void)unlink(data->path);
+	}
 	free(data->path);
 	free(data);
 	free(listener);
