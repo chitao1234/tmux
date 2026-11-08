@@ -1080,7 +1080,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
     int feat)
 {
 	struct cmd_parse_result	*pr;
-	struct msg_command	*data;
+	struct msg_command	*data = NULL;
 	int			 fd, i;
 	const char		*ttynam, *termname, *cwd;
 #ifdef TMUX_WIN32
@@ -1333,13 +1333,10 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		client_startup_command = data;
 		client_startup_command_size = size;
 #else
-		if (proc_send(client_peer, msg, -1, data, size) != 0) {
-			fprintf(stderr, "failed to send command\n");
-			free(data);
-			log_close();
-			return (1);
-		}
-		free(data);
+		/*
+		 * Send the command after the identify messages so that
+		 * configuration is loaded before it runs.
+		 */
 #endif
 	}
 
@@ -1357,7 +1354,16 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	client_send_identify(ttynam, termname, caps, ncaps, cwd, feat);
 	client_identify_sent = 1;
 	proc_flush_peer(client_peer);
-	if (msg == MSG_SHELL)
+	if (msg == MSG_COMMAND && data != NULL) {
+		if (proc_send(client_peer, msg, -1, data, size) != 0) {
+			fprintf(stderr, "failed to send command\n");
+			free(data);
+			log_close();
+			return (1);
+		}
+		free(data);
+		data = NULL;
+	} else if (msg == MSG_SHELL)
 		proc_send(client_peer, msg, -1, NULL, 0);
 	tty_term_free_list(caps, ncaps);
 #endif
