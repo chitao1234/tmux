@@ -222,6 +222,9 @@ file_fire_done_cb(__unused tmux_event_fd fd, __unused short events, void *arg)
 void
 file_fire_done(struct client_file *cf)
 {
+	if (cf->done)
+		return;
+	cf->done = 1;
 	event_once(-1, EV_TIMEOUT, file_fire_done_cb, cf, NULL);
 }
 
@@ -555,8 +558,8 @@ file_push_close(struct client_file *cf)
 {
 	struct msg_write_close	close;
 
-	if (cf->stream <= 2 || EVBUFFER_LENGTH(cf->buffer) != 0 ||
-	    cf->write_inflight != 0)
+	if (cf->done || cf->stream <= 2 ||
+	    EVBUFFER_LENGTH(cf->buffer) != 0 || cf->write_inflight != 0)
 		return;
 	close.stream = cf->stream;
 	proc_send(cf->peer, MSG_WRITE_CLOSE, -1, &close, sizeof close);

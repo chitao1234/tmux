@@ -2016,6 +2016,7 @@ struct client_file {
 	int				 fd;
 	int				 error;
 	int				 closed;
+	int				 done;
 
 	client_file_cb			 cb;
 	void				*data;
