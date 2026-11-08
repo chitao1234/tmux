@@ -343,7 +343,7 @@ path_basename(const char *path)
 	size_t		 rootlen;
 
 	if (path == NULL || *path == '\0')
-		return ("");
+		return (".");
 
 	rootlen = path_root_length(path);
 	end = path + strlen(path);
@@ -374,7 +374,7 @@ path_basename_copy(const char *path)
 	size_t		 rootlen;
 
 	if (path == NULL || *path == '\0')
-		return (xstrdup(""));
+		return (xstrdup("."));
 
 	rootlen = path_root_length(path);
 	end = path + strlen(path);
