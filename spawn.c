@@ -214,6 +214,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	struct window_pane	 *new_wp;
 	struct environ		 *child;
 	struct environ_entry	 *ee;
+	struct client		 *loop;
 	char			**argv, *cp, *cwd;
 #ifndef TMUX_WIN32
 	char			**argvp, *argv0;
@@ -307,6 +308,10 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		sc->wp0->offset.used = 0;
 		sc->wp0->base_offset = 0;
 		sc->wp0->pipe_offset.used = 0;
+		TAILQ_FOREACH(loop, &clients, entry) {
+			if (loop->flags & CLIENT_CONTROL)
+				control_reset_pane(loop, sc->wp0);
+		}
 		new_wp = sc->wp0;
 		new_wp->flags &= ~(PANE_STATUSREADY|PANE_STATUSDRAWN);
 	} else if (sc->lc == NULL) {

@@ -277,6 +277,22 @@ control_discard_pane(struct client *c, struct control_pane *cp)
 	}
 }
 
+/* Reset offsets for a single pane. */
+void
+control_reset_pane(struct client *c, struct window_pane *wp)
+{
+	struct control_pane	*cp;
+
+	if (c->control_state == NULL)
+		return;
+	cp = control_get_pane(c, wp);
+	if (cp == NULL)
+		return;
+	control_discard_pane(c, cp);
+	memcpy(&cp->offset, &wp->offset, sizeof cp->offset);
+	memcpy(&cp->queued, &wp->offset, sizeof cp->queued);
+}
+
 /* Get actual pane for this client. */
 static struct window_pane *
 control_window_pane(struct client *c, u_int pane)
