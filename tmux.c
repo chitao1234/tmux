@@ -79,9 +79,9 @@ win32_get_argv(int *argcp, char ***argvp)
 static const char *
 getenv_canonical(const char *name)
 {
+#ifdef TMUX_WIN32
 	struct environ_entry	*envent;
 
-#ifdef TMUX_WIN32
 	if (global_environ != NULL) {
 		envent = environ_find(global_environ, name);
 		if (envent != NULL)
@@ -193,8 +193,13 @@ path_is_drive_relative(const char *path)
 char *
 expand_path(const char *path, const char *home)
 {
-	char		*expanded, *name;
-	const char	*end, *slash, *backslash, *value;
+	char			*expanded, *name;
+	const char		*end, *value;
+#ifdef TMUX_WIN32
+	const char		*slash, *backslash;
+#else
+	struct environ_entry	*envent;
+#endif
 
 	if (path == NULL)
 		return (NULL);
@@ -224,7 +229,12 @@ expand_path(const char *path, const char *home)
 			name = xstrdup(path + 1);
 		else
 			name = xstrndup(path + 1, end - path - 1);
+#ifdef TMUX_WIN32
 		value = getenv_canonical(name);
+#else
+		envent = environ_find(global_environ, name);
+		value = envent != NULL ? envent->value : NULL;
+#endif
 		free(name);
 		if (value == NULL)
 			return (NULL);
