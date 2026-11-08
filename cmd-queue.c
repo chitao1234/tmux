@@ -564,24 +564,29 @@ cmdq_add_message(struct cmdq_item *item)
 	struct cmdq_state	*state = item->state;
 	const char		*key;
 	char			*tmp;
-	uid_t                    uid;
+#ifndef TMUX_WIN32
+	uid_t			 uid;
 	struct passwd		*pw;
-	char                    *user = NULL;
+#endif
+	char			*user = NULL;
 
 	tmp = cmd_print(item->cmd);
 	if (c != NULL) {
+#ifdef TMUX_WIN32
 		if (c->user != NULL && *c->user != '\0')
 			xasprintf(&user, "[%s]", c->user);
-		else {
-			uid = proc_get_peer_uid(c->peer);
-			if (uid != (uid_t)-1 && uid != getuid()) {
-				if ((pw = getpwuid(uid)) != NULL)
-					xasprintf(&user, "[%s]", pw->pw_name);
-				else
-					user = xstrdup("[unknown]");
-			} else
-				user = xstrdup("");
-		}
+		else
+			user = xstrdup("");
+#else
+		uid = proc_get_peer_uid(c->peer);
+		if (uid != (uid_t)-1 && uid != getuid()) {
+			if ((pw = getpwuid(uid)) != NULL)
+				xasprintf(&user, "[%s]", pw->pw_name);
+			else
+				user = xstrdup("[unknown]");
+		} else
+			user = xstrdup("");
+#endif
 		if (c->session != NULL && state->event.key != KEYC_NONE) {
 			key = key_string_lookup_key(state->event.key, 0);
 			server_add_message("%s%s key %s: %s", c->name, user,
