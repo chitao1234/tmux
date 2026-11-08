@@ -84,7 +84,8 @@ endif
 
 # Set flags for native Win32.
 if IS_WIN32
-AM_CPPFLAGS += -DTMUX_WIN32 -DWIN32_LEAN_AND_MEAN \
+AM_CPPFLAGS += -I$(srcdir)/win32 \
+	-DTMUX_WIN32 -DWIN32_LEAN_AND_MEAN \
 	-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 \
 	-DNCURSES_STATIC
 endif
@@ -92,7 +93,7 @@ endif
 # List of sources.
 dist_tmux_SOURCES = \
 	alerts.c \
-	arpa/inet.h \
+	win32/arpa/inet.h \
 	arguments.c \
 	attributes.c \
 	cfg.c \
@@ -171,8 +172,8 @@ dist_tmux_SOURCES = \
 	file.c \
 	format.c \
 	format-draw.c \
-	fnmatch.h \
-	glob.h \
+	win32/fnmatch.h \
+	win32/glob.h \
 	grid-reader.c \
 	grid-view.c \
 	grid.c \
@@ -183,7 +184,7 @@ dist_tmux_SOURCES = \
 	job.c \
 	key-bindings.c \
 	key-string.c \
-	langinfo.h \
+	win32/langinfo.h \
 	layout-custom.c \
 	layout-set.c \
 	layout.c \
@@ -191,17 +192,17 @@ dist_tmux_SOURCES = \
 	menu.c \
 	mode-tree.c \
 	names.c \
-	netinet/in.h \
+	win32/netinet/in.h \
 	notify.c \
 	options-table.c \
 	options.c \
 	paste.c \
 	popup.c \
 	proc.c \
-	pwd.h \
-	regex.h \
+	win32/pwd.h \
+	win32/regex.h \
 	regsub.c \
-	resolv.h \
+	win32/resolv.h \
 	resize.c \
 	screen-redraw.c \
 	screen-write.c \
@@ -211,18 +212,18 @@ dist_tmux_SOURCES = \
 	server-fn.c \
 	server.c \
 	session.c \
-	signal.h \
+	win32/signal.h \
 	sort.c \
 	spawn.c \
 	status.c \
 	style.c \
-	sys/ioctl.h \
-	sys/socket.h \
-	sys/un.h \
-	sys/uio.h \
-	sys/utsname.h \
-	sys/wait.h \
-	termios.h \
+	win32/sys/ioctl.h \
+	win32/sys/socket.h \
+	win32/sys/un.h \
+	win32/sys/uio.h \
+	win32/sys/utsname.h \
+	win32/sys/wait.h \
+	win32/termios.h \
 	tmux.c \
 	tmux.h \
 	tmux-protocol.h \
