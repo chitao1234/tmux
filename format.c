@@ -931,7 +931,7 @@ format_cb_current_path(struct format_tree *ft)
 		return (xstrdup(wp->cwd));
 	if (cwd == NULL)
 		return (NULL);
-	return (cwd);
+	return (xstrdup(cwd));
 }
 
 /* Callback for history_bytes. */
