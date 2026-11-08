@@ -746,6 +746,10 @@ utf8_width(struct utf8_data *ud, int *width)
 
 	if (utf8_touc(ud, &uc) != UTF8_DONE)
 		return (UTF8_ERROR);
+#ifndef TMUX_WIN32
+	if (uc > (u_int)WCHAR_MAX)
+		return (UTF8_ERROR);
+#endif
 	uw = utf8_find_in_width_cache(uc);
 	if (uw != NULL) {
 		*width = uw->width;
