@@ -12,7 +12,7 @@
 #define TMUX_NETINET_IN_H
 
 #ifdef TMUX_WIN32
-#include "../compat/win32-compat.h"
+#include "compat/win32-compat.h"
 #else
 #include_next <netinet/in.h>
 #endif

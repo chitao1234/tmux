@@ -84,7 +84,7 @@ endif
 
 # Set flags for native Win32.
 if IS_WIN32
-AM_CPPFLAGS += -I$(srcdir)/win32 \
+AM_CPPFLAGS += -I$(srcdir) -I$(srcdir)/win32 \
 	-DTMUX_WIN32 -DWIN32_LEAN_AND_MEAN \
 	-D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 \
 	-DNCURSES_STATIC

@@ -12,7 +12,7 @@
 #define TMUX_ARPA_INET_H
 
 #ifdef TMUX_WIN32
-#include "../compat/win32-compat.h"
+#include "compat/win32-compat.h"
 #else
 #include_next <arpa/inet.h>
 #endif

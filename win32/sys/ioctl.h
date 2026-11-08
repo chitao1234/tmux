@@ -12,7 +12,7 @@
 #define TMUX_SYS_IOCTL_H
 
 #ifdef TMUX_WIN32
-#include "../compat/win32-compat.h"
+#include "compat/win32-compat.h"
 
 #ifndef TIOCGWINSZ
 #define TIOCGWINSZ 0x5413

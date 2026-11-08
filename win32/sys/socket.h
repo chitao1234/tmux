@@ -12,7 +12,7 @@
 #define TMUX_SYS_SOCKET_H
 
 #ifdef TMUX_WIN32
-#include "../compat/win32-compat.h"
+#include "compat/win32-compat.h"
 #else
 #include_next <sys/socket.h>
 #endif
