@@ -103,6 +103,9 @@ struct ipc_coordination_unix {
 
 struct ipc_listener_unix {
 	char	*path;
+	dev_t	 dev;
+	ino_t	 ino;
+	int	 have_ino;
 };
 
 static char	*ipc_default_path_unix(const char *, char **);
@@ -416,12 +419,15 @@ ipc_listener_remove(struct ipc_listener *listener)
 {
 #ifndef TMUX_WIN32
 	struct ipc_listener_unix	*data;
+	struct stat			 sb;
 
 	if (listener == NULL)
 		return;
 	data = listener->data;
 	if (data->path != NULL) {
-		(void)unlink(data->path);
+		if (data->have_ino && stat(data->path, &sb) == 0 &&
+		    sb.st_dev == data->dev && sb.st_ino == data->ino)
+			(void)unlink(data->path);
 		free(data->path);
 		data->path = NULL;
 	}
@@ -735,6 +741,7 @@ ipc_listener_create_unix(struct ipc_endpoint *endpoint, uint64_t flags,
 	struct sockaddr_un	 sa;
 	struct ipc_listener	*listener;
 	struct ipc_listener_unix *data;
+	struct stat		 sb;
 	size_t			 size;
 	mode_t			 mask;
 	int			 fd, saved_errno;
@@ -780,6 +787,11 @@ ipc_listener_create_unix(struct ipc_endpoint *endpoint, uint64_t flags,
 	listener->backend = &ipc_backend;
 	listener->data = data;
 	data->path = xstrdup(path);
+	if (stat(data->path, &sb) == 0) {
+		data->dev = sb.st_dev;
+		data->ino = sb.st_ino;
+		data->have_ino = 1;
+	}
 	if (listenerp != NULL)
 		*listenerp = listener;
 	return (fd);
@@ -809,23 +821,19 @@ static void
 ipc_listener_destroy_unix(struct ipc_listener *listener)
 {
 	struct ipc_listener_unix	*data = listener->data;
-	struct stat			 before, after;
-	int				 have_before = 0;
+	struct stat			 sb;
 
-	if (data->path != NULL && stat(data->path, &before) == 0)
-		have_before = 1;
+	/*
+	 * Only unlink the path if it still refers to the socket we created.
+	 * Unlink before close so a successor cannot bind the path between the
+	 * two operations.
+	 */
+	if (data->path != NULL && data->have_ino &&
+	    stat(data->path, &sb) == 0 &&
+	    sb.st_dev == data->dev && sb.st_ino == data->ino)
+		(void)unlink(data->path);
 	if (listener->fd != -1)
 		(void)close(listener->fd);
-	/*
-	 * Only unlink the path if it still refers to our socket. A successor
-	 * server may already have bound the same path.
-	 */
-	if (data->path != NULL) {
-		if (!have_before || (stat(data->path, &after) == 0 &&
-		    before.st_dev == after.st_dev &&
-		    before.st_ino == after.st_ino))
-			(void)unlink(data->path);
-	}
 	free(data->path);
 	free(data);
 	free(listener);

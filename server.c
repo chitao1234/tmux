@@ -131,6 +131,12 @@ server_create_socket(uint64_t flags, char **cause)
 	if (fd == -1)
 		return (-1);
 
+	/*
+	 * systemd socket activation does not create a listener object, so
+	 * close the old descriptor explicitly in that case.
+	 */
+	if (server_listener == NULL && server_fd != -1)
+		(void)close(server_fd);
 	ipc_listener_destroy(server_listener);
 	server_listener = listener;
 	return (fd);
