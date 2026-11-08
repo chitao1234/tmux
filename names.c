@@ -164,9 +164,14 @@ parse_window_name(const char *in)
 			*ptr-- = '\0';
 	}
 
-	if (*name == '/' || path_is_absolute(name))
-		name = (char *)path_basename(name);
-	name = clean_name(name, "#");
+	if (*name == '/' || path_is_absolute(name)) {
+		char	*base;
+
+		base = path_basename_copy(name);
+		name = clean_name(base, "#");
+		free(base);
+	} else
+		name = clean_name(name, "#");
 	free(copy);
 	if (name == NULL)
 		return (xstrdup(""));

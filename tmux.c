@@ -134,15 +134,17 @@ checkshell(const char *shell)
 static int
 areshell(const char *shell)
 {
-	const char	*progname, *ptr;
+	const char	*progname;
+	char		*base;
+	int		 ret;
 
-	ptr = path_basename(shell);
+	base = path_basename_copy(shell);
 	progname = getprogname();
 	if (*progname == '-')
 		progname++;
-	if (strcmp(ptr, progname) == 0)
-		return (1);
-	return (0);
+	ret = (strcmp(base, progname) == 0);
+	free(base);
+	return (ret);
 }
 
 int
@@ -443,14 +445,14 @@ path_dirname(const char *path)
 char *
 shell_argv0(const char *shell, int is_login)
 {
-	const char	*name;
-	char		*argv0;
+	char	*name, *argv0;
 
-	name = path_basename(shell);
+	name = path_basename_copy(shell);
 	if (is_login)
 		xasprintf(&argv0, "-%s", name);
 	else
 		xasprintf(&argv0, "%s", name);
+	free(name);
 	return (argv0);
 }
 
