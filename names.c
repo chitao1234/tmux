@@ -165,7 +165,7 @@ parse_window_name(const char *in)
 	}
 
 	if (*name == '/' || path_is_absolute(name))
-		name = path_basename(name);
+		name = (char *)path_basename(name);
 	name = clean_name(name, "#");
 	free(copy);
 	if (name == NULL)

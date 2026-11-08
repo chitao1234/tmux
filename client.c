@@ -35,8 +35,6 @@
 
 #include "tmux.h"
 
-char		*ipc_take_error(void);
-
 static struct tmuxproc	*client_proc;
 static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
