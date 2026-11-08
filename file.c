@@ -77,8 +77,10 @@ RB_GENERATE(client_files, client_file, entry, file_cmp);
 static char *
 file_get_path(struct client *c, const char *file)
 {
+	const char	*home;
 	char		*path, *full_path;
 
+#ifdef TMUX_WIN32
 	path = expand_path(file, find_home());
 	if (path == NULL)
 		return (NULL);
@@ -86,6 +88,16 @@ file_get_path(struct client *c, const char *file)
 		free(path);
 		return (NULL);
 	}
+#else
+	if (strncmp(file, "~/", 2) != 0)
+		path = xstrdup(file);
+	else {
+		home = find_home();
+		if (home == NULL)
+			home = "";
+		xasprintf(&path, "%s%s", home, file + 1);
+	}
+#endif
 	if (path_is_absolute(path))
 		return (path);
 	full_path = path_join(server_client_get_cwd(c, NULL), path);
