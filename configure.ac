@@ -405,6 +405,14 @@ if test "x$enable_utempter" = xyes; then
 	fi
 fi
 
+# Win32 has no usable wcwidth and its wchar_t cannot represent every
+# codepoint, so it always uses utf8proc.
+case "$host_os" in
+*mingw*)
+	enable_utf8proc=yes
+	;;
+esac
+
 # Look for utf8proc.
 AC_ARG_ENABLE(
 	utf8proc,
@@ -1011,6 +1019,9 @@ case "$host_os" in
 		AC_MSG_RESULT(win32)
 		PLATFORM=win32
 		AC_DEFINE(TMUX_WIN32)
+		if test "x$enable_utf8proc" != xyes; then
+			AC_MSG_ERROR([native Windows build requires utf8proc])
+		fi
 		AM_CPPFLAGS="-I$srcdir -I$srcdir/win32 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DNCURSES_STATIC $AM_CPPFLAGS"
 		CPPFLAGS="-I$srcdir -I$srcdir/win32 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000006 -DNCURSES_STATIC $CPPFLAGS"
 		;;
