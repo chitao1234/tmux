@@ -76,6 +76,12 @@ struct win32_io_endpoint {
 	uint32_t	 events;
 	int		 pending;
 	int		 active;
+	/*
+	 * Set when teardown could not stop the backend in bounded time. The
+	 * endpoint is removed from dispatch and its owner is detached so a
+	 * late completion cannot touch freed memory.
+	 */
+	int		 abandoned;
 };
 
 
@@ -252,6 +258,7 @@ static void	win32_io_endpoint_init(struct win32_io_endpoint *,
 		     void (*)(void *, uint32_t), void *);
 static void	win32_io_service_enqueue_endpoint(struct win32_io_endpoint *,
 		     uint32_t);
+static void	win32_io_service_abandon_endpoint(struct win32_io_endpoint *);
 static void	win32_io_service_deactivate_endpoint(
 		     struct win32_io_endpoint *);
 static void	win32_io_service_wakeup_locked(void);
@@ -575,6 +582,34 @@ win32_io_service_deactivate_endpoint(struct win32_io_endpoint *endpoint)
 	LeaveCriticalSection(&win32_io.lock);
 }
 
+/*
+ * Detach an endpoint whose backend did not stop in bounded time.
+ *
+ * The backend memory is intentionally leaked, and the endpoint is removed
+ * from dispatch with its owner pointer cleared, so a late completion can
+ * never reach freed tmux state. The worker may still be blocked on the
+ * borrowed handle; that is the accepted process-exit leak documented in
+ * docs/win32-redesign-plan.md. Callers must not keep using the endpoint.
+ */
+static void
+win32_io_service_abandon_endpoint(struct win32_io_endpoint *endpoint)
+{
+	if (!win32_io.initialized)
+		return;
+	EnterCriticalSection(&win32_io.lock);
+	endpoint->abandoned = 1;
+	endpoint->active = 0;
+	endpoint->owner = NULL;
+	endpoint->arg = NULL;
+	endpoint->eventcb = NULL;
+	endpoint->events = 0;
+	if (endpoint->pending) {
+		TAILQ_REMOVE(&win32_io.pending, endpoint, entry);
+		endpoint->pending = 0;
+	}
+	LeaveCriticalSection(&win32_io.lock);
+}
+
 static void
 win32_io_service_enqueue_reader(struct win32_handle_event *whe)
 {
@@ -713,6 +748,8 @@ static void
 win32_io_service_dispatch_endpoint(struct win32_io_endpoint *endpoint,
     uint32_t events)
 {
+	if (endpoint->abandoned || endpoint->owner == NULL)
+		return;
 	switch (endpoint->type) {
 	case WIN32_IO_ENDPOINT_READER:
 		win32_io_service_dispatch_reader(endpoint->owner, events);
@@ -992,8 +1029,11 @@ win32_process_event_free(struct win32_process_event *wpe)
 	wpe->state = WIN32_PROCESS_EVENT_CANCELED;
 	LeaveCriticalSection(&wpe->lock);
 	win32_io_service_deactivate_endpoint(&wpe->endpoint);
-	if (win32_unregister_process_wait(wpe, __func__) != 0)
+	if (win32_unregister_process_wait(wpe, __func__) != 0) {
+		/* The wait may still fire: detach it from the freed owner. */
+		win32_io_service_abandon_endpoint(&wpe->endpoint);
 		return;
+	}
 	DeleteCriticalSection(&wpe->lock);
 	free(wpe);
 }
@@ -2152,7 +2192,7 @@ win32_handle_event_free(struct win32_handle_event *whe)
 			CancelIoEx(whe->handle, &whe->overlapped);
 		LeaveCriticalSection(&whe->lock);
 		if (win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
-			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			win32_io_service_abandon_endpoint(&whe->endpoint);
 			return;
 		}
 	} else if (whe->backend == WIN32_HANDLE_EVENT_CONSOLE) {
@@ -2169,7 +2209,7 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		LeaveCriticalSection(&win32_console_reader.lock);
 		if (win32_wait_console_reader_endpoint(whe->complete,
 		    __func__) != 0) {
-			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			win32_io_service_abandon_endpoint(&whe->endpoint);
 			return;
 		}
 	} else if (whe->stop != NULL) {
@@ -2181,7 +2221,7 @@ win32_handle_event_free(struct win32_handle_event *whe)
 	if (whe->thread != NULL) {
 		CancelSynchronousIo(whe->thread);
 		if (win32_wait_worker_thread(whe->thread, __func__) != 0) {
-			win32_io_service_deactivate_endpoint(&whe->endpoint);
+			win32_io_service_abandon_endpoint(&whe->endpoint);
 			return;
 		}
 	}
@@ -2732,18 +2772,18 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 	}
 	if (whw->backend == WIN32_HANDLE_WRITER_IOCP &&
 	    win32_wait_iocp_endpoint(whw->complete, __func__) != 0) {
-		win32_io_service_deactivate_endpoint(&whw->endpoint);
+		win32_io_service_abandon_endpoint(&whw->endpoint);
 		return;
 	}
 	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE &&
 	    win32_wait_console_endpoint(whw->complete, __func__) != 0) {
-		win32_io_service_deactivate_endpoint(&whw->endpoint);
+		win32_io_service_abandon_endpoint(&whw->endpoint);
 		return;
 	}
 	if (whw->thread != NULL) {
 		CancelSynchronousIo(whw->thread);
 		if (win32_wait_worker_thread(whw->thread, __func__) != 0) {
-			win32_io_service_deactivate_endpoint(&whw->endpoint);
+			win32_io_service_abandon_endpoint(&whw->endpoint);
 			return;
 		}
 	}
