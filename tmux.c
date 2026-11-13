@@ -336,6 +336,57 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 	free(copy);
 }
 
+/*
+ * Normalize a Win32 path to forward slashes with no trailing separator
+ * (except a drive or share root). This is the single separator-normalizing
+ * primitive; callers that need a display path should keep the original.
+ */
+char *
+path_normalize(const char *path)
+{
+	char	*copy;
+	size_t	 i, len;
+
+	if (path == NULL)
+		return (NULL);
+	copy = xstrdup(path);
+	for (i = 0; copy[i] != '\0'; i++) {
+		if (copy[i] == '\\')
+			copy[i] = '/';
+	}
+	len = strlen(copy);
+	while (len > 3 && copy[len - 1] == '/')
+		copy[--len] = '\0';
+	return (copy);
+}
+
+/*
+ * True if the path is a drive root ("C:/") or a share root ("//host/share").
+ */
+int
+path_is_root(const char *path)
+{
+	const char	*p;
+
+	if (path == NULL || *path == '\0')
+		return (0);
+
+	if (isalpha((u_char)path[0]) && path[1] == ':' &&
+	    (path[2] == '\0' || (path[2] == '/' && path[3] == '\0')))
+		return (1);
+
+	if (path[0] != '/' || path[1] != '/')
+		return (0);
+
+	p = strchr(path + 2, '/');
+	if (p == NULL)
+		return (1);
+	p = strchr(p + 1, '/');
+	if (p == NULL || p[1] == '\0')
+		return (1);
+	return (0);
+}
+
 char *
 path_join(const char *base, const char *path)
 {

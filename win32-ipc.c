@@ -11,7 +11,6 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
-#include <ctype.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,43 +228,13 @@ win32_ipc_path_to_sockaddr(const char *path, struct sockaddr_un *sun,
 static char *
 win32_ipc_normalize_path(const char *path)
 {
-	char	*copy;
-	u_int	 i;
-
-	if (path == NULL)
-		return (NULL);
-	copy = xstrdup(path);
-	for (i = 0; copy[i] != '\0'; i++) {
-		if (copy[i] == '\\')
-			copy[i] = '/';
-	}
-	while (strlen(copy) > 3 && copy[strlen(copy) - 1] == '/')
-		copy[strlen(copy) - 1] = '\0';
-	return (copy);
+	return (path_normalize(path));
 }
 
 static int
 win32_ipc_path_is_root(const char *path)
 {
-	const char	*p;
-
-	if (path == NULL || *path == '\0')
-		return (0);
-
-	if (isalpha((u_char)path[0]) && path[1] == ':' &&
-	    (path[2] == '\0' || (path[2] == '/' && path[3] == '\0')))
-		return (1);
-
-	if (path[0] != '/' || path[1] != '/')
-		return (0);
-
-	p = strchr(path + 2, '/');
-	if (p == NULL)
-		return (1);
-	p = strchr(p + 1, '/');
-	if (p == NULL || p[1] == '\0')
-		return (1);
-	return (0);
+	return (path_is_root(path));
 }
 
 static int

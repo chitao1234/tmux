@@ -2438,6 +2438,8 @@ int		 path_is_drive_relative(const char *);
 char		*expand_path(const char *, const char *);
 void		 expand_paths(const char *, char ***, u_int *, int);
 char		*path_join(const char *, const char *);
+char		*path_normalize(const char *);
+int		 path_is_root(const char *);
 const char	*path_basename(const char *);
 char		*path_basename_copy(const char *);
 char		*path_dirname(const char *);
