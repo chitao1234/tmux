@@ -21,6 +21,18 @@
 
 #ifdef TMUX_WIN32
 
+/*
+ * Pane lifecycle. This is the single state for a Win32 pane; the individual
+ * facts (process exit, output EOF) are tracked separately below and only
+ * drive transitions.
+ */
+enum win32_pane_state {
+	WIN32_PANE_RUNNING,	/* process alive */
+	WIN32_PANE_EXITING,	/* exit seen, output may still be draining */
+	WIN32_PANE_DRAINING,	/* output closed, waiting for consumers */
+	WIN32_PANE_DEAD		/* nothing left to do */
+};
+
 struct win32_pane {
 	HPCON		 hpcon;
 	HANDLE		 input_read;
@@ -38,7 +50,11 @@ struct win32_pane {
 	struct event	 tree_timer;
 	struct evbuffer	*input_queue;
 	int		 output_paused;
-	int		 exited;
+
+	/* Lifecycle state and the facts that drive it. */
+	enum win32_pane_state state;
+	int		 process_exited;
+	int		 output_eof;
 	int		 status;
 };
 
@@ -1077,6 +1093,7 @@ static void
 win32_pane_output_event_cb(void *arg, uint32_t events)
 {
 	struct window_pane	*wp = arg;
+	struct win32_pane	*pw = wp->win32;
 	int			 status;
 
 	if (events & WIN32_IO_EVENT_READ)
@@ -1092,6 +1109,12 @@ win32_pane_output_event_cb(void *arg, uint32_t events)
 		log_debug("%%%u output EOF", wp->id);
 	else
 		log_debug("%%%u output canceled", wp->id);
+	if (pw != NULL) {
+		pw->output_eof = 1;
+		if (pw->state == WIN32_PANE_RUNNING ||
+		    pw->state == WIN32_PANE_EXITING)
+			pw->state = WIN32_PANE_DRAINING;
+	}
 	if (win32_pane_exited(wp, &status)) {
 		win32_pane_note_exit(wp, status);
 	} else {
@@ -1126,8 +1149,46 @@ win32_job_active_processes(HANDLE job, DWORD *active)
 	return (1);
 }
 
-static void	win32_pane_watch_tree(struct window_pane *);
 static void	win32_job_watch_tree(struct win32_job *);
+
+static void	win32_pane_watch_tree(struct window_pane *);
+
+/*
+ * True once the pane can no longer produce output: the process tree is gone
+ * and the output reader has finished. This is intentionally independent of
+ * the tmux-side PANE_EXITED flags so that helpers are released from the
+ * Win32 lifecycle itself.
+ */
+static int
+win32_pane_output_finished(struct window_pane *wp)
+{
+	struct win32_pane	*pw;
+
+	if (wp == NULL || wp->win32 == NULL)
+		return (1);
+	pw = wp->win32;
+	if (!pw->process_exited)
+		return (0);
+	if (!win32_pane_output_done(wp))
+		return (0);
+	if (win32_pane_buffered(wp) != 0)
+		return (0);
+	return (1);
+}
+
+/*
+ * A pipe-pane helper reading pane output needs an explicit EOF. Closing it
+ * from the pane lifecycle avoids the deadlock where pane destroy waits for
+ * the helper and the helper waits for EOF.
+ */
+static void
+win32_pane_release_helper(struct window_pane *wp)
+{
+	if (wp->pipe_job == NULL || !win32_pane_output_finished(wp))
+		return;
+	log_debug("%%%u closing pipe-pane helper stdin", wp->id);
+	job_close_stdin(wp->pipe_job);
+}
 
 static int
 win32_pane_set_exited(struct window_pane *wp, int *status)
@@ -1137,7 +1198,7 @@ win32_pane_set_exited(struct window_pane *wp, int *status)
 	if (wp->win32 == NULL || wp->win32->process == NULL)
 		return (0);
 	pw = wp->win32;
-	if (pw->exited) {
+	if (pw->process_exited) {
 		if (status != NULL)
 			*status = pw->status;
 		return (1);
@@ -1146,7 +1207,9 @@ win32_pane_set_exited(struct window_pane *wp, int *status)
 		pw->status = *status;
 	else
 		(void)win32_process_status(pw->process, &pw->status);
-	pw->exited = 1;
+	pw->process_exited = 1;
+	if (pw->state == WIN32_PANE_RUNNING)
+		pw->state = WIN32_PANE_EXITING;
 	win32_pane_close_stdin(pw);
 	win32_pane_watch_tree(wp);
 	return (1);
@@ -1191,6 +1254,7 @@ win32_pane_tree_timer(__unused tmux_event_fd fd, __unused short events,
 	}
 	if (wp->win32 != NULL)
 		win32_close_handle(&wp->win32->output_read);
+	win32_pane_release_helper(wp);
 	if (window_pane_destroy_ready(wp))
 		server_destroy_pane(wp, 1);
 }
@@ -1219,6 +1283,7 @@ win32_pane_exit_cb(void *arg)
 		return;
 	win32_pane_note_exit(wp, status);
 	log_debug("%%%u exited", wp->id);
+	win32_pane_release_helper(wp);
 	if (window_pane_destroy_ready(wp))
 		server_destroy_pane(wp, 1);
 }
@@ -1327,6 +1392,7 @@ win32_pane_spawn(struct spawn_context *sc, struct window_pane *wp,
 	}
 	wp->pid = (pid_t)pi.dwProcessId;
 	wp->win32 = pw;
+	pw->state = WIN32_PANE_RUNNING;
 
 	pw->output_event = win32_io_reader_new_overlapped(pw->output_read,
 	    win32_pane_output_event_cb, wp);
@@ -1385,7 +1451,7 @@ win32_pane_resize(struct window_pane *wp, u_int sx, u_int sy)
 	if (wp == NULL || wp->win32 == NULL)
 		return;
 	pw = wp->win32;
-	if (pw->hpcon == NULL || pw->exited)
+	if (pw->hpcon == NULL || pw->process_exited)
 		return;
 	if (win32_pseudoconsole_size(sx, sy, &size, NULL) != 0) {
 		log_debug("%%%u resize out of range: %ux%u", wp->id, sx, sy);
@@ -1409,6 +1475,7 @@ win32_pane_release(struct window_pane *wp, int terminate)
 	wp->win32 = NULL;
 	event = wp->event;
 	wp->event = NULL;
+	pw->state = WIN32_PANE_DEAD;
 	if (terminate)
 		win32_child_kill("pane", pw->process_id, pw->job, pw->process);
 	if (event_initialized(&pw->tree_timer))
@@ -1446,7 +1513,7 @@ win32_pane_exited(struct window_pane *wp, int *status)
 
 	if (wp->win32 == NULL || wp->win32->process == NULL)
 		return (0);
-	if (wp->win32->exited)
+	if (wp->win32->process_exited)
 		return (win32_pane_set_exited(wp, status));
 	found = win32_process_status(wp->win32->process, status);
 	if (!found)
@@ -1491,8 +1558,10 @@ win32_pane_output_done(struct window_pane *wp)
 int
 win32_pane_output_eof(struct window_pane *wp)
 {
-	if (wp->win32 == NULL || wp->win32->output_event == NULL)
+	if (wp->win32 == NULL)
 		return (1);
+	if (wp->win32->output_event == NULL)
+		return (wp->win32->output_eof);
 	return (win32_io_reader_eof(wp->win32->output_event));
 }
 

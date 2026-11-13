@@ -322,6 +322,20 @@ cmd_pipe_pane_job_update1(struct job *job, int allow_pause)
 	if (available != 0) {
 		if (!win32_pane_input_ready(wp) ||
 		    win32_pane_write(wp, EVBUFFER_DATA(evb), available) != 0) {
+			/*
+			 * A dead pane is terminal, not backpressure: drop the
+			 * remaining helper output and stop reading instead of
+			 * retrying forever.
+			 */
+			if (window_pane_exited(wp) ||
+			    wp->win32 == NULL ||
+			    errno != EAGAIN) {
+				log_debug("%%%u pipe job pane gone, dropping "
+				    "%zu bytes", wp->id, available);
+				evbuffer_drain(evb, available);
+				job_set_reading(job, 0);
+				return (0);
+			}
 			log_debug("%%%u pipe job input backpressure", wp->id);
 			if (allow_pause) {
 				job_set_reading(job, 0);
