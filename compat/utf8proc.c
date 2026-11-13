@@ -21,11 +21,11 @@
 #include "compat.h"
 
 int
-utf8proc_wcwidth(wchar_t wc)
+utf8proc_wcwidth(u_int uc)
 {
 	int	cat;
 
-	cat = utf8proc_category(wc);
+	cat = utf8proc_category((utf8proc_int32_t)uc);
 	if (cat == UTF8PROC_CATEGORY_CO) {
 		/*
 		 * The private use category is where powerline and similar
@@ -33,7 +33,7 @@ utf8proc_wcwidth(wchar_t wc)
 		 */
 		return (1);
 	}
-	return (utf8proc_charwidth(wc));
+	return (utf8proc_charwidth((utf8proc_int32_t)uc));
 }
 
 int

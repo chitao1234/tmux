@@ -111,7 +111,6 @@ struct tm *gmtime_r(const time_t *, struct tm *);
 struct tm *localtime_r(const time_t *, struct tm *);
 ssize_t readv(int, const struct iovec *, int);
 char *ttyname(int);
-int wcwidth(wchar_t);
 ssize_t writev(int, const struct iovec *, int);
 char *getenv(const char *);
 void win32_copy_environ(struct environ *);

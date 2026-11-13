@@ -471,7 +471,7 @@ int		 systemd_move_to_new_cgroup(char **);
 
 #ifdef HAVE_UTF8PROC
 /* utf8proc.c */
-int		 utf8proc_wcwidth(wchar_t);
+int		 utf8proc_wcwidth(u_int);
 int		 utf8proc_mbtowc(wchar_t *, const char *, size_t);
 int		 utf8proc_wctomb(char *, wchar_t);
 #endif
