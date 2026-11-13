@@ -168,7 +168,12 @@ char *win32_get_module_path_utf8(void);
 #endif
 
 #ifndef _PATH_BSHELL
-#define _PATH_BSHELL "cmd.exe"
+/*
+ * The default shell path must be absolute: a bare name is resolved by
+ * CreateProcess through the current directory, which allows executable
+ * planting.
+ */
+#define _PATH_BSHELL "C:\\Windows\\System32\\cmd.exe"
 #endif
 
 #ifndef _PATH_DEVNULL
