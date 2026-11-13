@@ -335,6 +335,14 @@ tty_write_callback(__unused tmux_event_fd fd, __unused short events, void *data)
 	if (size == 0)
 		return;
 
+	/*
+	 * Check backpressure before any early return below. The Win32 paths
+	 * return early whenever output is still in flight, so without this
+	 * tty->out would grow without bound on a stalled console.
+	 */
+	if (tty_block_maybe(tty))
+		return;
+
 #ifdef TMUX_WIN32
 	if (tty->win32_out != NULL) {
 		size_t	nsend = size;
@@ -408,8 +416,7 @@ write_done:
 			c->redraw -= nwrite;
 		log_debug("%s: waiting for redraw, %zu bytes left", c->name,
 		    c->redraw);
-	} else if (tty_block_maybe(tty))
-		return;
+	}
 
 #ifdef TMUX_WIN32
 after_redraw:
