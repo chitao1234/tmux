@@ -222,7 +222,7 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	const char		 *cmd, *tmp, *home = find_home();
 	const char		 *actual_cwd = NULL;
 #else
-	const char		 *cmd, *tmp;
+	const char		 *cmd;
 	char			 *cwd_target = NULL;
 #endif
 	int			  argc;
@@ -379,15 +379,8 @@ spawn_pane(struct spawn_context *sc, char **cause)
 
 	/* Then the shell. If respawning, use the old one. */
 	if (~sc->flags & SPAWN_RESPAWN) {
-		tmp = options_get_string(s->options, "default-shell");
-#ifdef TMUX_WIN32
-		if (!checkshell(tmp))
-			tmp = win32_default_shell();
-#endif
-		if (!checkshell(tmp))
-			tmp = _PATH_BSHELL;
 		free(new_wp->shell);
-		new_wp->shell = xstrdup(tmp);
+		new_wp->shell = xstrdup(shell_default(s->options));
 	}
 	environ_set(child, "SHELL", 0, "%s", new_wp->shell);
 

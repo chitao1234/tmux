@@ -576,9 +576,7 @@ popup_make_pane(struct popup_data *pd, enum layout_type type)
 	screen_resize(&new_wp->base, new_wp->sx, new_wp->sy, 1);
 	screen_init(&pd->s, 1, 1, 0);
 
-	shell = options_get_string(s->options, "default-shell");
-	if (!checkshell(shell))
-		shell = _PATH_BSHELL;
+	shell = shell_default(s->options);
 	new_wp->shell = xstrdup(shell);
 
 	window_pane_set_event(new_wp);

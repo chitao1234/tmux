@@ -788,7 +788,7 @@ win32_passwd_set(const char *name)
 
 	shell = win32_getenv_canonical("SHELL");
 	if (shell == NULL || !checkshell(shell))
-		shell = win32_default_shell();
+		shell = shell_default(NULL);
 	if (shell == NULL || *shell == '\0')
 		shell = _PATH_BSHELL;
 

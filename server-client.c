@@ -683,11 +683,9 @@ server_client_exec(struct client *c, const char *cmd)
 	cmdsize = strlen(cmd) + 1;
 
 	if (s != NULL)
-		shell = options_get_string(s->options, "default-shell");
+		shell = shell_default(s->options);
 	else
-		shell = options_get_string(global_s_options, "default-shell");
-	if (!checkshell(shell))
-		shell = _PATH_BSHELL;
+		shell = shell_default(global_s_options);
 	shellsize = strlen(shell) + 1;
 
 	msg = xmalloc(cmdsize + shellsize);
@@ -3216,9 +3214,7 @@ server_client_dispatch_shell(struct client *c)
 {
 	const char	*shell;
 
-	shell = options_get_string(global_s_options, "default-shell");
-	if (!checkshell(shell))
-		shell = _PATH_BSHELL;
+	shell = shell_default(global_s_options);
 	proc_send(c->peer, MSG_SHELL, -1, shell, strlen(shell) + 1);
 
 	proc_kill_peer(c->peer);

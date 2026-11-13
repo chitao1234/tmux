@@ -94,7 +94,9 @@ getenv_canonical(const char *name)
 static const char *
 getshell(void)
 {
+#ifndef TMUX_WIN32
 	struct passwd	*pw;
+#endif
 	const char	*shell;
 
 	shell = getenv_canonical("SHELL");
@@ -105,12 +107,35 @@ getshell(void)
 	shell = win32_default_shell();
 	if (checkshell(shell))
 		return (shell);
-#endif
-
+#else
 	pw = getpwuid(getuid());
 	if (pw != NULL && checkshell(pw->pw_shell))
 		return (pw->pw_shell);
+#endif
 
+	return (_PATH_BSHELL);
+}
+
+const char *
+shell_default(struct options *oo)
+{
+	const char	*shell;
+
+	if (oo != NULL) {
+		shell = options_get_string(oo, "default-shell");
+		if (checkshell(shell))
+			return (shell);
+	}
+#ifdef TMUX_WIN32
+	/*
+	 * Always prefer the shell resolved from COMSPEC or the system
+	 * directory: a bare name would be resolved through the current
+	 * directory by CreateProcess.
+	 */
+	shell = win32_default_shell();
+	if (shell != NULL)
+		return (shell);
+#endif
 	return (_PATH_BSHELL);
 }
 

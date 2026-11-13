@@ -2432,6 +2432,7 @@ extern const char	*shell_command;
 extern int		 ptm_fd;
 extern const char	*shell_command;
 int		 checkshell(const char *);
+const char	*shell_default(struct options *);
 int		 path_is_absolute(const char *);
 int		 path_is_drive_relative(const char *);
 char		*expand_path(const char *, const char *);
