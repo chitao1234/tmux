@@ -46,6 +46,11 @@ char		*win32_wide_to_utf8(const wchar_t *);
 int		 win32_wide_to_argv(const wchar_t *, int *, char ***);
 int		 win32_utf8_to_argv(const char *, int *, char ***);
 int		 win32_path_is_dir(const char *);
+int		 win32_path_canon(const char *, const char *, char **, char **,
+		     char **);
+char		*win32_path_canon_identity(const char *, const char *, char **);
+int		 win32_path_equals(const char *, const char *);
+char		*win32_path_join(const char *, const char *);
 const char	*win32_default_cwd(void);
 const char	*win32_default_shell(void);
 char		*win32_resolve_cwd(const char *, const char *, char **);

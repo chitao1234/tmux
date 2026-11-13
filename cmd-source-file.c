@@ -160,14 +160,7 @@ cmd_source_file_quote_for_glob(const char *path)
 static char *
 cmd_source_file_normalize_for_glob(const char *path)
 {
-	char	*normalized, *cp;
-
-	normalized = xstrdup(path);
-	for (cp = normalized; *cp != '\0'; cp++) {
-		if (*cp == '\\')
-			*cp = '/';
-	}
-	return (normalized);
+	return (path_normalize(path));
 }
 #endif
 

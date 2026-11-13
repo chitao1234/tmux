@@ -252,6 +252,7 @@ dist_tmux_SOURCES += \
 	win32-event.c \
 	win32-glob.c \
 	win32-ipc.c \
+	win32-path.c \
 	win32-platform.h \
 	win32-proc.c \
 	win32-terminal.c

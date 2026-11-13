@@ -886,7 +886,7 @@ ipc_default_path_win32(const char *label, char **cause)
 static char *
 ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 {
-	char		*expanded, *resolved;
+	char		*expanded, *display;
 	const char	*cwd;
 
 	expanded = expand_path(path, find_home());
@@ -896,70 +896,23 @@ ipc_endpoint_canonicalize_win32(const char *path, char **cause)
 		errno = EINVAL;
 		return (NULL);
 	}
-	if (path_is_drive_relative(expanded)) {
-		if (cause != NULL) {
-			xasprintf(cause, "socket path must not be drive-relative: "
-			    "%s", expanded);
-		}
+	cwd = find_cwd();
+	if (win32_path_canon(expanded, cwd, &display, NULL, cause) != 0) {
 		free(expanded);
+		if (cause != NULL && *cause == NULL)
+			xasprintf(cause, "couldn't canonicalize socket path: %s",
+			    path);
 		errno = EINVAL;
 		return (NULL);
 	}
-	cwd = find_cwd();
-	resolved = win32_resolve_cwd(expanded, cwd, cause);
 	free(expanded);
-	if (resolved != NULL)
-		return (resolved);
-	if (cause != NULL && *cause == NULL)
-		xasprintf(cause, "couldn't canonicalize socket path: %s", path);
-	errno = EINVAL;
-	return (NULL);
+	return (display);
 }
 
 static char *
 ipc_endpoint_compare_win32(const char *path, char **cause)
 {
-	wchar_t		*wpath;
-	char		*compare;
-	size_t		 i, len;
-
-	if (cause != NULL)
-		*cause = NULL;
-	if (path == NULL) {
-		errno = EINVAL;
-		return (NULL);
-	}
-
-	wpath = win32_utf8_to_wide(path);
-	if (wpath == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't convert socket path: %s", path);
-		errno = EINVAL;
-		return (NULL);
-	}
-	(void)CharLowerBuffW(wpath, wcslen(wpath));
-
-	compare = win32_wide_to_utf8(wpath);
-	free(wpath);
-	if (compare == NULL) {
-		if (cause != NULL) {
-			xasprintf(cause,
-			    "couldn't build socket comparison path: %s", path);
-		}
-		errno = EINVAL;
-		return (NULL);
-	}
-
-	for (i = 0; compare[i] != '\0'; i++) {
-		if (compare[i] == '\\')
-			compare[i] = '/';
-	}
-	len = strlen(compare);
-	while (len > 3 && compare[len - 1] == '/') {
-		compare[len - 1] = '\0';
-		len--;
-	}
-	return (compare);
+	return (win32_path_canon_identity(path, NULL, cause));
 }
 
 static int

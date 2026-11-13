@@ -35,10 +35,20 @@ win32_glob_is_wseparator(wchar_t ch)
 static wchar_t
 win32_fnmatch_fold(wchar_t ch)
 {
-	WCHAR	wch = ch;
+	wchar_t	in[2], out[2];
+	int	n;
 
-	CharLowerBuffW(&wch, 1);
-	return (wch);
+	/*
+	 * Ordinal case folding, matching the path identity layer. Do not use
+	 * CharLowerBuffW: it is locale dependent.
+	 */
+	in[0] = ch;
+	in[1] = L'\0';
+	n = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, in, 1, out,
+	    2, NULL, NULL, 0);
+	if (n != 1)
+		return (ch);
+	return (out[0]);
 }
 
 static int
