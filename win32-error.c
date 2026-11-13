@@ -103,13 +103,11 @@ win32_refresh_environ(void)
 	struct environ	*env;
 	struct environ_entry *envent;
 	size_t		 count, i;
-
-	win32_free_environ_block();
+	char		**new_environ;
 
 	env = environ_create();
 	if (win32_import_environment(env) != 0) {
 		environ_free(env);
-		environ = xcalloc(1, sizeof *environ);
 		return;
 	}
 
@@ -118,15 +116,26 @@ win32_refresh_environ(void)
 	    envent = environ_next(envent))
 		count++;
 
-	environ = xcalloc(count + 1, sizeof *environ);
+	new_environ = xcalloc(count + 1, sizeof *new_environ);
 	i = 0;
 	for (envent = environ_first(env); envent != NULL;
 	    envent = environ_next(envent)) {
 		if (envent->value == NULL)
 			continue;
-		xasprintf(&environ[i++], "%s=%s", envent->name, envent->value);
+		xasprintf(&new_environ[i++], "%s=%s", envent->name,
+		    envent->value);
 	}
 	environ_free(env);
+
+	/*
+	 * Keep the exported environ array and the CRT view on the same data.
+	 * Everything in the tree reads the array through the getenv() shim
+	 * below, and libc consumers (execl, system) read _environ.
+	 */
+	if (environ != NULL)
+		win32_free_environ_block();
+	environ = new_environ;
+	_environ = new_environ;
 }
 
 const char *
@@ -288,25 +297,38 @@ win32_getenv_utf8(const char *name)
 {
 	wchar_t	*wname, *value;
 	char	*out;
-	DWORD	 n;
+	DWORD	 n, got;
+	int	 i;
 
 	wname = win32_utf8_to_wide(name);
 	if (wname == NULL)
 		return (NULL);
-	n = GetEnvironmentVariableW(wname, NULL, 0);
-	if (n == 0) {
-		free(wname);
-		return (NULL);
-	}
-	value = xcalloc(n, sizeof *value);
-	if (GetEnvironmentVariableW(wname, value, n) == 0) {
+
+	/*
+	 * GetEnvironmentVariableW returns 0 both for a missing variable and
+	 * for an existing empty one, so check the last error. Retry if the
+	 * value grows between the sizing call and the read.
+	 */
+	for (i = 0; i < 4; i++) {
+		SetLastError(ERROR_SUCCESS);
+		n = GetEnvironmentVariableW(wname, NULL, 0);
+		if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+			free(wname);
+			return (NULL);
+		}
+		value = xcalloc(n + 1, sizeof *value);
+		SetLastError(ERROR_SUCCESS);
+		got = GetEnvironmentVariableW(wname, value, n + 1);
+		if (got < n + 1)
+			break;
 		free(value);
-		free(wname);
-		return (NULL);
+		value = NULL;
 	}
+	free(wname);
+	if (value == NULL)
+		return (NULL);
 	out = win32_wide_to_utf8(value);
 	free(value);
-	free(wname);
 	return (out);
 }
 
@@ -956,6 +978,8 @@ win32_free_environ_block(void)
 
 	if (environ == NULL)
 		return;
+	if (_environ == environ)
+		_environ = NULL;
 	for (i = 0; environ[i] != NULL; i++)
 		free(environ[i]);
 	free(environ);
