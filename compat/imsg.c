@@ -78,10 +78,24 @@ imsgbuf_set_maxsize(struct imsgbuf *imsgbuf, uint32_t max)
 int
 imsgbuf_read(struct imsgbuf *imsgbuf)
 {
+#ifdef TMUX_WIN32
+	return (ibuf_read(imsgbuf->fd, imsgbuf->w));
+#else
 	if (imsgbuf->flags & IMSG_ALLOW_FDPASS)
 		return msgbuf_read(imsgbuf->fd, imsgbuf->w);
 	else
 		return ibuf_read(imsgbuf->fd, imsgbuf->w);
+#endif
+}
+
+/*
+ * Feed raw transport bytes into the imsg reader. Used on Win32 where the
+ * named pipe is pumped by the I/O reactor instead of a readable fd.
+ */
+int
+imsgbuf_read_bytes(struct imsgbuf *imsgbuf, const void *data, size_t size)
+{
+	return (msgbuf_read_bytes(imsgbuf->w, data, size));
 }
 
 int

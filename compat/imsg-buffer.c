@@ -909,6 +909,30 @@ ibuf_read(int fd, struct msgbuf *msgbuf)
 	return (ibuf_read_process(msgbuf, -1));
 }
 
+/*
+ * Feed already-read bytes into an imsg buffer. This is the Win32 transport
+ * entry point: named-pipe bytes arrive through the I/O reactor, not through
+ * a file descriptor.
+ */
+int
+msgbuf_read_bytes(struct msgbuf *msgbuf, const void *data, size_t size)
+{
+	size_t	space;
+
+	if (msgbuf->rbuf == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	space = IBUF_READ_SIZE - msgbuf->roff;
+	if (size > space) {
+		errno = EMSGSIZE;
+		return (-1);
+	}
+	memcpy(msgbuf->rbuf + msgbuf->roff, data, size);
+	msgbuf->roff += size;
+	return (ibuf_read_process(msgbuf, -1));
+}
+
 int
 msgbuf_read(int fd, struct msgbuf *msgbuf)
 {

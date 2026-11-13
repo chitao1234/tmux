@@ -125,6 +125,7 @@ int		 ibuf_write(int, struct msgbuf *);
 int		 msgbuf_write(int, struct msgbuf *);
 int		 ibuf_read(int, struct msgbuf *);
 int		 msgbuf_read(int, struct msgbuf *);
+int		 msgbuf_read_bytes(struct msgbuf *, const void *, size_t);
 struct ibuf	*msgbuf_get(struct msgbuf *);
 
 struct ibufqueue	*ibufq_new(void);
@@ -140,6 +141,7 @@ int	 imsgbuf_init(struct imsgbuf *, int);
 void	 imsgbuf_allow_fdpass(struct imsgbuf *imsgbuf);
 int	 imsgbuf_set_maxsize(struct imsgbuf *, uint32_t);
 int	 imsgbuf_read(struct imsgbuf *);
+int	 imsgbuf_read_bytes(struct imsgbuf *, const void *, size_t);
 int	 imsgbuf_write(struct imsgbuf *);
 int	 imsgbuf_flush(struct imsgbuf *);
 void	 imsgbuf_clear(struct imsgbuf *);
