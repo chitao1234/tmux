@@ -78,8 +78,8 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 - If a change touches `client.c`, `server-client.c`, `tmux-protocol.h`, or `win32-event.c`, also inspect:
   `tools/win32-console-relay-smoke.ps1`,
   `tools/win32-direct-handle-smoke.ps1`,
-  `tools/win32-console-relay-plan.md`,
   `tools/win32-port-findings.md`.
+- Design plans for the Win32 redesign live in `docs/` (untracked, not distributed).
 - If a change touches `win32-conpty.c`, also inspect the call sites and lifecycle neighbors in:
   `spawn.c`, `job.c`, `input-keys.c`, `cmd-paste-buffer.c`, `server-fn.c`, `window.c`, and `cfg.c`.
 - If a change touches `win32-ipc.c`, socket handling in `tmux.c`, or any `-S` / `$TMUX` path behavior, also review the security and path assumptions documented in `tools/win32-port-findings.md`.
