@@ -63,8 +63,6 @@ Files:
 - [`client.c`](../client.c): native console clients still choose the relay
   transport; direct handle mode is for non-console stdio or diagnostics.
 - [`win32-proc.c`](../win32-proc.c): the server still runs detached.
-- [`tools/win32-server-side-handle-io-plan.md`](win32-server-side-handle-io-plan.md):
-  records the direct-handle migration constraints.
 - [`tools/win32-console-direct-probe.ps1`](win32-console-direct-probe.ps1):
   is the native-console probe entry point.
 

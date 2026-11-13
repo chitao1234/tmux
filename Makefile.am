@@ -5,8 +5,7 @@ CLEANFILES = tmux.1.mdoc tmux.1.man cmd-parse.c
 # Distribution tarball options.
 EXTRA_DIST = \
 	CHANGES README README.ja COPYING example_tmux.conf \
-	osdep-*.c mdoc2man.awk tmux.1 \
-	tools/win32-io-service-plan.md
+	osdep-*.c mdoc2man.awk tmux.1
 dist_EXTRA_tmux_SOURCES = compat/*.[ch]
 
 # Preprocessor flags.
