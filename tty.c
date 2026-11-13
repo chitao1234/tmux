@@ -446,7 +446,12 @@ tty_write_schedule(struct tty *tty)
 void
 tty_write_pending(struct tty *tty)
 {
-	if (~tty->flags & TTY_STARTED)
+	/*
+	 * A graceful close still has to flush the reset sequences that
+	 * tty_stop_tty() queued, so keep writing while close is pending.
+	 */
+	if (~tty->flags & TTY_STARTED &&
+	    ~tty->flags & TTY_CLOSEPENDING)
 		return;
 	tty_write_schedule(tty);
 }
@@ -901,10 +906,18 @@ tty_close_graceful(struct tty *tty)
 	}
 	if ((tty->flags & TTY_OPENED) && c->win32_console) {
 		tty_stop_tty(tty);
+		/*
+		 * Wait for both the bytes already handed to the client and
+		 * the bytes still queued in tty->out. Checking only the
+		 * former drops the final redraw on detach.
+		 */
 		if (!c->win32_tty_transport_lost &&
-		    c->win32_tty_out_pending != 0) {
-			log_debug("%s: %s Win32 relay close pending (%zu bytes)",
-			    __func__, c->name, c->win32_tty_out_pending);
+		    (c->win32_tty_out_pending != 0 ||
+		    EVBUFFER_LENGTH(tty->out) != 0)) {
+			log_debug("%s: %s Win32 relay close pending "
+			    "(%zu sent, %zu queued)", __func__, c->name,
+			    c->win32_tty_out_pending,
+			    EVBUFFER_LENGTH(tty->out));
 			tty->flags |= TTY_CLOSEPENDING;
 			return (1);
 		}
