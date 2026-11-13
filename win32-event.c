@@ -1172,7 +1172,7 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 		events = WIN32_IO_EVENT_ERROR;
 	}
 	whe->error = error;
-	SetEvent(whe->complete);
+	/* The caller holds the lock and signals whe->complete afterwards. */
 	return (events);
 }
 
@@ -1229,9 +1229,13 @@ out:
 		win32_io_service_enqueue_endpoint(&whe->endpoint, events);
 	if (!whe->pending)
 		complete = 1;
+	LeaveCriticalSection(&whe->lock);
+	/*
+	 * Signal only after dropping the lock: the free path waits on this
+	 * event and may delete the lock and free the object right after.
+	 */
 	if (complete)
 		SetEvent(whe->complete);
-	LeaveCriticalSection(&whe->lock);
 }
 
 static int
@@ -1683,7 +1687,7 @@ static DWORD WINAPI
 win32_console_reader_thread(__unused void *arg)
 {
 	struct win32_handle_event	*whe;
-	int				 stopping;
+	int				 stopping, complete;
 
 	for (;;) {
 		WaitForSingleObject(win32_console_reader.wake, INFINITE);
@@ -1707,14 +1711,17 @@ win32_console_reader_thread(__unused void *arg)
 			EnterCriticalSection(&win32_console_reader.lock);
 			EnterCriticalSection(&whe->lock);
 			whe->console_active = 0;
+			complete = 0;
 			if (stopping || whe->stopping ||
 			    whe->state != WIN32_HANDLE_EVENT_RUNNING) {
-				SetEvent(whe->complete);
+				complete = 1;
 			} else if (!whe->paused && !whe->throttled) {
 				win32_console_reader_enqueue_locked(whe);
 			}
 			LeaveCriticalSection(&whe->lock);
 			LeaveCriticalSection(&win32_console_reader.lock);
+			if (complete)
+				SetEvent(whe->complete);
 		}
 		if (stopping)
 			break;
@@ -1823,7 +1830,7 @@ static DWORD WINAPI
 win32_console_writer_thread(__unused void *arg)
 {
 	struct win32_handle_writer	*whw;
-	int				 stopping;
+	int				 stopping, complete;
 
 	for (;;) {
 		WaitForSingleObject(win32_console_writer.wake, INFINITE);
@@ -1846,11 +1853,12 @@ win32_console_writer_thread(__unused void *arg)
 			EnterCriticalSection(&win32_console_writer.lock);
 			EnterCriticalSection(&whw->lock);
 			whw->console_active = 0;
+			complete = 0;
 			if (stopping) {
 				if (whw->stop ||
 				    whw->state == WIN32_HANDLE_WRITER_CLOSED ||
 				    whw->state == WIN32_HANDLE_WRITER_ERROR)
-					SetEvent(whw->complete);
+					complete = 1;
 			} else if (whw->state == WIN32_HANDLE_WRITER_RUNNING &&
 			    !whw->stop && whw->handle != NULL &&
 			    EVBUFFER_LENGTH(whw->output) != 0) {
@@ -1862,9 +1870,11 @@ win32_console_writer_thread(__unused void *arg)
 			    whw->state == WIN32_HANDLE_WRITER_CLOSED ||
 			    whw->state == WIN32_HANDLE_WRITER_ERROR) &&
 			    !whw->console_queued)
-				SetEvent(whw->complete);
+				complete = 1;
 			LeaveCriticalSection(&whw->lock);
 			LeaveCriticalSection(&win32_console_writer.lock);
+			if (complete)
+				SetEvent(whw->complete);
 		}
 		if (stopping)
 			break;
@@ -2188,10 +2198,18 @@ win32_handle_event_free(struct win32_handle_event *whe)
 	if (whe->backend == WIN32_HANDLE_EVENT_IOCP) {
 		EnterCriticalSection(&whe->lock);
 		whe->stopping = 1;
-		if (whe->pending)
+		if (whe->pending) {
+			ResetEvent(whe->complete);
 			CancelIoEx(whe->handle, &whe->overlapped);
+		}
 		LeaveCriticalSection(&whe->lock);
-		if (win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
+		/*
+		 * Only wait when an overlapped read is outstanding; with none
+		 * there is no completion to wait for and the wait would always
+		 * time out.
+		 */
+		if (whe->pending &&
+		    win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
 			win32_io_service_abandon_endpoint(&whe->endpoint);
 			return;
 		}
@@ -2501,7 +2519,7 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 	if (!whw->borrowed)
 		CloseHandle(whw->handle);
 	whw->handle = NULL;
-	SetEvent(whw->complete);
+	/* The caller holds the lock and signals whw->complete afterwards. */
 	return (WIN32_IO_EVENT_ERROR);
 }
 
@@ -2546,9 +2564,10 @@ out:
 		win32_io_service_enqueue_endpoint(&whw->endpoint, events);
 	if (!whw->pending)
 		complete = 1;
+	LeaveCriticalSection(&whw->lock);
+	/* See win32_handle_event_iocp_complete: signal after unlocking. */
 	if (complete)
 		SetEvent(whw->complete);
-	LeaveCriticalSection(&whw->lock);
 }
 
 static struct win32_handle_writer *
