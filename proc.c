@@ -365,6 +365,12 @@ proc_remove_peer(struct tmuxpeer *peer)
 	log_debug("remove peer %p", peer);
 
 	event_del(&peer->event);
+#ifdef TMUX_WIN32
+	/* Named-pipe close discards messages still queued in the imsg buffer. */
+	if (imsgbuf_flush(&peer->ibuf) == -1)
+		log_debug("peer %p: failed to flush before close: %s", peer,
+		    strerror(errno));
+#endif
 	imsgbuf_clear(&peer->ibuf);
 	proc_clear_peer_identity(peer);
 

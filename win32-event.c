@@ -147,7 +147,7 @@ struct win32_handle_event {
 	HANDLE		 changed;
 	HANDLE		 complete;
 	OVERLAPPED	 overlapped;
-	char		 iocp_buf[8192];
+	char		 iocp_buf[65536];
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
 	uint64_t	 offset;

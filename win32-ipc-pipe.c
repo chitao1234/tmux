@@ -420,6 +420,13 @@ win32_ipc_pipe_read(struct win32_ipc_pipe *p, void *data, size_t size)
 		errno = EIO;
 		return (-1);
 	}
+	/*
+	 * If bytes remain buffered, post another readiness byte: the reactor
+	 * notifies once per read completion, and the imsg reader may consume
+	 * only part of what arrived.
+	 */
+	if (EVBUFFER_LENGTH(p->input) != 0)
+		win32_ipc_pipe_notify(p);
 	return ((ssize_t)take);
 }
 
