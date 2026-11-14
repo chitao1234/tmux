@@ -83,10 +83,6 @@ struct win32_ipc_peer_identity {
 	DWORD		 integrity_rid;
 };
 
-static int	win32_ipc_set_blocking(SOCKET, int, char **);
-static int	win32_ipc_path_to_sockaddr(const char *, struct sockaddr_un *,
-		    char **);
-static int	win32_ipc_path_missing(const char *);
 static char    *win32_ipc_sid_to_string(PSID);
 static int	win32_ipc_capture_token_identity(HANDLE, char **, char **);
 static char    *win32_ipc_integrity_level_to_name(DWORD);
@@ -108,8 +104,6 @@ static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
 static int	win32_ipc_ensure_secured_dir(const char *, const char *,
 		    char **);
-static char    *win32_ipc_normalize_path(const char *);
-static int	win32_ipc_path_is_root(const char *);
 
 int
 win32_ipc_errno(int error)
@@ -153,24 +147,6 @@ win32_ipc_errno(int error)
 	}
 }
 
-static int
-win32_ipc_set_blocking(SOCKET fd, int state, char **cause)
-{
-	u_long	mode = state ? 0 : 1;
-
-	if (ioctlsocket(fd, FIONBIO, &mode) == SOCKET_ERROR) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't set IPC socket mode: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		return (-1);
-	}
-	return (0);
-}
-
 const char *
 win32_default_socket_dir(void)
 {
@@ -179,73 +155,6 @@ win32_default_socket_dir(void)
 	if (win32_ipc_make_managed_root(&win32_ipc_socket_dir, NULL) != 0)
 		return (NULL);
 	return (win32_ipc_socket_dir);
-}
-
-static int
-win32_ipc_path_to_sockaddr(const char *path, struct sockaddr_un *sun,
-    char **cause)
-{
-	size_t	 i, size;
-
-	if (path == NULL || !path_is_absolute(path)) {
-		if (cause != NULL)
-			xasprintf(cause, "socket path must be absolute");
-		errno = EINVAL;
-		return (-1);
-	}
-
-	memset(sun, 0, sizeof *sun);
-	sun->sun_family = AF_UNIX;
-	size = strlen(path);
-	if (size >= sizeof sun->sun_path) {
-		if (cause != NULL)
-			xasprintf(cause, "socket path too long: %s", path);
-		errno = ENAMETOOLONG;
-		return (-1);
-	}
-	strlcpy(sun->sun_path, path, sizeof sun->sun_path);
-	for (i = 0; sun->sun_path[i] != '\0'; i++) {
-		if (sun->sun_path[i] == '/')
-			sun->sun_path[i] = '\\';
-	}
-	return (0);
-}
-
-static char *
-win32_ipc_normalize_path(const char *path)
-{
-	return (path_normalize(path));
-}
-
-static int
-win32_ipc_path_is_root(const char *path)
-{
-	return (path_is_root(path));
-}
-
-static int
-win32_ipc_path_missing(const char *path)
-{
-	wchar_t	*wpath;
-	DWORD	 attr, error;
-	int	 missing;
-
-	if (path == NULL)
-		return (0);
-	wpath = win32_utf8_to_wide(path);
-	if (wpath == NULL)
-		return (0);
-	attr = GetFileAttributesW(wpath);
-	if (attr != INVALID_FILE_ATTRIBUTES) {
-		free(wpath);
-		return (0);
-	}
-	error = GetLastError();
-	free(wpath);
-
-	missing = (error == ERROR_FILE_NOT_FOUND ||
-	    error == ERROR_PATH_NOT_FOUND);
-	return (missing);
 }
 
 static char *
@@ -948,7 +857,7 @@ win32_ipc_make_managed_root(char **path, char **cause)
 	xasprintf(&base, "%s/tmux-%s", localappdata,
 	    win32_ipc_current_integrity_value);
 	free(localappdata);
-	normalized = win32_ipc_normalize_path(base);
+	normalized = path_normalize(base);
 	free(base);
 	if (normalized == NULL) {
 		if (cause != NULL)
@@ -979,7 +888,7 @@ win32_ipc_make_shared_root(char **path, char **cause)
 
 	xasprintf(&base, "%s/tmux-shared", localappdata);
 	free(localappdata);
-	normalized = win32_ipc_normalize_path(base);
+	normalized = path_normalize(base);
 	free(base);
 	if (normalized == NULL) {
 		if (cause != NULL)
@@ -1250,12 +1159,12 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 	wchar_t		*wnormalized;
 	DWORD		 attr;
 
-	normalized = win32_ipc_normalize_path(path);
+	normalized = path_normalize(path);
 	if (normalized == NULL) {
 		errno = EINVAL;
 		return (-1);
 	}
-	if (win32_ipc_path_is_root(normalized)) {
+	if (path_is_root(normalized)) {
 		free(normalized);
 		return (0);
 	}
@@ -1341,7 +1250,7 @@ win32_ipc_ensure_parent_dir(const char *path, char **cause)
 	char	*normalized, *slash;
 	int	 retval;
 
-	normalized = win32_ipc_normalize_path(path);
+	normalized = path_normalize(path);
 	if (normalized == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "invalid socket path");
@@ -1375,7 +1284,7 @@ win32_ipc_validate_socket_parent(const char *path, char **cause)
 	}
 
 	parent = path_dirname(path);
-	current = win32_ipc_normalize_path(parent);
+	current = path_normalize(parent);
 	free(parent);
 	parent = NULL;
 	if (current == NULL) {
