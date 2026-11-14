@@ -130,8 +130,6 @@ struct win32_ipc_peer_identity *win32_ipc_peer_identity_create(
 void		 win32_ipc_peer_identity_free(struct win32_ipc_peer_identity *);
 int		 win32_ipc_peer_identity_same_user(
 		     const struct win32_ipc_peer_identity *, char **);
-int		 win32_ipc_peer_identity_meets_integrity_floor(
-		     const struct win32_ipc_peer_identity *, char **);
 int		 win32_ipc_verify_auth_bind(
 		     const struct msg_win32_auth_challenge *,
 		     const struct msg_win32_auth_bind *,

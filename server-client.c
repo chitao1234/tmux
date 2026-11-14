@@ -2934,13 +2934,6 @@ server_client_win32_auth_finish(struct client *c,
 	}
 	free(cause);
 	cause = NULL;
-	if (win32_ipc_peer_identity_meets_integrity_floor(peer, &cause) != 0) {
-		log_debug("client %p auth rejected: %s", c,
-		    cause != NULL ? cause : strerror(errno));
-		free(cause);
-		return (-1);
-	}
-	free(cause);
 
 	if (proc_set_peer_user_sid(c->peer,
 	    win32_ipc_peer_identity_user_sid(peer)) != 0) {

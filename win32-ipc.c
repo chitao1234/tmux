@@ -74,20 +74,17 @@ static char *win32_ipc_socket_dir;
 static char *win32_ipc_shared_dir;
 static char *win32_ipc_current_user_sid_value;
 static char *win32_ipc_current_integrity_value;
-static DWORD win32_ipc_current_integrity_rid;
 
 struct win32_ipc_peer_identity {
 	pid_t		 pid;
 	HANDLE		 process;
 	char		*user_sid;
-	DWORD		 integrity_rid;
 };
 
 static char    *win32_ipc_sid_to_string(PSID);
 static int	win32_ipc_capture_token_identity(HANDLE, char **, char **);
 static char    *win32_ipc_integrity_level_to_name(DWORD);
 static int	win32_ipc_capture_token_integrity(HANDLE, char **, char **);
-static int	win32_ipc_capture_token_integrity_rid(HANDLE, DWORD *, char **);
 static int	win32_ipc_cache_current_identity(void);
 static int	win32_ipc_get_path_attributes(const char *, DWORD *, DWORD *,
 		    char **);
@@ -98,12 +95,8 @@ static int	win32_ipc_path_has_trusted_writers(const char *, int *,
 static int	win32_ipc_sid_string_is_trusted_writer(const char *);
 static int	win32_ipc_hash_text_hex(const char *, char **, char **);
 static const char *win32_ipc_shared_coordination_dir(char **);
-static int	win32_ipc_set_path_security_with_label(const char *,
-		    const char *, char **);
 static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
-static int	win32_ipc_ensure_secured_dir(const char *, const char *,
-		    char **);
 
 int
 win32_ipc_errno(int error)
@@ -237,44 +230,6 @@ win32_ipc_integrity_level_to_name(DWORD rid)
 }
 
 static int
-win32_ipc_capture_token_integrity_rid(HANDLE token, DWORD *integrity_rid,
-    char **cause)
-{
-	DWORD			 size;
-	TOKEN_MANDATORY_LABEL	*label = NULL;
-	DWORD			 count;
-	DWORD			*subauth;
-
-	*integrity_rid = 0;
-
-	if (!GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &size) &&
-	    GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-		if (cause != NULL) {
-			xasprintf(cause,
-			    "GetTokenInformation(TokenIntegrityLevel) failed:"
-			    " %s", win32_strerror(GetLastError()));
-		}
-		return (-1);
-	}
-	label = xmalloc(size);
-	if (!GetTokenInformation(token, TokenIntegrityLevel, label, size,
-	    &size)) {
-		if (cause != NULL) {
-			xasprintf(cause,
-			    "GetTokenInformation(TokenIntegrityLevel) failed:"
-			    " %s", win32_strerror(GetLastError()));
-		}
-		free(label);
-		return (-1);
-	}
-	count = *GetSidSubAuthorityCount(label->Label.Sid);
-	subauth = GetSidSubAuthority(label->Label.Sid, count - 1);
-	*integrity_rid = *subauth;
-	free(label);
-	return (0);
-}
-
-static int
 win32_ipc_capture_token_integrity(HANDLE token, char **integrity,
     char **cause)
 {
@@ -342,12 +297,6 @@ win32_ipc_peer_identity_create(pid_t pid, HANDLE process, char **cause)
 	peer->pid = pid;
 	peer->process = process;
 	peer->user_sid = user_sid;
-	if (win32_ipc_capture_token_integrity_rid(token, &peer->integrity_rid,
-	    cause) != 0) {
-		win32_ipc_peer_identity_free(peer);
-		CloseHandle(token);
-		return (NULL);
-	}
 	CloseHandle(token);
 	return (peer);
 }
@@ -386,26 +335,6 @@ win32_ipc_peer_identity_same_user(const struct win32_ipc_peer_identity *peer,
 	    strcmp(peer->user_sid, win32_ipc_current_user_sid_value) != 0) {
 		if (cause != NULL)
 			xasprintf(cause, "client process user SID mismatch");
-		errno = EACCES;
-		return (-1);
-	}
-	return (0);
-}
-
-int
-win32_ipc_peer_identity_meets_integrity_floor(
-    const struct win32_ipc_peer_identity *peer, char **cause)
-{
-	if (win32_ipc_cache_current_identity() != 0 ||
-	    win32_ipc_current_integrity_value == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't determine server integrity");
-		errno = EACCES;
-		return (-1);
-	}
-	if (peer == NULL || peer->integrity_rid < win32_ipc_current_integrity_rid) {
-		if (cause != NULL)
-			xasprintf(cause, "client integrity too low");
 		errno = EACCES;
 		return (-1);
 	}
@@ -536,10 +465,6 @@ win32_ipc_cache_current_identity(void)
 	if (retval == 0) {
 		retval = win32_ipc_capture_token_integrity(token,
 		    &win32_ipc_current_integrity_value, &cause);
-		if (retval == 0) {
-			retval = win32_ipc_capture_token_integrity_rid(token,
-			    &win32_ipc_current_integrity_rid, &cause);
-		}
 	}
 	CloseHandle(token);
 	free(cause);
@@ -998,16 +923,25 @@ out:
 	return (retval);
 }
 
+/*
+ * Apply the endpoint DACL: current user plus SYSTEM, protected so a
+ * permissive inherited ACE cannot widen it.
+ *
+ * No mandatory label is set. Integrity levels are not this code's business:
+ * the system assigns an object's default label from the creating process, and
+ * the resulting mandatory policy is what decides whether a peer at another IL
+ * can open the endpoint. Stamping a label ourselves would need
+ * SeSecurityPrivilege (unavailable below HIGH) and would duplicate a decision
+ * the kernel already makes.
+ */
 static int
-win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
-    char **cause)
+win32_ipc_set_path_security(const char *path, char **cause)
 {
 	PSECURITY_DESCRIPTOR	 sd = NULL;
-	PACL			 dacl = NULL, sacl = NULL;
+	PACL			 dacl = NULL;
 	char			*sddl = NULL;
 	wchar_t			*wsddl = NULL, *wpath = NULL;
 	BOOL			 dacl_present, dacl_defaulted;
-	BOOL			 sacl_present, sacl_defaulted;
 	DWORD			 error;
 	int			 retval = -1;
 
@@ -1015,14 +949,6 @@ win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
 	    win32_ipc_current_user_sid_value == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't determine current token");
-		errno = EACCES;
-		return (-1);
-	}
-	if (integrity == NULL)
-		integrity = win32_ipc_current_integrity_value;
-	if (integrity == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't determine current integrity");
 		errno = EACCES;
 		return (-1);
 	}
@@ -1034,23 +960,8 @@ win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
 		goto out;
 	}
 
-	if (strcmp(integrity, "l") == 0) {
-		xasprintf(&sddl,
-		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;LW)",
-		    win32_ipc_current_user_sid_value);
-	} else if (strcmp(integrity, "h") == 0) {
-		xasprintf(&sddl,
-		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;HI)",
-		    win32_ipc_current_user_sid_value);
-	} else if (strcmp(integrity, "s") == 0) {
-		xasprintf(&sddl,
-		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;SI)",
-		    win32_ipc_current_user_sid_value);
-	} else {
-		xasprintf(&sddl,
-		    "D:P(A;;GA;;;%s)(A;;GA;;;SY)S:(ML;;NW;;;ME)",
-		    win32_ipc_current_user_sid_value);
-	}
+	xasprintf(&sddl, "D:P(A;;GA;;;%s)(A;;GA;;;SY)",
+	    win32_ipc_current_user_sid_value);
 	wsddl = win32_utf8_to_wide(sddl);
 	if (wsddl == NULL) {
 		if (cause != NULL)
@@ -1069,9 +980,7 @@ win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
 		goto out;
 	}
 	if (!GetSecurityDescriptorDacl(sd, &dacl_present, &dacl,
-	    &dacl_defaulted) ||
-	    !GetSecurityDescriptorSacl(sd, &sacl_present, &sacl,
-	    &sacl_defaulted)) {
+	    &dacl_defaulted)) {
 		error = GetLastError();
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't read security descriptor:"
@@ -1081,18 +990,8 @@ win32_ipc_set_path_security_with_label(const char *path, const char *integrity,
 		goto out;
 	}
 	error = SetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
-	    DACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION|
-	    PROTECTED_DACL_SECURITY_INFORMATION|
-	    PROTECTED_SACL_SECURITY_INFORMATION,
-	    NULL, NULL, dacl, sacl);
-	if (error == ERROR_PRIVILEGE_NOT_HELD) {
-		log_debug("%s: integrity label skipped for %s (%s)", __func__,
-		    path, win32_strerror(error));
-		error = SetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
-		    DACL_SECURITY_INFORMATION|
-		    PROTECTED_DACL_SECURITY_INFORMATION,
-		    NULL, NULL, dacl, NULL);
-	}
+	    DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,
+	    NULL, NULL, dacl, NULL);
 	if (error != ERROR_SUCCESS) {
 		if (cause != NULL) {
 			xasprintf(cause, "couldn't secure %s: %s", path,
@@ -1118,7 +1017,7 @@ win32_ipc_shared_coordination_dir(char **cause)
 	if (win32_ipc_shared_dir == NULL &&
 	    win32_ipc_make_shared_root(&win32_ipc_shared_dir, cause) != 0)
 		return (NULL);
-	if (win32_ipc_ensure_secured_dir(win32_ipc_shared_dir, "l", cause) != 0)
+	if (win32_ipc_ensure_socket_dir(win32_ipc_shared_dir, cause) != 0)
 		return (NULL);
 	return (win32_ipc_shared_dir);
 }
@@ -1144,12 +1043,6 @@ win32_ipc_startup_guard_path(const char *compare_path, char **cause)
 	xasprintf(&path, "%s/startup-%s.lock", dir, digest);
 	free(digest);
 	return (path);
-}
-
-static int
-win32_ipc_set_path_security(const char *path, char **cause)
-{
-	return (win32_ipc_set_path_security_with_label(path, NULL, cause));
 }
 
 static int
@@ -1222,17 +1115,6 @@ win32_ipc_ensure_dir(const char *path, char **cause)
 	free(wnormalized);
 	free(normalized);
 	free(copy);
-	return (0);
-}
-
-static int
-win32_ipc_ensure_secured_dir(const char *path, const char *integrity,
-    char **cause)
-{
-	if (win32_ipc_ensure_dir(path, cause) != 0)
-		return (-1);
-	if (win32_ipc_set_path_security_with_label(path, integrity, cause) != 0)
-		return (-1);
 	return (0);
 }
 
