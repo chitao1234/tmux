@@ -2848,9 +2848,22 @@ server_client_win32_identify_handle(struct client *c, struct imsg *imsg,
 	}
 
 	type = GetFileType(handle);
-	if (type != FILE_TYPE_CHAR && type != FILE_TYPE_PIPE) {
+	if (type != FILE_TYPE_CHAR && type != FILE_TYPE_PIPE &&
+	    type != FILE_TYPE_DISK) {
 		log_debug("client %p %s rejected: unsupported handle type %#x",
 		    c, name, (u_int)type);
+		CloseHandle(handle);
+		return (-1);
+	}
+	/*
+	 * A disk handle is a redirected stdout (for example
+	 * "capture-pane -p > file"). It is a legitimate overlapped write
+	 * target, so it is accepted rather than treated as a protocol error.
+	 * A disk handle used as stdin is rejected, since reading a file back
+	 * into a pane is not meaningful.
+	 */
+	if (input && type == FILE_TYPE_DISK) {
+		log_debug("client %p %s rejected: file input", c, name);
 		CloseHandle(handle);
 		return (-1);
 	}
