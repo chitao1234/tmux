@@ -24,15 +24,51 @@
 
 #ifdef TMUX_WIN32
 
-struct win32_ipc_socket_entry {
+struct win32_ipc_pipe_entry {
 	int			 id;
 	SOCKET			 socket;
-	char			*cleanup_path;
-	TAILQ_ENTRY(win32_ipc_socket_entry) entry;
+	struct win32_ipc_pipe	*pipe;
+	TAILQ_ENTRY(win32_ipc_pipe_entry) entry;
 };
 
-static TAILQ_HEAD(, win32_ipc_socket_entry) win32_ipc_sockets =
-    TAILQ_HEAD_INITIALIZER(win32_ipc_sockets);
+struct win32_ipc_listener_entry {
+	int				 id;
+	struct win32_ipc_pipe_listener	*listener;
+	struct win32_ipc_pipe		*pending;
+	TAILQ_ENTRY(win32_ipc_listener_entry) entry;
+};
+
+static TAILQ_HEAD(, win32_ipc_pipe_entry) win32_ipc_pipes =
+    TAILQ_HEAD_INITIALIZER(win32_ipc_pipes);
+static TAILQ_HEAD(, win32_ipc_listener_entry) win32_ipc_listeners =
+    TAILQ_HEAD_INITIALIZER(win32_ipc_listeners);
+
+static struct win32_ipc_pipe_entry *win32_ipc_find_pipe(int);
+static struct win32_ipc_listener_entry *win32_ipc_find_listener(int);
+
+static struct win32_ipc_pipe_entry *
+win32_ipc_find_pipe(int fd)
+{
+	struct win32_ipc_pipe_entry	*entry;
+
+	TAILQ_FOREACH(entry, &win32_ipc_pipes, entry) {
+		if (entry->id == fd)
+			return (entry);
+	}
+	return (NULL);
+}
+
+static struct win32_ipc_listener_entry *
+win32_ipc_find_listener(int fd)
+{
+	struct win32_ipc_listener_entry	*entry;
+
+	TAILQ_FOREACH(entry, &win32_ipc_listeners, entry) {
+		if (entry->id == fd)
+			return (entry);
+	}
+	return (NULL);
+}
 static unsigned int win32_ipc_next_id = 3;
 static char *win32_ipc_socket_dir;
 static char *win32_ipc_shared_dir;
@@ -74,56 +110,6 @@ static int	win32_ipc_ensure_secured_dir(const char *, const char *,
 		    char **);
 static char    *win32_ipc_normalize_path(const char *);
 static int	win32_ipc_path_is_root(const char *);
-
-static int
-win32_ipc_save_socket(SOCKET socket)
-{
-	struct win32_ipc_socket_entry	*entry;
-
-	entry = xcalloc(1, sizeof *entry);
-	entry->id = win32_ipc_next_id++;
-	entry->socket = socket;
-	TAILQ_INSERT_TAIL(&win32_ipc_sockets, entry, entry);
-	return (entry->id);
-}
-
-static struct win32_ipc_socket_entry *
-win32_ipc_find_socket(int fd)
-{
-	struct win32_ipc_socket_entry	*entry;
-
-	TAILQ_FOREACH(entry, &win32_ipc_sockets, entry) {
-		if (entry->id == fd)
-			return (entry);
-	}
-	return (NULL);
-}
-
-static int
-win32_ipc_set_cleanup_path(int fd, const char *path)
-{
-	struct win32_ipc_socket_entry	*entry;
-
-	entry = win32_ipc_find_socket(fd);
-	if (entry == NULL) {
-		errno = EBADF;
-		return (-1);
-	}
-	free(entry->cleanup_path);
-	entry->cleanup_path = xstrdup(path);
-	return (0);
-}
-
-SOCKET
-win32_ipc_socket(int fd)
-{
-	struct win32_ipc_socket_entry	*entry;
-
-	entry = win32_ipc_find_socket(fd);
-	if (entry == NULL)
-		return (INVALID_SOCKET);
-	return (entry->socket);
-}
 
 int
 win32_ipc_errno(int error)
@@ -1505,189 +1491,160 @@ fail:
 	return (-1);
 }
 
+/*
+ * Transport: listen, connect, accept and close are named-pipe operations.
+ * The table entry carries the notify socket for libevent plus the pipe that
+ * carries data.
+ */
 int
 win32_ipc_server_create(const char *path, char **cause)
 {
-	struct sockaddr_un	 sun;
-	char			*normalized;
-	SOCKET			 fd;
-	int			 error, saved_errno, wrapped_fd;
+	struct win32_ipc_listener_entry	*entry;
 
-	normalized = win32_ipc_normalize_path(path);
-	if (normalized == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "invalid socket path");
-		errno = EINVAL;
+	entry = xcalloc(1, sizeof *entry);
+	entry->listener = win32_ipc_pipe_listen(path, cause);
+	if (entry->listener == NULL) {
+		free(entry);
 		return (-1);
 	}
-	if (win32_ipc_path_to_sockaddr(normalized, &sun, cause) != 0) {
-		free(normalized);
-		return (-1);
-	}
-	if (win32_ipc_ensure_parent_dir(normalized, cause) != 0) {
-		free(normalized);
-		return (-1);
-	}
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd == INVALID_SOCKET) {
-		error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "socket failed: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		return (-1);
-	}
-	if (bind(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
-		error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "error creating %s (%s)", normalized,
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		closesocket(fd);
-		free(normalized);
-		return (-1);
-	}
-	if (listen(fd, 128) != 0) {
-		error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "error listening on %s (%s)", normalized,
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		closesocket(fd);
-		free(normalized);
-		return (-1);
-	}
-	if (win32_ipc_set_blocking(fd, 0, cause) != 0) {
-		saved_errno = errno;
-		closesocket(fd);
-		free(normalized);
-		errno = saved_errno;
-		return (-1);
-	}
-
-	wrapped_fd = win32_ipc_save_socket(fd);
-	if (win32_ipc_set_cleanup_path(wrapped_fd, normalized) != 0) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't track Win32 IPC socket path");
-		win32_unlink_utf8(normalized);
-		free(normalized);
-		win32_ipc_close(wrapped_fd);
-		return (-1);
-	}
-	free(normalized);
-	return (wrapped_fd);
-}
-
-int
-win32_ipc_client_connect(const char *path, __unused uint64_t flags, char **cause)
-{
-	struct sockaddr_un	 sun;
-	char			*normalized;
-	SOCKET			 fd;
-	int			 error, saved_errno, wrapped_fd;
-
-	normalized = win32_ipc_normalize_path(path);
-	if (normalized == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "invalid socket path");
-		errno = EINVAL;
-		return (-1);
-	}
-	if (win32_ipc_path_to_sockaddr(normalized, &sun, cause) != 0) {
-		free(normalized);
-		return (-1);
-	}
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd == INVALID_SOCKET) {
-		error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "socket failed: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
-		free(normalized);
-		return (-1);
-	}
-	if (connect(fd, (struct sockaddr *)&sun, sizeof sun) != 0) {
-		error = WSAGetLastError();
-		saved_errno = win32_ipc_errno(error);
-		if (win32_ipc_path_missing(normalized))
-			saved_errno = ENOENT;
-
-		log_debug("%s: connect(%s) failed with WSA %d -> errno %d",
-		    __func__, normalized, error, saved_errno);
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't connect to %s: %s", normalized,
-			    strerror(saved_errno));
-		}
-		errno = saved_errno;
-		closesocket(fd);
-		free(normalized);
-		return (-1);
-	}
-
-	wrapped_fd = win32_ipc_save_socket(fd);
-	free(normalized);
-	return (wrapped_fd);
+	entry->id = win32_ipc_next_id++;
+	TAILQ_INSERT_TAIL(&win32_ipc_listeners, entry, entry);
+	return (entry->id);
 }
 
 int
 win32_ipc_socket_accept(int fd, char **cause)
 {
-	SOCKET				 newfd;
-	struct sockaddr_storage		 ss;
-	int				 len = sizeof ss;
-	int				 saved_errno;
+	struct win32_ipc_listener_entry	*le;
+	struct win32_ipc_pipe_entry	*entry;
+	struct win32_ipc_pipe		*pipe;
+	SOCKET				 notify;
 
-	newfd = accept(win32_ipc_socket(fd), (struct sockaddr *)&ss, &len);
-	if (newfd == INVALID_SOCKET) {
-		int error = WSAGetLastError();
-
-		if (cause != NULL) {
-			xasprintf(cause, "accept failed: %s",
-			    win32_strerror(error));
-		}
-		errno = win32_ipc_errno(error);
+	le = win32_ipc_find_listener(fd);
+	if (le == NULL) {
+		errno = EBADF;
 		return (-1);
 	}
-	if (win32_ipc_set_blocking(newfd, 0, cause) != 0) {
-		saved_errno = errno;
-		closesocket(newfd);
-		errno = saved_errno;
+	pipe = win32_ipc_pipe_accept(le->listener, &le->pending, cause);
+	if (pipe == NULL)
+		return (-1);
+	if (win32_ipc_pipe_attach_notify(pipe, cause) != 0) {
+		win32_ipc_pipe_close(pipe, 0);
 		return (-1);
 	}
-	return (win32_ipc_save_socket(newfd));
+	notify = win32_ipc_pipe_notify_socket(pipe);
+	entry = xcalloc(1, sizeof *entry);
+	entry->id = win32_ipc_next_id++;
+	entry->pipe = pipe;
+	entry->socket = notify;
+	TAILQ_INSERT_TAIL(&win32_ipc_pipes, entry, entry);
+	return (entry->id);
+}
+
+int
+win32_ipc_client_connect(const char *path, __unused uint64_t flags,
+    char **cause)
+{
+	struct win32_ipc_pipe_entry	*entry;
+	struct win32_ipc_pipe		*pipe;
+	SOCKET				 notify;
+
+	pipe = win32_ipc_pipe_connect(path, cause);
+	if (pipe == NULL)
+		return (-1);
+	if (win32_ipc_pipe_attach_notify(pipe, cause) != 0) {
+		win32_ipc_pipe_close(pipe, 0);
+		return (-1);
+	}
+	notify = win32_ipc_pipe_notify_socket(pipe);
+	entry = xcalloc(1, sizeof *entry);
+	entry->id = win32_ipc_next_id++;
+	entry->pipe = pipe;
+	entry->socket = notify;
+	TAILQ_INSERT_TAIL(&win32_ipc_pipes, entry, entry);
+	return (entry->id);
 }
 
 int
 win32_ipc_close(int fd)
 {
-	struct win32_ipc_socket_entry	*entry;
-	int				 retval;
+	struct win32_ipc_pipe_entry	*pe;
+	struct win32_ipc_listener_entry	*le;
 
-	entry = win32_ipc_find_socket(fd);
-	if (entry == NULL) {
+	if ((pe = win32_ipc_find_pipe(fd)) != NULL) {
+		TAILQ_REMOVE(&win32_ipc_pipes, pe, entry);
+		win32_ipc_pipe_close(pe->pipe, 1);
+		free(pe);
+		return (0);
+	}
+	if ((le = win32_ipc_find_listener(fd)) != NULL) {
+		TAILQ_REMOVE(&win32_ipc_listeners, le, entry);
+		if (le->pending != NULL)
+			win32_ipc_pipe_close(le->pending, 0);
+		win32_ipc_pipe_listener_free(le->listener);
+		free(le);
+		return (0);
+	}
+	errno = EBADF;
+	return (-1);
+}
+
+SOCKET
+win32_ipc_socket(int fd)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe == NULL)
+		return (INVALID_SOCKET);
+	return (pe->socket);
+}
+
+void
+win32_ipc_consume_notify(int fd)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe != NULL)
+		win32_ipc_pipe_consume_notify(pe->pipe);
+}
+
+ssize_t
+win32_ipc_read(int fd, void *data, size_t size)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe == NULL) {
 		errno = EBADF;
 		return (-1);
 	}
+	return (win32_ipc_pipe_read(pe->pipe, data, size));
+}
 
-	retval = closesocket(entry->socket);
-	if (entry->cleanup_path != NULL) {
-		(void)win32_unlink_utf8(entry->cleanup_path);
-		free(entry->cleanup_path);
+ssize_t
+win32_ipc_write(int fd, const void *data, size_t size)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe == NULL) {
+		errno = EBADF;
+		return (-1);
 	}
-	TAILQ_REMOVE(&win32_ipc_sockets, entry, entry);
-	free(entry);
-	return (retval);
+	return (win32_ipc_pipe_write(pe->pipe, data, size));
+}
+
+int
+win32_ipc_eof(int fd)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe == NULL)
+		return (1);
+	return (win32_ipc_pipe_eof(pe->pipe));
 }
 
 #endif /* TMUX_WIN32 */

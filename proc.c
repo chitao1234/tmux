@@ -82,6 +82,10 @@ proc_event_cb(__unused tmux_event_fd fd, short events, void *arg)
 	struct imsg	 imsg;
 
 	if (!(peer->flags & PEER_BAD) && (events & EV_READ)) {
+#ifdef TMUX_WIN32
+		/* Drain the readiness byte; the data is in the pipe. */
+		win32_ipc_consume_notify(peer->ibuf.fd);
+#endif
 		if (imsgbuf_read(&peer->ibuf) != 1) {
 			peer->dispatchcb(NULL, peer->arg);
 			return;

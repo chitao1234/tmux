@@ -941,7 +941,8 @@ ipc_endpoint_connect_win32(struct ipc_endpoint *endpoint, uint64_t flags,
 static int
 ipc_endpoint_connect_dead_win32(int error)
 {
-	if (error == ENOENT || error == ECONNREFUSED || error == ETIMEDOUT)
+	if (error == ENOENT || error == ECONNREFUSED || error == ETIMEDOUT ||
+	    error == EBUSY || error == EAGAIN)
 		return (1);
 	return (0);
 }

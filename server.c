@@ -437,7 +437,7 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 	int			 newfd;
 
 	server_add_accept(0);
-	if (!(events & EV_READ))
+	if (!(events & EV_READ) && !(events & EV_TIMEOUT))
 		return;
 
 #ifdef TMUX_WIN32
@@ -502,20 +502,28 @@ server_add_accept(int timeout)
 	if (event_initialized(&server_ev_accept))
 		event_del(&server_ev_accept);
 
-	if (timeout == 0) {
-		event_set(&server_ev_accept,
 #ifdef TMUX_WIN32
-		    (evutil_socket_t)win32_ipc_socket(server_fd),
+	/*
+	 * A named pipe cannot be polled by libevent. Poll the listener on a
+	 * short timer instead and let win32_ipc_socket_accept() report
+	 * EAGAIN when no client is waiting.
+	 */
+	if (timeout == 0)
+		tv.tv_usec = WIN32_ACCEPT_POLL_USEC;
+	event_set(&server_ev_accept, server_fd, EV_TIMEOUT, server_accept,
+	    NULL);
+	event_add(&server_ev_accept, &tv);
 #else
-		    server_fd,
-#endif
-		    EV_READ, server_accept, NULL);
+	if (timeout == 0) {
+		event_set(&server_ev_accept, server_fd, EV_READ, server_accept,
+		    NULL);
 		event_add(&server_ev_accept, NULL);
 	} else {
 		event_set(&server_ev_accept, server_fd, EV_TIMEOUT,
 		    server_accept, NULL);
 		event_add(&server_ev_accept, &tv);
 	}
+#endif
 }
 
 /* Signal handler. */

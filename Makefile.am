@@ -251,6 +251,7 @@ dist_tmux_SOURCES += \
 	win32-error.c \
 	win32-event.c \
 	win32-glob.c \
+	win32-ipc-pipe.c \
 	win32-ipc.c \
 	win32-path.c \
 	win32-platform.h \

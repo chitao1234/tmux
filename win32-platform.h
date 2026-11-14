@@ -28,6 +28,9 @@ struct win32_pane;
 struct win32_job;
 struct win32_io_endpoint;
 
+/* How often to poll the named-pipe listener for a new client. */
+#define WIN32_ACCEPT_POLL_USEC 20000
+
 enum win32_io_event {
 	WIN32_IO_EVENT_READ = 0x1,
 	WIN32_IO_EVENT_READ_EOF = 0x2,
@@ -74,6 +77,7 @@ struct win32_io_endpoint *win32_io_reader_new_overlapped(HANDLE,
 struct win32_io_endpoint *win32_io_reader_new_file(HANDLE, uint64_t,
 		     void (*)(void *, uint32_t), void *);
 void		 win32_io_endpoint_free(struct win32_io_endpoint *);
+void		 win32_io_endpoint_detach(struct win32_io_endpoint *);
 void		 win32_io_reader_drain(struct win32_io_endpoint *,
 		     struct evbuffer *);
 void		 win32_io_reader_drain_limit(struct win32_io_endpoint *,
@@ -119,6 +123,10 @@ int		 win32_ipc_client_connect(const char *, uint64_t, char **);
 int		 win32_ipc_socket_accept(int, char **);
 int		 win32_ipc_close(int);
 SOCKET		 win32_ipc_socket(int);
+void		 win32_ipc_consume_notify(int);
+ssize_t		 win32_ipc_read(int, void *, size_t);
+ssize_t		 win32_ipc_write(int, const void *, size_t);
+int		 win32_ipc_eof(int);
 int		 win32_random_bytes(void *, size_t, char **);
 struct win32_ipc_peer_identity *win32_ipc_peer_identity_create(
 		     pid_t, HANDLE, char **);
@@ -187,6 +195,24 @@ void		 win32_job_set_exit_callback(struct win32_job *,
 int		 win32_job_write(struct win32_job *, const void *, size_t);
 size_t		 win32_job_stdin_buffered(struct win32_job *);
 void		 win32_job_close_stdin(struct win32_job *);
+
+struct win32_ipc_pipe;
+struct win32_ipc_pipe_listener;
+int		 win32_socketpair(SOCKET[2]);
+struct win32_ipc_pipe_listener *win32_ipc_pipe_listen(const char *, char **);
+struct win32_ipc_pipe *win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *,
+		     struct win32_ipc_pipe **, char **);
+struct win32_ipc_pipe *win32_ipc_pipe_connect(const char *, char **);
+int		 win32_ipc_pipe_attach_notify(struct win32_ipc_pipe *, char **);
+SOCKET		 win32_ipc_pipe_notify_socket(struct win32_ipc_pipe *);
+void		 win32_ipc_pipe_consume_notify(struct win32_ipc_pipe *);
+ssize_t		 win32_ipc_pipe_read(struct win32_ipc_pipe *, void *, size_t);
+ssize_t		 win32_ipc_pipe_write(struct win32_ipc_pipe *, const void *,
+		     size_t);
+int		 win32_ipc_pipe_eof(struct win32_ipc_pipe *);
+DWORD		 win32_ipc_pipe_peer_pid(struct win32_ipc_pipe *);
+void		 win32_ipc_pipe_close(struct win32_ipc_pipe *, int);
+void		 win32_ipc_pipe_listener_free(struct win32_ipc_pipe_listener *);
 
 #endif /* TMUX_WIN32 */
 

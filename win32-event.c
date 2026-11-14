@@ -91,7 +91,7 @@ readv(int fd, const struct iovec *iov, int iovcnt)
 {
 	char	*base;
 	size_t	 len;
-	int	 n;
+	ssize_t	 n;
 
 	if (iovcnt != 1) {
 		errno = EINVAL;
@@ -101,11 +101,11 @@ readv(int fd, const struct iovec *iov, int iovcnt)
 	len = iov[0].iov_len;
 	if (len > INT_MAX)
 		len = INT_MAX;
-	n = recv(win32_ipc_socket(fd), base, len, 0);
-	if (n == SOCKET_ERROR) {
-		errno = win32_ipc_errno(WSAGetLastError());
-		return (-1);
-	}
+	/*
+	 * Data travels over the named pipe, not the notify socket. EAGAIN
+	 * means the pipe has no buffered bytes right now.
+	 */
+	n = win32_ipc_read(fd, base, len);
 	return (n);
 }
 
@@ -121,12 +121,10 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 		base = iov[i].iov_base;
 		len = iov[i].iov_len;
 		while (len != 0) {
-			n = send(win32_ipc_socket(fd), base,
-			    len > INT_MAX ? INT_MAX : len, 0);
-			if (n == SOCKET_ERROR) {
-				errno = win32_ipc_errno(WSAGetLastError());
+			n = win32_ipc_write(fd, base,
+			    len > INT_MAX ? INT_MAX : len);
+			if (n == -1)
 				return (total == 0 ? -1 : total);
-			}
 			if (n == 0) {
 				errno = ECONNRESET;
 				return (total == 0 ? -1 : total);
@@ -341,7 +339,7 @@ static enum win32_handle_writer_backend
 static void	win32_handle_writer_record_progress(
 		     struct win32_handle_writer *, size_t);
 
-static int
+int
 win32_socketpair(SOCKET pair[2])
 {
 	static LONG		 serial;
@@ -688,7 +686,8 @@ win32_io_service_dispatch_reader(struct win32_handle_event *whe,
 	if (buffered != 0)
 		events |= WIN32_IO_EVENT_READ;
 
-	whe->endpoint.eventcb(whe->endpoint.arg, events);
+	if (whe->endpoint.eventcb != NULL)
+		whe->endpoint.eventcb(whe->endpoint.arg, events);
 }
 
 static void
@@ -715,7 +714,7 @@ win32_io_service_dispatch_writer(struct win32_handle_writer *whw,
 	else if ((events & WIN32_IO_EVENT_WRITE_DRAINED) && buffered == 0 &&
 	    !pending)
 		out |= WIN32_IO_EVENT_WRITE_DRAINED;
-	if (out != 0)
+	if (out != 0 && whw->endpoint.eventcb != NULL)
 		whw->endpoint.eventcb(whw->endpoint.arg, out);
 }
 
@@ -740,7 +739,8 @@ win32_io_service_dispatch_process(struct win32_process_event *wpe,
 	LeaveCriticalSection(&wpe->lock);
 
 	if (state == WIN32_PROCESS_EVENT_EXITED &&
-	    (events & WIN32_IO_EVENT_PROCESS_EXIT))
+	    (events & WIN32_IO_EVENT_PROCESS_EXIT) &&
+	    wpe->endpoint.eventcb != NULL)
 		wpe->endpoint.eventcb(wpe->endpoint.arg, events);
 }
 
@@ -766,19 +766,47 @@ win32_io_service_dispatch_endpoint(struct win32_io_endpoint *endpoint,
 void
 win32_io_endpoint_free(struct win32_io_endpoint *endpoint)
 {
+	void	*owner;
+
 	if (endpoint == NULL)
 		return;
+	owner = endpoint->owner;
+	if (owner == NULL)
+		return;		/* already detached */
 	switch (endpoint->type) {
 	case WIN32_IO_ENDPOINT_READER:
-		win32_handle_event_free(endpoint->owner);
+		win32_handle_event_free(owner);
 		break;
 	case WIN32_IO_ENDPOINT_WRITER:
-		win32_handle_writer_free(endpoint->owner);
+		win32_handle_writer_free(owner);
 		break;
 	case WIN32_IO_ENDPOINT_PROCESS:
-		win32_process_event_free(endpoint->owner);
+		win32_process_event_free(owner);
 		break;
 	}
+}
+
+/*
+ * Clear an endpoint's callback and argument before its owner is freed, so a
+ * completion that is already queued cannot reach stale memory. The owner
+ * pointer is kept because win32_io_endpoint_free() still needs it.
+ */
+void
+win32_io_endpoint_detach(struct win32_io_endpoint *endpoint)
+{
+	if (endpoint == NULL)
+		return;
+	if (!win32_io.initialized)
+		return;
+	EnterCriticalSection(&win32_io.lock);
+	endpoint->arg = NULL;
+	endpoint->eventcb = NULL;
+	endpoint->events = 0;
+	if (endpoint->pending) {
+		TAILQ_REMOVE(&win32_io.pending, endpoint, entry);
+		endpoint->pending = 0;
+	}
+	LeaveCriticalSection(&win32_io.lock);
 }
 
 static int
