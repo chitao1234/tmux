@@ -934,40 +934,40 @@ out:
  * SeSecurityPrivilege (unavailable below HIGH) and would duplicate a decision
  * the kernel already makes.
  */
-static int
-win32_ipc_set_path_security(const char *path, char **cause)
+/*
+ * Build the endpoint security descriptor: full access for the current user
+ * and SYSTEM, with a protected DACL so inherited ACEs cannot widen it.
+ *
+ * The caller owns the descriptor and must LocalFree() it. This is shared by
+ * the endpoint directory and the named pipe so both carry the same policy.
+ */
+PSECURITY_DESCRIPTOR
+win32_ipc_build_endpoint_sd(char **cause)
 {
-	PSECURITY_DESCRIPTOR	 sd = NULL;
-	PACL			 dacl = NULL;
+	PSECURITY_DESCRIPTOR	sd = NULL;
 	char			*sddl = NULL;
-	wchar_t			*wsddl = NULL, *wpath = NULL;
-	BOOL			 dacl_present, dacl_defaulted;
+	wchar_t			*wsddl = NULL;
 	DWORD			 error;
-	int			 retval = -1;
 
+	if (cause != NULL)
+		*cause = NULL;
 	if (win32_ipc_cache_current_identity() != 0 ||
 	    win32_ipc_current_user_sid_value == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't determine current token");
 		errno = EACCES;
-		return (-1);
-	}
-	wpath = win32_utf8_to_wide(path);
-	if (wpath == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "couldn't convert IPC path: %s", path);
-		errno = EINVAL;
-		goto out;
+		return (NULL);
 	}
 
 	xasprintf(&sddl, "D:P(A;;GA;;;%s)(A;;GA;;;SY)",
 	    win32_ipc_current_user_sid_value);
 	wsddl = win32_utf8_to_wide(sddl);
+	free(sddl);
 	if (wsddl == NULL) {
 		if (cause != NULL)
 			xasprintf(cause, "couldn't convert security descriptor");
 		errno = EACCES;
-		goto out;
+		return (NULL);
 	}
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(wsddl,
 	    SDDL_REVISION_1, &sd, NULL)) {
@@ -977,8 +977,32 @@ win32_ipc_set_path_security(const char *path, char **cause)
 			    " %s", win32_strerror(error));
 		}
 		errno = EACCES;
+	}
+	free(wsddl);
+	return (sd);
+}
+
+static int
+win32_ipc_set_path_security(const char *path, char **cause)
+{
+	PSECURITY_DESCRIPTOR	 sd = NULL;
+	PACL			 dacl = NULL;
+	wchar_t			*wpath = NULL;
+	BOOL			 dacl_present, dacl_defaulted;
+	DWORD			 error;
+	int			 retval = -1;
+
+	wpath = win32_utf8_to_wide(path);
+	if (wpath == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't convert IPC path: %s", path);
+		errno = EINVAL;
 		goto out;
 	}
+
+	sd = win32_ipc_build_endpoint_sd(cause);
+	if (sd == NULL)
+		goto out;
 	if (!GetSecurityDescriptorDacl(sd, &dacl_present, &dacl,
 	    &dacl_defaulted)) {
 		error = GetLastError();
@@ -1003,8 +1027,6 @@ win32_ipc_set_path_security(const char *path, char **cause)
 	retval = 0;
 
 out:
-	free(sddl);
-	free(wsddl);
 	free(wpath);
 	if (sd != NULL)
 		LocalFree(sd);

@@ -114,6 +114,7 @@ void		 win32_log_handle(const char *, HANDLE);
 const char	*win32_default_socket_dir(void);
 int		 win32_ipc_errno(int);
 int		 win32_ipc_ensure_socket_dir(const char *, char **);
+PSECURITY_DESCRIPTOR win32_ipc_build_endpoint_sd(char **);
 int		 win32_ipc_validate_socket_parent(const char *, char **);
 char		*win32_ipc_startup_guard_path(const char *, char **);
 int		 win32_ipc_server_create(const char *, char **);

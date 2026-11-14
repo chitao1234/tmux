@@ -39,6 +39,7 @@
 struct win32_ipc_pipe_listener {
 	char	*name;
 	wchar_t	*wname;
+	int	 first_done;
 };
 
 struct win32_ipc_pipe {
@@ -97,23 +98,49 @@ win32_ipc_pipe_name(const char *path, wchar_t **namep, char **name8p,
 	return (0);
 }
 
+/*
+ * Create a pipe instance with the same protected DACL as the endpoint
+ * directory, rather than the token default DACL. The listener sets
+ * FILE_FLAG_FIRST_PIPE_INSTANCE on its first instance so a process that
+ * guesses the name (it is a hash of the socket path) cannot create the pipe
+ * first and impersonate the server; subsequent instances omit the flag
+ * because only one may hold it.
+ */
 static HANDLE
-win32_ipc_pipe_create_instance(const wchar_t *wname, DWORD *errorp)
+win32_ipc_pipe_create_instance(const wchar_t *wname, int first, DWORD *errorp)
 {
-	SECURITY_ATTRIBUTES	sa;
-	HANDLE			handle;
+	SECURITY_ATTRIBUTES	 sa;
+	PSECURITY_DESCRIPTOR	 sd = NULL;
+	HANDLE			 handle;
+	DWORD			 flags;
+	char			*cause = NULL;
+
+	sd = win32_ipc_build_endpoint_sd(&cause);
+	if (sd == NULL) {
+		log_debug("%s: couldn't build pipe security descriptor: %s",
+		    __func__, cause != NULL ? cause : strerror(errno));
+		free(cause);
+		if (errorp != NULL)
+			*errorp = ERROR_ACCESS_DENIED;
+		return (INVALID_HANDLE_VALUE);
+	}
 
 	memset(&sa, 0, sizeof sa);
 	sa.nLength = sizeof sa;
+	sa.lpSecurityDescriptor = sd;
 	sa.bInheritHandle = FALSE;
-	handle = CreateNamedPipeW(wname,
-	    PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED,
+
+	flags = PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED;
+	if (first)
+		flags |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+	handle = CreateNamedPipeW(wname, flags,
 	    PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE|PIPE_WAIT|
 	    PIPE_REJECT_REMOTE_CLIENTS,
 	    WIN32_IPC_PIPE_MAX_INSTANCES, WIN32_IPC_PIPE_BUFFER,
 	    WIN32_IPC_PIPE_BUFFER, 0, &sa);
 	if (handle == INVALID_HANDLE_VALUE && errorp != NULL)
 		*errorp = GetLastError();
+	LocalFree(sd);
 	return (handle);
 }
 
@@ -250,8 +277,10 @@ win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
 		p = xcalloc(1, sizeof *p);
 		p->notify_read = INVALID_SOCKET;
 		p->notify_write = INVALID_SOCKET;
-		p->handle = win32_ipc_pipe_create_instance(l->wname, &error);
-		if (p->handle == INVALID_HANDLE_VALUE) {			if (cause != NULL) {
+		p->handle = win32_ipc_pipe_create_instance(l->wname,
+		    !l->first_done, &error);
+		if (p->handle == INVALID_HANDLE_VALUE) {
+			if (cause != NULL) {
 				xasprintf(cause, "couldn't create transport "
 				    "pipe %s: %s", l->name,
 				    win32_strerror(error));
@@ -265,6 +294,7 @@ win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
 			free(p);
 			return (NULL);
 		}
+		l->first_done = 1;
 		memset(&p->connect_ov, 0, sizeof p->connect_ov);
 		if (!ConnectNamedPipe(p->handle, &p->connect_ov)) {
 			error = GetLastError();
