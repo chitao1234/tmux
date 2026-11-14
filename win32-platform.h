@@ -53,8 +53,6 @@ int		 win32_path_is_dir(const char *);
 int		 win32_path_canon(const char *, const char *, char **, char **,
 		     char **);
 char		*win32_path_canon_identity(const char *, const char *, char **);
-int		 win32_path_equals(const char *, const char *);
-char		*win32_path_join(const char *, const char *);
 const char	*win32_default_cwd(void);
 const char	*win32_default_shell(void);
 char		*win32_resolve_cwd(const char *, const char *, char **);
@@ -116,7 +114,6 @@ void		 win32_log_handle(const char *, HANDLE);
 const char	*win32_default_socket_dir(void);
 int		 win32_ipc_errno(int);
 int		 win32_ipc_ensure_socket_dir(const char *, char **);
-int		 win32_ipc_ensure_parent_dir(const char *, char **);
 int		 win32_ipc_validate_socket_parent(const char *, char **);
 char		*win32_ipc_startup_guard_path(const char *, char **);
 int		 win32_ipc_server_create(const char *, char **);
@@ -127,7 +124,6 @@ SOCKET		 win32_ipc_socket(int);
 void		 win32_ipc_consume_notify(int);
 ssize_t		 win32_ipc_read(int, void *, size_t);
 ssize_t		 win32_ipc_write(int, const void *, size_t);
-int		 win32_ipc_eof(int);
 int		 win32_random_bytes(void *, size_t, char **);
 struct win32_ipc_peer_identity *win32_ipc_peer_identity_create(
 		     pid_t, HANDLE, char **);
@@ -155,7 +151,6 @@ int		 win32_terminal_set_client_mouse_mode(uint32_t);
 int		 win32_terminal_get_size(struct client *, u_int *, u_int *,
 		     u_int *, u_int *);
 void		 win32_terminal_restore_client(void);
-void		 win32_terminal_check_resize(struct client *);
 
 int		 win32_pane_spawn(struct spawn_context *, struct window_pane *,
 		     struct environ *, const char *, char **);
@@ -167,14 +162,12 @@ int		 win32_pane_exited(struct window_pane *, int *);
 int		 win32_pane_quiesced(struct window_pane *);
 size_t		 win32_pane_buffered(struct window_pane *);
 int		 win32_pane_output_done(struct window_pane *);
-int		 win32_pane_output_eof(struct window_pane *);
 void		 win32_pane_set_reading(struct window_pane *, int);
 int		 win32_pane_reading_paused(struct window_pane *);
 int		 win32_pane_input_ready(struct window_pane *);
 char		*win32_pane_get_name(struct window_pane *);
 char		*win32_pane_get_cwd(struct window_pane *);
 
-struct bufferevent *win32_pane_get_event(struct window_pane *);
 int		 win32_pane_write(struct window_pane *, const void *, size_t);
 
 struct win32_job *win32_job_spawn(const char *, const char *, int, char **,
@@ -185,11 +178,9 @@ void		 win32_job_terminate(struct win32_job *);
 void		 win32_job_resize(struct win32_job *, u_int, u_int);
 int		 win32_job_exited(struct win32_job *, int *);
 int		 win32_job_output_done(struct win32_job *);
-int		 win32_job_output_eof(struct win32_job *);
 void		 win32_job_drain(struct win32_job *);
 void		 win32_job_set_reading(struct win32_job *, int);
 int		 win32_job_get_pid(struct win32_job *, pid_t *);
-int		 win32_job_get_status(struct win32_job *);
 struct bufferevent *win32_job_get_event(struct win32_job *);
 void		 win32_job_set_exit_callback(struct win32_job *,
 		     void (*)(void *), void *);
@@ -211,7 +202,6 @@ ssize_t		 win32_ipc_pipe_read(struct win32_ipc_pipe *, void *, size_t);
 ssize_t		 win32_ipc_pipe_write(struct win32_ipc_pipe *, const void *,
 		     size_t);
 int		 win32_ipc_pipe_eof(struct win32_ipc_pipe *);
-DWORD		 win32_ipc_pipe_peer_pid(struct win32_ipc_pipe *);
 void		 win32_ipc_pipe_close(struct win32_ipc_pipe *, int);
 void		 win32_ipc_pipe_listener_free(struct win32_ipc_pipe_listener *);
 

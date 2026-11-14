@@ -1245,30 +1245,6 @@ win32_ipc_ensure_socket_dir(const char *path, char **cause)
 }
 
 int
-win32_ipc_ensure_parent_dir(const char *path, char **cause)
-{
-	char	*normalized, *slash;
-	int	 retval;
-
-	normalized = path_normalize(path);
-	if (normalized == NULL) {
-		if (cause != NULL)
-			xasprintf(cause, "invalid socket path");
-		errno = EINVAL;
-		return (-1);
-	}
-	slash = strrchr(normalized, '/');
-	if (slash == NULL) {
-		free(normalized);
-		return (0);
-	}
-	*slash = '\0';
-	retval = win32_ipc_ensure_dir(normalized, cause);
-	free(normalized);
-	return (retval);
-}
-
-int
 win32_ipc_validate_socket_parent(const char *path, char **cause)
 {
 	char	*parent = NULL, *current = NULL, *next = NULL;
@@ -1543,17 +1519,6 @@ win32_ipc_write(int fd, const void *data, size_t size)
 		return (-1);
 	}
 	return (win32_ipc_pipe_write(pe->pipe, data, size));
-}
-
-int
-win32_ipc_eof(int fd)
-{
-	struct win32_ipc_pipe_entry *pe;
-
-	pe = win32_ipc_find_pipe(fd);
-	if (pe == NULL)
-		return (1);
-	return (win32_ipc_pipe_eof(pe->pipe));
 }
 
 #endif /* TMUX_WIN32 */

@@ -1555,16 +1555,6 @@ win32_pane_output_done(struct window_pane *wp)
 	return (win32_io_reader_done(wp->win32->output_event));
 }
 
-int
-win32_pane_output_eof(struct window_pane *wp)
-{
-	if (wp->win32 == NULL)
-		return (1);
-	if (wp->win32->output_event == NULL)
-		return (wp->win32->output_eof);
-	return (win32_io_reader_eof(wp->win32->output_event));
-}
-
 void
 win32_pane_set_reading(struct window_pane *wp, int enabled)
 {
@@ -1645,12 +1635,6 @@ win32_pane_get_cwd(struct window_pane *wp)
 		return (NULL);
 	return (win32_job_get_cwd(wp->win32->job, wp->win32->process,
 	    wp->win32->process_id));
-}
-
-struct bufferevent *
-win32_pane_get_event(__unused struct window_pane *wp)
-{
-	return (NULL);
 }
 
 static void
@@ -2140,14 +2124,6 @@ win32_job_output_done(struct win32_job *wj)
 	return (win32_io_reader_done(wj->output_event));
 }
 
-int
-win32_job_output_eof(struct win32_job *wj)
-{
-	if (wj == NULL || wj->output_event == NULL)
-		return (1);
-	return (win32_io_reader_eof(wj->output_event));
-}
-
 void
 win32_job_drain(struct win32_job *wj)
 {
@@ -2170,16 +2146,6 @@ win32_job_get_pid(struct win32_job *wj, pid_t *pid)
 	if (pid != NULL)
 		*pid = (pid_t)wj->process_id;
 	return (0);
-}
-
-int
-win32_job_get_status(struct win32_job *wj)
-{
-	int	status;
-
-	if (win32_job_exited(wj, &status))
-		wj->status = status;
-	return (wj->status);
 }
 
 struct bufferevent *

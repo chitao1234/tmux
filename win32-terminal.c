@@ -193,15 +193,4 @@ win32_terminal_get_size(__unused struct client *c, u_int *sx, u_int *sy,
 	return (0);
 }
 
-void
-win32_terminal_check_resize(struct client *c)
-{
-	u_int sx, sy, xpixel, ypixel;
-
-	if (win32_terminal_get_size(c, &sx, &sy, &xpixel, &ypixel) != 0)
-		return;
-	if (c->tty.sx != sx || c->tty.sy != sy)
-		proc_send(c->peer, MSG_RESIZE, -1, NULL, 0);
-}
-
 #endif /* TMUX_WIN32 */

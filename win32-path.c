@@ -223,49 +223,8 @@ win32_path_canon_identity(const char *path, const char *base, char **cause)
 	return (identity);
 }
 
-int
-win32_path_equals(const char *a, const char *b)
-{
-	char	*ia, *ib;
-	int	 retval;
-
-	if (a == NULL || b == NULL)
-		return (a == b);
-	ia = win32_path_canon_identity(a, NULL, NULL);
-	ib = win32_path_canon_identity(b, NULL, NULL);
-	if (ia == NULL || ib == NULL) {
-		free(ia);
-		free(ib);
-		return (0);
-	}
-	retval = (strcmp(ia, ib) == 0);
-	free(ia);
-	free(ib);
-	return (retval);
-}
-
 /*
  * Join two paths with a single separator, without resolving. Callers that
  * need a normalized result should use win32_path_canon afterwards.
  */
-char *
-win32_path_join(const char *base, const char *path)
-{
-	const char	*sep;
-	char		*joined;
-	size_t		 len;
-
-	if (path == NULL)
-		return (base != NULL ? xstrdup(base) : NULL);
-	if (base == NULL || *base == '\0')
-		return (xstrdup(path));
-	if (path_is_absolute(path))
-		return (xstrdup(path));
-
-	len = strlen(base);
-	sep = (base[len - 1] == '/' || base[len - 1] == '\\') ? "" : "/";
-	xasprintf(&joined, "%s%s%s", base, sep, path);
-	return (joined);
-}
-
 #endif /* TMUX_WIN32 */

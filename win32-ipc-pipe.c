@@ -472,14 +472,6 @@ win32_ipc_pipe_eof(struct win32_ipc_pipe *p)
 	return (p->eof && EVBUFFER_LENGTH(p->input) == 0);
 }
 
-DWORD
-win32_ipc_pipe_peer_pid(struct win32_ipc_pipe *p)
-{
-	if (p == NULL)
-		return (0);
-	return (p->peer_pid);
-}
-
 void
 win32_ipc_pipe_close(struct win32_ipc_pipe *p, int graceful)
 {
