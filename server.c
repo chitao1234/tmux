@@ -214,10 +214,6 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	key_bindings_init();
 	TAILQ_INIT(&message_log);
 	gettimeofday(&start_time, NULL);
-#ifdef TMUX_WIN32
-	if (flags & CLIENT_WIN32_HELPER)
-		server_win32_wait_first_client = 1;
-#endif
 
 #ifdef HAVE_SYSTEMD
 	server_fd = systemd_create_socket(flags, &cause);
@@ -231,7 +227,14 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
 #ifdef TMUX_WIN32
-	else if (~flags & CLIENT_WIN32_HELPER)
+	else if (flags & CLIENT_SPAWNEDSERVER)
+		/*
+		 * A detached server is spawned before any client can connect.
+		 * Hold exit-empty for a bounded startup window instead of
+		 * disabling it, so a zero-session server still exits.
+		 */
+		server_win32_wait_first_client = 1;
+	else
 		options_set_number(global_options, "exit-empty", 0);
 #else
 	else

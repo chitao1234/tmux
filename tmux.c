@@ -793,7 +793,7 @@ main(int argc, char **argv)
 		environ_set(global_environ, "PWD", 0, "%s", cwd);
 	expand_paths(TMUX_CONF, &cfg_files, &cfg_nfiles, 1);
 
-	while ((opt = getopt(argc, argv, "2c:CDdf:hlL:NqS:T:uUvVwW")) != -1) {
+	while ((opt = getopt(argc, argv, "2c:CDdf:hlL:NqS:T:uUvVW")) != -1) {
 		switch (opt) {
 		case '2':
 			tty_add_features(&feat, "256", ":,");
@@ -853,9 +853,6 @@ main(int argc, char **argv)
 			log_add_level();
 			break;
 #ifdef TMUX_WIN32
-		case 'w':
-			flags |= CLIENT_WIN32_HELPER;
-			break;
 		case 'W':
 			flags |= CLIENT_SPAWNEDSERVER;
 			break;

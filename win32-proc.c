@@ -36,8 +36,7 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 	}
 	log_level = log_get_level();
 	cfg_args = (cfg_quiet ? 0 : 2 * cfg_nfiles);
-	argc = 6 + log_level + ((flags & CLIENT_WIN32_HELPER) != 0) +
-	    cfg_args;
+	argc = 6 + log_level + cfg_args;
 	argv = xcalloc((size_t)argc, sizeof *argv);
 	i = 0;
 	argv[i++] = exe_utf8;
@@ -51,8 +50,6 @@ win32_server_spawn(const char *path, uint64_t flags, char **cause)
 		argv[i++] = xstrdup("-f");
 		argv[i++] = xstrdup(cfg_files[j]);
 	}
-	if (flags & CLIENT_WIN32_HELPER)
-		argv[i++] = xstrdup("-w");
 	cmd = win32_build_argv_command(i, argv);
 	wexe = win32_utf8_to_wide(exe_utf8);
 	while (i-- > 0)
