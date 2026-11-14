@@ -37,7 +37,6 @@ static int	 win32_import_environment(struct environ *);
 static int	 win32_import_environment_entry(const wchar_t *,
 		     struct environ *);
 static int	 win32_import_utf8_entry(char *, struct environ *);
-static int	 win32_errno_from_last_error(DWORD);
 static const char *win32_getenv_canonical(const char *);
 static void	 win32_sync_global_environ_entry(const char *, const char *);
 static int	 win32_command_line_to_argv(const wchar_t *, int *, char ***);
@@ -487,7 +486,7 @@ win32_access_utf8(const char *path, int mode)
 	attr = GetFileAttributesW(wpath);
 	free(wpath);
 	if (attr == INVALID_FILE_ATTRIBUTES) {
-		errno = win32_errno_from_last_error(GetLastError());
+		errno = win32_errno_from_error(GetLastError());
 		return (-1);
 	}
 	if (mode == F_OK)
@@ -539,7 +538,7 @@ win32_unlink_utf8(const char *path)
 	}
 	if (!DeleteFileW(wpath)) {
 		free(wpath);
-		errno = win32_errno_from_last_error(GetLastError());
+		errno = win32_errno_from_error(GetLastError());
 		return (-1);
 	}
 	free(wpath);
@@ -966,8 +965,8 @@ win32_import_utf8_entry(char *entry, struct environ *env)
 	return (0);
 }
 
-static int
-win32_errno_from_last_error(DWORD error)
+int
+win32_errno_from_error(DWORD error)
 {
 	switch (error) {
 	case ERROR_FILE_NOT_FOUND:

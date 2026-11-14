@@ -43,6 +43,7 @@ enum win32_io_event {
 };
 
 const char	*win32_strerror(DWORD);
+int		 win32_errno_from_error(DWORD);
 char		*win32_getenv_utf8(const char *);
 wchar_t		*win32_utf8_to_wide(const char *);
 char		*win32_wide_to_utf8(const wchar_t *);

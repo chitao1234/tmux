@@ -736,34 +736,6 @@ file_write_acknowledge(struct client_file *cf, size_t size, int error)
 }
 
 #ifdef TMUX_WIN32
-static int
-file_win32_errno(DWORD error)
-{
-	switch (error) {
-	case ERROR_FILE_NOT_FOUND:
-	case ERROR_PATH_NOT_FOUND:
-		return (ENOENT);
-	case ERROR_ACCESS_DENIED:
-	case ERROR_SHARING_VIOLATION:
-	case ERROR_LOCK_VIOLATION:
-		return (EACCES);
-	case ERROR_FILE_EXISTS:
-	case ERROR_ALREADY_EXISTS:
-		return (EEXIST);
-	case ERROR_INVALID_NAME:
-	case ERROR_INVALID_PARAMETER:
-		return (EINVAL);
-	case ERROR_NOT_ENOUGH_MEMORY:
-	case ERROR_OUTOFMEMORY:
-		return (ENOMEM);
-	case ERROR_DISK_FULL:
-	case ERROR_HANDLE_DISK_FULL:
-		return (ENOSPC);
-	default:
-		return (EIO);
-	}
-}
-
 static void
 file_win32_close_handle(HANDLE *handle)
 {
@@ -784,7 +756,7 @@ file_win32_regular_handle(HANDLE handle)
 	if (type == FILE_TYPE_UNKNOWN) {
 		error = GetLastError();
 		if (error != NO_ERROR) {
-			errno = file_win32_errno(error);
+			errno = win32_errno_from_error(error);
 			return (-1);
 		}
 	}
@@ -819,7 +791,7 @@ file_write_win32_open_path(struct client_file *cf, const char *path, int flags)
 	    FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, NULL);
 	free(wpath);
 	if (handle == INVALID_HANDLE_VALUE) {
-		errno = file_win32_errno(GetLastError());
+		errno = win32_errno_from_error(GetLastError());
 		return (-1);
 	}
 
@@ -855,7 +827,7 @@ file_read_win32_open_path(struct client_file *cf, const char *path,
 	    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, NULL);
 	free(wpath);
 	if (handle == INVALID_HANDLE_VALUE) {
-		errno = file_win32_errno(GetLastError());
+		errno = win32_errno_from_error(GetLastError());
 		return (-1);
 	}
 

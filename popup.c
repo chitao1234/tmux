@@ -99,31 +99,6 @@ static void	popup_editor_close_cb(int, void *);
 static LONG	popup_editor_temp_serial;
 
 static int
-popup_editor_win32_errno(DWORD error)
-{
-	switch (error) {
-	case ERROR_FILE_NOT_FOUND:
-	case ERROR_PATH_NOT_FOUND:
-		return (ENOENT);
-	case ERROR_ACCESS_DENIED:
-	case ERROR_SHARING_VIOLATION:
-	case ERROR_LOCK_VIOLATION:
-		return (EACCES);
-	case ERROR_FILE_EXISTS:
-	case ERROR_ALREADY_EXISTS:
-		return (EEXIST);
-	case ERROR_INVALID_NAME:
-	case ERROR_INVALID_PARAMETER:
-		return (EINVAL);
-	case ERROR_NOT_ENOUGH_MEMORY:
-	case ERROR_OUTOFMEMORY:
-		return (ENOMEM);
-	default:
-		return (EIO);
-	}
-}
-
-static int
 popup_editor_create_temp_file(const char *dir, char **path)
 {
 	const char	*slash;
@@ -165,7 +140,7 @@ popup_editor_create_temp_file(const char *dir, char **path)
 			if (error == ERROR_FILE_EXISTS ||
 			    error == ERROR_ALREADY_EXISTS)
 				continue;
-			errno = popup_editor_win32_errno(error);
+			errno = win32_errno_from_error(error);
 			return (-1);
 		}
 		fd = _open_osfhandle((intptr_t)handle, _O_BINARY);
