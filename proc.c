@@ -124,14 +124,6 @@ proc_event_cb(__unused tmux_event_fd fd, short events, void *arg)
 	proc_update_event(peer);
 }
 
-static void
-proc_signal_cb(int signo, __unused short events, void *arg)
-{
-	struct tmuxproc	*tp = arg;
-
-	tp->signalcb(signo);
-}
-
 static int
 peer_check_version(struct tmuxpeer *peer, struct imsg *imsg)
 {
@@ -237,6 +229,16 @@ proc_exit(struct tmuxproc *tp)
 	    imsgbuf_flush(&peer->ibuf);
 	tp->exit = 1;
 }
+
+#ifndef TMUX_WIN32
+static void
+proc_signal_cb(int signo, __unused short events, void *arg)
+{
+	struct tmuxproc	*tp = arg;
+
+	tp->signalcb(signo);
+}
+#endif
 
 void
 proc_set_signals(struct tmuxproc *tp, void (*signalcb)(int))

@@ -290,11 +290,12 @@ spawn_pane(struct spawn_context *sc, char **cause)
 			return (NULL);
 		}
 #ifdef TMUX_WIN32
-		if (sc->wp0->win32 != NULL)
+		if (sc->wp0->win32 != NULL) {
 			if (sc->flags & SPAWN_KILL)
 				win32_pane_terminate(sc->wp0);
 			else
 				win32_pane_cleanup(sc->wp0);
+		}
 #else
 		if (sc->wp0->fd != -1) {
 			bufferevent_free(sc->wp0->event);

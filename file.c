@@ -77,7 +77,6 @@ RB_GENERATE(client_files, client_file, entry, file_cmp);
 static char *
 file_get_path(struct client *c, const char *file)
 {
-	const char	*home;
 	char		*path, *full_path;
 
 #ifdef TMUX_WIN32
@@ -92,7 +91,8 @@ file_get_path(struct client *c, const char *file)
 	if (strncmp(file, "~/", 2) != 0)
 		path = xstrdup(file);
 	else {
-		home = find_home();
+		const char *home = find_home();
+
 		if (home == NULL)
 			home = "";
 		xasprintf(&path, "%s%s", home, file + 1);
@@ -838,7 +838,8 @@ file_write_win32_open_path(struct client_file *cf, const char *path, int flags)
 }
 
 static int
-file_read_win32_open_path(struct client_file *cf, const char *path, int flags)
+file_read_win32_open_path(struct client_file *cf, const char *path,
+    __unused int flags)
 {
 	wchar_t	*wpath;
 	HANDLE	 handle;
