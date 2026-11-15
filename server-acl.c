@@ -12,9 +12,9 @@
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF MIND, USE, DATA OR PROFITS, WHETHER
- * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
- * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <sys/types.h>
@@ -33,14 +33,25 @@
 
 #include "tmux.h"
 
+/*
+ * The access list is keyed on an opaque identity string, so the tree and every
+ * operation on it are shared between platforms:
+ *
+ *   Unix     decimal uid ("1000", "0")
+ *   Windows  string SID ("S-1-5-21-...-1001")
+ *
+ * Only the four identity helpers at the bottom of this file know the
+ * difference: name to key, key to display name, the owner's key, and a peer's
+ * key. Everything else - insertion, removal, read-only flags, matching a
+ * client to an entry, display - is one implementation.
+ *
+ * This list is an application-level filter. It decides whether a client that
+ * already reached the server may stay; it never widens the transport.
+ */
 struct server_acl_user {
-#ifdef TMUX_WIN32
-	char				*sid;
-#else
-	uid_t				uid;
-#endif
+	char	*id;
 
-	int				flags;
+	int	 flags;
 #define SERVER_ACL_READONLY 0x1
 
 	RB_ENTRY(server_acl_user)	entry;
@@ -49,17 +60,7 @@ struct server_acl_user {
 static int
 server_acl_cmp(struct server_acl_user *user1, struct server_acl_user *user2)
 {
-#ifdef TMUX_WIN32
-	if (user1->sid == NULL)
-		return (user2->sid == NULL ? 0 : -1);
-	if (user2->sid == NULL)
-		return (1);
-	return (strcmp(user1->sid, user2->sid));
-#else
-	if (user1->uid < user2->uid)
-		return (-1);
-	return (user1->uid > user2->uid);
-#endif
+	return (strcmp(user1->id, user2->id));
 }
 
 RB_HEAD(server_acl_entries, server_acl_user) server_acl_entries;
@@ -69,146 +70,188 @@ static void	server_acl_free_user(struct server_acl_user *);
 static int	server_acl_user_matches_peer(struct server_acl_user *,
 		    struct tmuxpeer *);
 
+/*
+ * Owner key. On Unix this also means "the account that must be present but is
+ * never shown": root and the owner's own uid are implicit.
+ */
+char *
+server_acl_owner_id(void)
+{
+#ifndef TMUX_WIN32
+	char	*out;
+
+	xasprintf(&out, "%ld", (long)getuid());
+	return (out);
+#else
+	const char	*sid = win32_ipc_current_user_sid();
+
+	if (sid == NULL)
+		return (NULL);
+	return (xstrdup(sid));
+#endif
+}
+
+char *
+server_acl_id_from_name(const char *name, char **cause)
+{
+#ifndef TMUX_WIN32
+	struct passwd	*pw;
+	char		*out;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (name == NULL || *name == '\0') {
+		if (cause != NULL)
+			xasprintf(cause, "empty user name");
+		return (NULL);
+	}
+	if ((pw = getpwnam(name)) == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "no such account");
+		return (NULL);
+	}
+	xasprintf(&out, "%ld", (long)pw->pw_uid);
+	return (out);
+#else
+	return (win32_ipc_sid_from_name(name, cause));
+#endif
+}
+
+char *
+server_acl_id_to_name(const char *id)
+{
+#ifndef TMUX_WIN32
+	struct passwd	*pw;
+	char		*end;
+	long		 uid;
+
+	if (id == NULL)
+		return (xstrdup("unknown"));
+	uid = strtol(id, &end, 10);
+	if (*end != '\0')
+		return (xstrdup("unknown"));
+	if ((pw = getpwuid((uid_t)uid)) == NULL)
+		return (xstrdup("unknown"));
+	return (xstrdup(pw->pw_name));
+#else
+	char	*name;
+
+	name = win32_ipc_name_from_sid(id, NULL);
+	if (name == NULL)
+		return (xstrdup(id != NULL ? id : "unknown"));
+	return (name);
+#endif
+}
+
+static char *
+server_acl_peer_id(struct tmuxpeer *peer)
+{
+#ifndef TMUX_WIN32
+	uid_t	uid;
+	char	*out;
+
+	if (peer == NULL)
+		return (NULL);
+	if ((uid = proc_get_peer_uid(peer)) == (uid_t)-1)
+		return (NULL);
+	xasprintf(&out, "%ld", (long)uid);
+	return (out);
+#else
+	const char	*sid;
+
+	if (peer == NULL)
+		return (NULL);
+	if ((sid = proc_get_peer_user_sid(peer)) == NULL)
+		return (NULL);
+	return (xstrdup(sid));
+#endif
+}
+
 /* Initialize server_acl tree. */
 void
 server_acl_init(void)
 {
-#ifdef TMUX_WIN32
-	const char	*sid;
-#endif
+	char	*owner;
 
 	RB_INIT(&server_acl_entries);
 
 #ifndef TMUX_WIN32
-	if (getuid() != 0)
-		server_acl_user_allow(0);
-	server_acl_user_allow(getuid());
-#else
-	sid = win32_ipc_current_user_sid();
-	if (sid != NULL)
-		server_acl_user_allow_sid(sid);
+	/* root is always allowed but never displayed */
+	server_acl_user_allow("0");
 #endif
+	if ((owner = server_acl_owner_id()) != NULL) {
+		server_acl_user_allow(owner);
+		free(owner);
+	}
 }
 
 /* Find user entry. */
-#ifndef TMUX_WIN32
-struct server_acl_user*
-server_acl_user_find(uid_t uid)
+struct server_acl_user *
+server_acl_user_find(const char *id)
 {
-	struct server_acl_user	find = { .uid = uid };
+	struct server_acl_user	find = { .id = (char *)id };
 
-	return (RB_FIND(server_acl_entries, &server_acl_entries, &find));
-}
-#else
-struct server_acl_user*
-server_acl_user_find_sid(const char *sid)
-{
-	struct server_acl_user	find = { .sid = (char *)sid };
-
-	if (sid == NULL || *sid == '\0')
+	if (id == NULL || *id == '\0')
 		return (NULL);
 	return (RB_FIND(server_acl_entries, &server_acl_entries, &find));
 }
-#endif
 
 /* Display the tree. */
 void
 server_acl_display(struct cmdq_item *item)
 {
 	struct server_acl_user	*loop;
-	const char		*name;
-#ifndef TMUX_WIN32
-	struct passwd		*pw;
-#endif
+	char			*name;
 
 	RB_FOREACH(loop, server_acl_entries, &server_acl_entries) {
 #ifndef TMUX_WIN32
-		if (loop->uid == 0)
+		if (strcmp(loop->id, "0") == 0)
 			continue;
-		if ((pw = getpwuid(loop->uid)) != NULL)
-			name = pw->pw_name;
-		else
-			name = "unknown";
-#else
-		name = loop->sid;
 #endif
+		name = server_acl_id_to_name(loop->id);
 		if (loop->flags == SERVER_ACL_READONLY)
 			cmdq_print(item, "%s (R)", name);
 		else
 			cmdq_print(item, "%s (W)", name);
+		free(name);
 	}
 }
 
 /* Allow a user. */
-#ifndef TMUX_WIN32
 void
-server_acl_user_allow(uid_t uid)
+server_acl_user_allow(const char *id)
 {
 	struct server_acl_user	*user;
 
-	user = server_acl_user_find(uid);
-	if (user == NULL) {
-		user = xcalloc(1, sizeof *user);
-		user->uid = uid;
-		RB_INSERT(server_acl_entries, &server_acl_entries, user);
-	}
-}
-#else
-void
-server_acl_user_allow_sid(const char *sid)
-{
-	struct server_acl_user	*user;
-
-	if (sid == NULL || *sid == '\0')
+	if (id == NULL || *id == '\0')
 		return;
-	user = server_acl_user_find_sid(sid);
-	if (user == NULL) {
-		user = xcalloc(1, sizeof *user);
-		user->sid = xstrdup(sid);
-		RB_INSERT(server_acl_entries, &server_acl_entries, user);
-	}
+	if (server_acl_user_find(id) != NULL)
+		return;
+	user = xcalloc(1, sizeof *user);
+	user->id = xstrdup(id);
+	RB_INSERT(server_acl_entries, &server_acl_entries, user);
 }
-#endif
 
 /* Deny a user (remove from the tree). */
-#ifndef TMUX_WIN32
 void
-server_acl_user_deny(uid_t uid)
+server_acl_user_deny(const char *id)
 {
 	struct server_acl_user	*user;
 
-	user = server_acl_user_find(uid);
-	if (user != NULL) {
-		RB_REMOVE(server_acl_entries, &server_acl_entries, user);
-		server_acl_free_user(user);
-	}
-}
-#else
-void
-server_acl_user_deny_sid(const char *sid)
-{
-	struct server_acl_user	*user;
-
-	if (sid == NULL || *sid == '\0')
+	if ((user = server_acl_user_find(id)) == NULL)
 		return;
-	user = server_acl_user_find_sid(sid);
-	if (user != NULL) {
-		RB_REMOVE(server_acl_entries, &server_acl_entries, user);
-		server_acl_free_user(user);
-	}
+	RB_REMOVE(server_acl_entries, &server_acl_entries, user);
+	server_acl_free_user(user);
 }
-#endif
 
 /* Allow this user write access. */
-#ifndef TMUX_WIN32
 void
-server_acl_user_allow_write(uid_t uid)
+server_acl_user_allow_write(const char *id)
 {
 	struct server_acl_user	*user;
 	struct client		*c;
 
-	user = server_acl_user_find(uid);
-	if (user == NULL)
+	if ((user = server_acl_user_find(id)) == NULL)
 		return;
 	user->flags &= ~SERVER_ACL_READONLY;
 
@@ -217,37 +260,15 @@ server_acl_user_allow_write(uid_t uid)
 			c->flags &= ~CLIENT_READONLY;
 	}
 }
-#else
-void
-server_acl_user_allow_write_sid(const char *sid)
-{
-	struct server_acl_user	*user;
-	struct client		*c;
-
-	if (sid == NULL || *sid == '\0')
-		return;
-	user = server_acl_user_find_sid(sid);
-	if (user == NULL)
-		return;
-	user->flags &= ~SERVER_ACL_READONLY;
-
-	TAILQ_FOREACH(c, &clients, entry) {
-		if (server_acl_user_matches_peer(user, c->peer))
-			c->flags &= ~CLIENT_READONLY;
-	}
-}
-#endif
 
 /* Deny this user write access. */
-#ifndef TMUX_WIN32
 void
-server_acl_user_deny_write(uid_t uid)
+server_acl_user_deny_write(const char *id)
 {
 	struct server_acl_user	*user;
 	struct client		*c;
 
-	user = server_acl_user_find(uid);
-	if (user == NULL)
+	if ((user = server_acl_user_find(id)) == NULL)
 		return;
 	user->flags |= SERVER_ACL_READONLY;
 
@@ -256,99 +277,75 @@ server_acl_user_deny_write(uid_t uid)
 			c->flags |= CLIENT_READONLY;
 	}
 }
-#else
-void
-server_acl_user_deny_write_sid(const char *sid)
+
+/* Get the identity key for a user entry. */
+const char *
+server_acl_user_id(struct server_acl_user *user)
 {
-	struct server_acl_user	*user;
-	struct client		*c;
-
-	if (sid == NULL || *sid == '\0')
-		return;
-	user = server_acl_user_find_sid(sid);
-	if (user == NULL)
-		return;
-	user->flags |= SERVER_ACL_READONLY;
-
-	TAILQ_FOREACH(c, &clients, entry) {
-		if (server_acl_user_matches_peer(user, c->peer))
-			c->flags |= CLIENT_READONLY;
-	}
+	return (user->id);
 }
-#endif
 
 /*
- * Check if the client's UID exists in the ACL list and if so, set as read only
- * if needed. Return false if the user does not exist.
+ * Check if the client's identity exists in the ACL list and if so, set as
+ * read only if needed. Return false if the user does not exist.
  */
 int
 server_acl_join(struct client *c)
 {
 	struct server_acl_user	*user;
-#ifndef TMUX_WIN32
-	uid_t			 uid;
-#endif
+	char			*id;
+	int			 retval;
 
-#ifdef TMUX_WIN32
-	user = server_acl_user_find_sid(proc_get_peer_user_sid(c->peer));
-#else
-	uid = proc_get_peer_uid(c->peer);
-	if (uid == (uid_t)-1)
+	if ((id = server_acl_peer_id(c->peer)) == NULL)
 		return (0);
-
-	user = server_acl_user_find(uid);
-#endif
+	user = server_acl_user_find(id);
+	free(id);
 	if (user == NULL)
 		return (0);
 	if (user->flags & SERVER_ACL_READONLY)
 		c->flags |= CLIENT_READONLY;
-	return (1);
+	retval = 1;
+	return (retval);
 }
 
-/* Get UID for user entry. */
-#ifndef TMUX_WIN32
-uid_t
-server_acl_get_uid(struct server_acl_user *user)
+/*
+ * Mark every attached client whose identity matches, so a deny can take
+ * effect immediately instead of at the next attach.
+ */
+void
+server_acl_user_disconnect(const char *id)
 {
-	return (user->uid);
+	struct server_acl_user	*user;
+	struct client		*c;
+
+	if ((user = server_acl_user_find(id)) == NULL)
+		return;
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (server_acl_user_matches_peer(user, c->peer)) {
+			c->exit_message = xstrdup("access not allowed");
+			c->flags |= CLIENT_EXIT;
+		}
+	}
 }
-#else
-const char *
-server_acl_get_sid(struct server_acl_user *user)
-{
-	return (user->sid);
-}
-#endif
 
 static void
 server_acl_free_user(struct server_acl_user *user)
 {
-#ifdef TMUX_WIN32
-	free(user->sid);
-#endif
+	free(user->id);
 	free(user);
 }
 
 static int
 server_acl_user_matches_peer(struct server_acl_user *user, struct tmuxpeer *peer)
 {
-#ifdef TMUX_WIN32
-	const char	*sid;
+	char	*id;
+	int	 match;
 
 	if (user == NULL || peer == NULL)
 		return (0);
-	sid = proc_get_peer_user_sid(peer);
-	if (sid == NULL)
+	if ((id = server_acl_peer_id(peer)) == NULL)
 		return (0);
-	return (strcmp(user->sid, sid) == 0);
-#else
-	uid_t	 uid;
-
-	if (user == NULL || peer == NULL)
-		return (0);
-	uid = proc_get_peer_uid(peer);
-	if (uid == (uid_t)-1)
-		return (0);
-	return (uid == user->uid);
-#endif
+	match = (strcmp(user->id, id) == 0);
+	free(id);
+	return (match);
 }

@@ -486,6 +486,134 @@ win32_ipc_current_user_sid(void)
 	return (win32_ipc_current_user_sid_value);
 }
 
+/*
+ * Resolve an account name to a string SID.
+ *
+ * Accepts "DOMAIN\user", "MACHINE\user" and a bare account name. A bare name
+ * goes through LookupAccountNameW, which tries the local machine first and
+ * then the primary domain, so both "Dell" and "MACHINE\Dell" resolve.
+ */
+char *
+win32_ipc_sid_from_name(const char *name, char **cause)
+{
+	wchar_t		*wname;
+	wchar_t		*domain = NULL;
+	PSID		 sid = NULL;
+	DWORD		 sid_size = 0, domain_size = 0;
+	SID_NAME_USE	 use;
+	char		*out = NULL;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (name == NULL || *name == '\0') {
+		if (cause != NULL)
+			xasprintf(cause, "empty account name");
+		return (NULL);
+	}
+	if ((wname = win32_utf8_to_wide(name)) == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "account name is not valid UTF-8");
+		return (NULL);
+	}
+
+	/* First call only asks for the buffer sizes. */
+	(void)LookupAccountNameW(NULL, wname, NULL, &sid_size, NULL,
+	    &domain_size, &use);
+	if (sid_size == 0) {
+		if (cause != NULL)
+			xasprintf(cause, "%s", win32_strerror(GetLastError()));
+		goto out;
+	}
+	sid = xmalloc(sid_size);
+	domain = xcalloc(domain_size == 0 ? 1 : domain_size, sizeof *domain);
+	if (!LookupAccountNameW(NULL, wname, sid, &sid_size, domain,
+	    &domain_size, &use)) {
+		if (cause != NULL)
+			xasprintf(cause, "%s", win32_strerror(GetLastError()));
+		goto out;
+	}
+	out = win32_ipc_sid_to_string(sid);
+	if (out == NULL && cause != NULL)
+		xasprintf(cause, "couldn't convert account SID");
+
+out:
+	free(sid);
+	free(domain);
+	free(wname);
+	return (out);
+}
+
+/*
+ * Resolve a string SID back to "DOMAIN\user" for display.
+ *
+ * Falls back to the SID text when the account cannot be resolved, so an entry
+ * for a deleted or foreign account stays visible in server-access -l instead
+ * of vanishing.
+ */
+char *
+win32_ipc_name_from_sid(const char *sid_string, char **cause)
+{
+	wchar_t		*wsid = NULL;
+	wchar_t		*name = NULL, *domain = NULL;
+	wchar_t		*joined = NULL;
+	char		*out = NULL;
+	PSID		 sid = NULL;
+	DWORD		 name_size = 0, domain_size = 0;
+	SID_NAME_USE	 use;
+
+	if (cause != NULL)
+		*cause = NULL;
+	if (sid_string == NULL || *sid_string == '\0') {
+		if (cause != NULL)
+			xasprintf(cause, "empty SID");
+		return (NULL);
+	}
+	if ((wsid = win32_utf8_to_wide(sid_string)) == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "SID is not valid UTF-8");
+		return (NULL);
+	}
+	if (!ConvertStringSidToSidW(wsid, &sid)) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't parse SID: %s",
+			    win32_strerror(GetLastError()));
+		}
+		goto out;
+	}
+
+	(void)LookupAccountSidW(NULL, sid, NULL, &name_size, NULL,
+	    &domain_size, &use);
+	if (name_size == 0) {
+		out = xstrdup(sid_string);
+		goto out;
+	}
+	name = xcalloc(name_size, sizeof *name);
+	domain = xcalloc(domain_size == 0 ? 1 : domain_size, sizeof *domain);
+	if (!LookupAccountSidW(NULL, sid, name, &name_size, domain,
+	    &domain_size, &use)) {
+		out = xstrdup(sid_string);
+		goto out;
+	}
+	if (domain[0] != L'\0') {
+		joined = xcalloc(wcslen(domain) + wcslen(name) + 2,
+		    sizeof *joined);
+		wcscpy(joined, domain);
+		wcscat(joined, L"\\");
+		wcscat(joined, name);
+		out = win32_wide_to_utf8(joined);
+	} else
+		out = win32_wide_to_utf8(name);
+
+out:
+	free(joined);
+	free(name);
+	free(domain);
+	if (sid != NULL)
+		LocalFree(sid);
+	free(wsid);
+	return (out);
+}
+
 int
 win32_ipc_duplicate_client_handle(const struct win32_ipc_peer_identity *peer,
     uint64_t value, DWORD access, HANDLE *out, char **cause)

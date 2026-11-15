@@ -3941,21 +3941,16 @@ struct screen	*sixel_to_screen(struct sixel_image *);
 
 /* server-acl.c */
 void			 server_acl_init(void);
-#ifndef TMUX_WIN32
-struct server_acl_user	*server_acl_user_find(uid_t);
-void			 server_acl_user_allow(uid_t);
-void			 server_acl_user_deny(uid_t);
-void			 server_acl_user_allow_write(uid_t);
-void			 server_acl_user_deny_write(uid_t);
-uid_t			 server_acl_get_uid(struct server_acl_user *);
-#else
-struct server_acl_user	*server_acl_user_find_sid(const char *);
-void			 server_acl_user_allow_sid(const char *);
-void			 server_acl_user_deny_sid(const char *);
-void			 server_acl_user_allow_write_sid(const char *);
-void			 server_acl_user_deny_write_sid(const char *);
-const char		*server_acl_get_sid(struct server_acl_user *);
-#endif
+char			*server_acl_owner_id(void);
+char			*server_acl_id_from_name(const char *, char **);
+char			*server_acl_id_to_name(const char *);
+struct server_acl_user	*server_acl_user_find(const char *);
+void			 server_acl_user_allow(const char *);
+void			 server_acl_user_deny(const char *);
+void			 server_acl_user_allow_write(const char *);
+void			 server_acl_user_deny_write(const char *);
+void			 server_acl_user_disconnect(const char *);
+const char		*server_acl_user_id(struct server_acl_user *);
 void 			 server_acl_display(struct cmdq_item *);
 int			 server_acl_join(struct client *);
 

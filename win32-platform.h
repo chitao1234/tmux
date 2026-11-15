@@ -141,6 +141,8 @@ int		 win32_ipc_duplicate_client_handle(
 const char	*win32_ipc_peer_identity_user_sid(
 		     const struct win32_ipc_peer_identity *);
 const char	*win32_ipc_current_user_sid(void);
+char		*win32_ipc_sid_from_name(const char *, char **);
+char		*win32_ipc_name_from_sid(const char *, char **);
 int		 win32_server_spawn(const char *, uint64_t, char **);
 
 int		 win32_terminal_prepare_terminfo(void);
