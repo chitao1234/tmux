@@ -1,0 +1,27 @@
+# Normalize every text file to LF, in the repository and in every working
+# tree on every platform.
+#
+# This is not cosmetic. The Autotools inputs (configure.ac, Makefile.am) are
+# processed by m4, and a CRLF checkout turns each line continuation into
+# "\" followed by CR, which is not a continuation at all. The generated
+# configure then contains broken "for x in \" lists and dies at run time
+# with "syntax error near unexpected token". Pinning eol=lf keeps the
+# generated script valid everywhere, including Windows/MSYS2 where the
+# system git default is core.autocrlf=true.
+#
+# Keeping the index and the working tree at LF also means a clone on one
+# platform does not look modified on another.
+* text=auto eol=lf
+
+# EPS is PostScript text, and the repository copy is LF. It is listed
+# explicitly so the "binary" rules below cannot silently stop normalizing it
+# and commit a CRLF blob.
+*.eps text eol=lf
+
+# Never line-ending convert these.
+*.png binary
+*.ico binary
+*.pdf binary
+*.odt binary
+*.odp binary
+*.sixel binary

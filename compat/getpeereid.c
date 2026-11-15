@@ -27,7 +27,7 @@
 #include "compat.h"
 
 int
-getpeereid(int s, uid_t *uid, gid_t *gid)
+getpeereid(__unused int s, uid_t *uid, gid_t *gid)
 {
 #ifdef HAVE_SO_PEERCRED
 	struct ucred	uc;
