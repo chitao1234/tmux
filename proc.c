@@ -469,6 +469,14 @@ proc_get_peer_user_sid(struct tmuxpeer *peer)
 		return (NULL);
 	return (peer->user_sid);
 }
+
+int
+proc_get_peer_fd(struct tmuxpeer *peer)
+{
+	if (peer == NULL)
+		return (-1);
+	return (peer->ibuf.fd);
+}
 #endif
 
 static void

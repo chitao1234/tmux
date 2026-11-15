@@ -125,15 +125,15 @@ SOCKET		 win32_ipc_socket(int);
 void		 win32_ipc_consume_notify(int);
 ssize_t		 win32_ipc_read(int, void *, size_t);
 ssize_t		 win32_ipc_write(int, const void *, size_t);
-int		 win32_random_bytes(void *, size_t, char **);
 struct win32_ipc_peer_identity *win32_ipc_peer_identity_create(
 		     pid_t, HANDLE, char **);
 void		 win32_ipc_peer_identity_free(struct win32_ipc_peer_identity *);
 int		 win32_ipc_peer_identity_same_user(
 		     const struct win32_ipc_peer_identity *, char **);
+int		 win32_ipc_peer_pid(int, DWORD *, char **);
+int		 win32_ipc_server_pid(int, DWORD *, char **);
 int		 win32_ipc_verify_auth_bind(
-		     const struct msg_win32_auth_challenge *,
-		     const struct msg_win32_auth_bind *,
+		     const struct msg_win32_auth_bind *, DWORD,
 		     struct win32_ipc_peer_identity **, char **);
 int		 win32_ipc_duplicate_client_handle(
 		     const struct win32_ipc_peer_identity *, uint64_t, DWORD,
@@ -198,6 +198,7 @@ struct win32_ipc_pipe *win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *,
 struct win32_ipc_pipe *win32_ipc_pipe_connect(const char *, char **);
 int		 win32_ipc_pipe_attach_notify(struct win32_ipc_pipe *, char **);
 SOCKET		 win32_ipc_pipe_notify_socket(struct win32_ipc_pipe *);
+DWORD		 win32_ipc_pipe_peer_pid(struct win32_ipc_pipe *);
 void		 win32_ipc_pipe_consume_notify(struct win32_ipc_pipe *);
 ssize_t		 win32_ipc_pipe_read(struct win32_ipc_pipe *, void *, size_t);
 ssize_t		 win32_ipc_pipe_write(struct win32_ipc_pipe *, const void *,

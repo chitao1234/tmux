@@ -165,23 +165,6 @@ win32_ipc_sid_to_string(PSID sid)
 	return (copy);
 }
 
-int
-win32_random_bytes(void *buf, size_t len, char **cause)
-{
-	NTSTATUS	status;
-
-	status = BCryptGenRandom(NULL, buf, (ULONG)len,
-	    BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-	if (status != 0) {
-		if (cause != NULL)
-			xasprintf(cause, "BCryptGenRandom failed: %#lx",
-			    (unsigned long)status);
-		errno = EACCES;
-		return (-1);
-	}
-	return (0);
-}
-
 static int
 win32_ipc_capture_token_identity(HANDLE token, char **user_sid, char **cause)
 {
@@ -343,50 +326,39 @@ win32_ipc_peer_identity_same_user(const struct win32_ipc_peer_identity *peer,
 
 int
 win32_ipc_verify_auth_bind(
-    const struct msg_win32_auth_challenge *challenge,
     const struct msg_win32_auth_bind *bind,
+    DWORD peer_pid,
     struct win32_ipc_peer_identity **peer_out, char **cause)
 {
-	HANDLE				 auth = NULL;
 	HANDLE				 process = NULL;
 	HANDLE				 duplicate_process = NULL;
 	struct win32_ipc_peer_identity	*peer = NULL;
-	void				*view = NULL;
 	DWORD				 error, process_id;
-	int				 auth_owned = 0, process_owned = 0;
+	int				 process_owned = 0;
 	int				 retval = -1;
 
 	*peer_out = NULL;
-	if (challenge == NULL || bind == NULL || bind->pid == 0 ||
-	    bind->handle == 0 ||
-	    bind->handle == (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE ||
-	    bind->process_handle == 0 || bind->process_handle ==
+	if (bind == NULL || bind->process_handle == 0 ||
+	    bind->process_handle ==
 	    (uint64_t)(uintptr_t)INVALID_HANDLE_VALUE) {
 		if (cause != NULL)
 			xasprintf(cause, "invalid auth bind");
 		errno = EINVAL;
 		return (-1);
 	}
-
-	auth = (HANDLE)(uintptr_t)bind->handle;
-	process = (HANDLE)(uintptr_t)bind->process_handle;
-
-	view = MapViewOfFile(auth, FILE_MAP_READ, 0, 0, sizeof challenge->nonce);
-	if (view == NULL) {
-		if (cause != NULL) {
-			xasprintf(cause, "couldn't map auth proof: %s",
-			    win32_strerror(GetLastError()));
-		}
-		errno = EACCES;
-		goto out;
-	}
-	if (memcmp(view, challenge->nonce, sizeof challenge->nonce) != 0) {
+	/*
+	 * The pid comes from GetNamedPipeClientProcessId(), which the server
+	 * asks the kernel. Without it there is nothing to compare the handle
+	 * against, so this is a hard failure rather than a fallback.
+	 */
+	if (peer_pid == 0) {
 		if (cause != NULL)
-			xasprintf(cause, "auth nonce mismatch");
+			xasprintf(cause, "no client pid for transport");
 		errno = EACCES;
-		goto out;
+		return (-1);
 	}
-	auth_owned = 1;
+
+	process = (HANDLE)(uintptr_t)bind->process_handle;
 
 	process_id = GetProcessId(process);
 	if (process_id == 0) {
@@ -398,10 +370,16 @@ win32_ipc_verify_auth_bind(
 		errno = EACCES;
 		goto out;
 	}
-	if (process_id != bind->pid) {
+	/*
+	 * The handle identifies some process the client chose to send; the
+	 * pipe identifies the process that actually connected. They must be
+	 * the same process, otherwise a client could vouch for a different
+	 * one.
+	 */
+	if (process_id != peer_pid) {
 		if (cause != NULL) {
-			xasprintf(cause, "auth process pid mismatch: %lu != %u",
-			    (unsigned long)process_id, bind->pid);
+			xasprintf(cause, "auth process pid mismatch: %lu != %lu",
+			    (unsigned long)process_id, (unsigned long)peer_pid);
 		}
 		errno = EACCES;
 		goto out;
@@ -409,20 +387,20 @@ win32_ipc_verify_auth_bind(
 	process_owned = 1;
 
 	duplicate_process = OpenProcess(PROCESS_DUP_HANDLE|
-	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, bind->pid);
+	    PROCESS_QUERY_LIMITED_INFORMATION, FALSE, peer_pid);
 	if (duplicate_process == NULL) {
 		error = GetLastError();
 		log_debug("%s: couldn't open client process for handle "
 		    "duplication: %s", __func__, win32_strerror(error));
 	}
 	if (duplicate_process != NULL) {
-		peer = win32_ipc_peer_identity_create((pid_t)bind->pid,
+		peer = win32_ipc_peer_identity_create((pid_t)peer_pid,
 		    duplicate_process, cause);
 		if (peer == NULL)
 			goto out;
 		duplicate_process = NULL;
 	} else {
-		peer = win32_ipc_peer_identity_create((pid_t)bind->pid, process,
+		peer = win32_ipc_peer_identity_create((pid_t)peer_pid, process,
 		    cause);
 		if (peer == NULL)
 			goto out;
@@ -436,10 +414,6 @@ win32_ipc_verify_auth_bind(
 	retval = 0;
 
 out:
-	if (view != NULL)
-		UnmapViewOfFile(view);
-	if (auth_owned && auth != NULL)
-		CloseHandle(auth);
 	if (process_owned && process != NULL)
 		CloseHandle(process);
 	if (duplicate_process != NULL)
@@ -1515,6 +1489,57 @@ win32_ipc_socket(int fd)
 	if (pe == NULL)
 		return (INVALID_SOCKET);
 	return (pe->socket);
+}
+
+/*
+ * Return the kernel's record of which process connected on this endpoint.
+ * The server uses this instead of a pid the client claims.
+ */
+int
+win32_ipc_peer_pid(int fd, DWORD *pidp, char **cause)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	*pidp = 0;
+	if ((pe = win32_ipc_find_pipe(fd)) == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "no transport for fd %d", fd);
+		errno = EBADF;
+		return (-1);
+	}
+	if ((*pidp = win32_ipc_pipe_peer_pid(pe->pipe)) == 0) {
+		if (cause != NULL)
+			xasprintf(cause, "transport recorded no client pid");
+		errno = EACCES;
+		return (-1);
+	}
+	return (0);
+}
+
+/*
+ * Return the peer pid of a pipe the current process opened, as recorded by
+ * the kernel. Used by the client to find the server it just connected to,
+ * which removes the need for the server to announce its own pid.
+ */
+int
+win32_ipc_server_pid(int fd, DWORD *pidp, char **cause)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	*pidp = 0;
+	if ((pe = win32_ipc_find_pipe(fd)) == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "no transport for fd %d", fd);
+		errno = EBADF;
+		return (-1);
+	}
+	if ((*pidp = win32_ipc_pipe_peer_pid(pe->pipe)) == 0) {
+		if (cause != NULL)
+			xasprintf(cause, "transport recorded no server pid");
+		errno = EACCES;
+		return (-1);
+	}
+	return (0);
 }
 
 void

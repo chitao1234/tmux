@@ -55,7 +55,6 @@ static int		 client_win32_transport_lost_flag;
 static uint32_t		 client_win32_mouse_mode;
 static struct win32_io_endpoint *client_win32_input;
 static struct win32_io_endpoint *client_win32_output;
-static HANDLE		 client_win32_auth_mapping;
 static struct evbuffer	*client_win32_input_pending;
 static size_t		 client_win32_input_credit;
 static int		 client_win32_input_reading;
@@ -127,7 +126,6 @@ static void		 client_win32_output_error_callback(void *);
 static void		 client_win32_output_event_callback(void *, uint32_t);
 static int		 client_win32_output_start(void);
 static void		 client_win32_output_stop(void);
-static void		 client_win32_auth_cleanup(void);
 static void		 client_win32_tty_output(char *, ssize_t);
 static int		 client_win32_console_relay_enabled(void);
 static int		 client_win32_console_relay_test_output_loss_enabled(void);
@@ -151,7 +149,7 @@ static void		 client_dispatch_wait(struct imsg *);
 static const char	*client_exit_message(void);
 static void		 client_send_environ(void);
 #ifdef TMUX_WIN32
-static int		 client_send_win32_auth_bind(struct imsg *);
+static int		 client_send_win32_auth_bind(void);
 #endif
 
 /* Connect client to server. */
@@ -972,15 +970,6 @@ client_send_startup_command(enum msgtype msg)
 	return (0);
 }
 static void
-client_win32_auth_cleanup(void)
-{
-	if (client_win32_auth_mapping == NULL)
-		return;
-	CloseHandle(client_win32_auth_mapping);
-	client_win32_auth_mapping = NULL;
-}
-
-static void
 client_win32_close_server_handle(HANDLE server, HANDLE handle)
 {
 	if (server == NULL || handle == NULL || handle == INVALID_HANDLE_VALUE)
@@ -990,84 +979,55 @@ client_win32_close_server_handle(HANDLE server, HANDLE handle)
 }
 
 static int
-client_send_win32_auth_bind(struct imsg *imsg)
+client_send_win32_auth_bind(void)
 {
-	struct msg_win32_auth_challenge	 challenge;
 	struct msg_win32_auth_bind	 bind;
-	HANDLE				 mapping = NULL;
 	HANDLE				 server = NULL;
-	HANDLE				 server_mapping = NULL;
 	HANDLE				 server_process = NULL;
-	void				*view = NULL;
-	DWORD				 error;
-	pid_t				 pid;
+	DWORD				 server_pid = 0;
+	char				*cause = NULL;
 	int				 retval = -1;
 
-	if ((size_t)(imsg->hdr.len - IMSG_HEADER_SIZE) != sizeof challenge)
+	/*
+	 * Ask the kernel which process owns the other end of our transport.
+	 * The server no longer announces its own pid, so this is the only
+	 * source and there is nothing for a client to spoof.
+	 */
+	if (win32_ipc_server_pid(proc_get_peer_fd(client_peer), &server_pid,
+	    &cause) != 0) {
+		log_debug("%s: no server pid: %s", __func__,
+		    cause != NULL ? cause : strerror(errno));
+		free(cause);
 		return (-1);
-	memcpy(&challenge, imsg->data, sizeof challenge);
-	if (challenge.pid == 0)
-		return (-1);
-	client_win32_auth_cleanup();
-
-	mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-	    0, sizeof challenge.nonce, NULL);
-	if (mapping == NULL)
-		goto out;
-	view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0,
-	    sizeof challenge.nonce);
-	if (view == NULL)
-		goto out;
-	memcpy(view, challenge.nonce, sizeof challenge.nonce);
-	UnmapViewOfFile(view);
-	view = NULL;
-
-	server = OpenProcess(PROCESS_DUP_HANDLE, FALSE, challenge.pid);
-	if (server == NULL) {
-		error = GetLastError();
-		log_debug("%s: couldn't open server process %u: %s", __func__,
-		    challenge.pid, win32_strerror(error));
-		goto out;
 	}
-	if (!DuplicateHandle(GetCurrentProcess(), mapping, server,
-	    &server_mapping, FILE_MAP_READ, FALSE, 0)) {
-		error = GetLastError();
-		log_debug("%s: couldn't duplicate auth proof into server: %s",
-		    __func__, win32_strerror(error));
+	free(cause);
+
+	server = OpenProcess(PROCESS_DUP_HANDLE, FALSE, server_pid);
+	if (server == NULL) {
+		log_debug("%s: couldn't open server process %lu: %s", __func__,
+		    (unsigned long)server_pid, win32_strerror(GetLastError()));
 		goto out;
 	}
 	if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), server,
 	    &server_process, PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
-		error = GetLastError();
 		log_debug("%s: couldn't duplicate client process into server: %s",
-		    __func__, win32_strerror(error));
+		    __func__, win32_strerror(GetLastError()));
 		goto out;
 	}
 
-	pid = getpid();
-	bind.pid = (uint32_t)pid;
-	bind.handle = (uint64_t)(uintptr_t)server_mapping;
+	memset(&bind, 0, sizeof bind);
 	bind.process_handle = (uint64_t)(uintptr_t)server_process;
 	if (proc_send(client_peer, MSG_WIN32_AUTH_BIND, -1, &bind,
 	    sizeof bind) != 0)
 		goto out;
-	server_mapping = NULL;
 	server_process = NULL;
-	client_win32_auth_mapping = mapping;
-	mapping = NULL;
 	retval = 0;
 
 out:
-	if (view != NULL)
-		UnmapViewOfFile(view);
-	if (server_mapping != NULL)
-		client_win32_close_server_handle(server, server_mapping);
-	if (server_process != NULL)
+	if (server_process != NULL && server != NULL)
 		client_win32_close_server_handle(server, server_process);
 	if (server != NULL)
 		CloseHandle(server);
-	if (mapping != NULL)
-		CloseHandle(mapping);
 	return (retval);
 }
 #endif
@@ -1162,6 +1122,19 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		return (1);
 	}
 	client_peer = proc_add_peer(client_proc, fd, client_dispatch, NULL);
+
+#ifdef TMUX_WIN32
+	/*
+	 * Authentication starts now, from the client side: the server no
+	 * longer sends a challenge, because every fact it needs (which
+	 * process connected, who owns the other end) now comes from the
+	 * kernel via the transport handle.
+	 */
+	if (client_send_win32_auth_bind() != 0) {
+		log_close();
+		return (1);
+	}
+#endif
 
 	/* Save these before pledge(). */
 	if ((cwd = find_cwd()) == NULL)
@@ -1342,7 +1315,6 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 
 #ifdef TMUX_WIN32
 	client_win32_auth_complete = 0;
-	client_win32_auth_mapping = NULL;
 	client_identify_sent = 0;
 	client_startup_ttynam = ttynam;
 	client_startup_termname = termname;
@@ -1373,7 +1345,6 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	proc_loop(client_proc, NULL);
 
 #ifdef TMUX_WIN32
-	client_win32_auth_cleanup();
 	tty_term_free_list(client_startup_caps, client_startup_ncaps);
 	client_startup_caps = NULL;
 	free(client_startup_command);
@@ -1728,16 +1699,9 @@ client_dispatch_wait(struct imsg *imsg)
 		proc_exit(client_proc);
 		break;
 #ifdef TMUX_WIN32
-	case MSG_WIN32_AUTH_CHALLENGE:
-		if (client_send_win32_auth_bind(imsg) != 0) {
-			client_exitval = 1;
-			proc_exit(client_proc);
-		}
-		break;
 	case MSG_WIN32_AUTH_RESULT:
 		if (datalen != sizeof(uint32_t))
 			fatalx("bad MSG_WIN32_AUTH_RESULT size");
-		client_win32_auth_cleanup();
 		client_win32_auth_complete = 1;
 		if (!client_identify_sent) {
 			client_send_identify(client_startup_ttynam,

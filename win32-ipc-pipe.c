@@ -349,7 +349,25 @@ win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
 		p->connect_pending = 0;
 	}
 
-	(void)GetNamedPipeClientProcessId(p->handle, &p->peer_pid);
+	/*
+	 * The pid recorded by the kernel for this connection is the only
+	 * trustworthy statement of who connected. Fail the connection if it
+	 * cannot be obtained; do not fall back to anything the client says.
+	 */
+	if (!GetNamedPipeClientProcessId(p->handle, &p->peer_pid) ||
+	    p->peer_pid == 0) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't identify transport client: "
+			    "%s", win32_strerror(GetLastError()));
+		}
+		CloseHandle(p->handle);
+		free(p);
+		*pendingp = NULL;
+		(void)win32_ipc_pipe_new_pending(l, pendingp, &newcause);
+		free(newcause);
+		errno = EACCES;
+		return (NULL);
+	}
 	if (win32_ipc_pipe_activate(p, cause) != 0) {
 		CloseHandle(p->handle);
 		free(p);
@@ -424,6 +442,10 @@ win32_ipc_pipe_connect(const char *path, char **cause)
 		free(p);
 		return (NULL);
 	}
+	/*
+	 * Remember the server pid from the kernel so the client does not have
+	 * to be told it. Failure is not fatal here: auth will fail closed.
+	 */
 	(void)GetNamedPipeServerProcessId(handle, &p->peer_pid);
 	return (p);
 }
@@ -450,6 +472,14 @@ win32_ipc_pipe_notify_socket(struct win32_ipc_pipe *p)
 	if (p == NULL)
 		return (INVALID_SOCKET);
 	return (p->notify_read);
+}
+
+DWORD
+win32_ipc_pipe_peer_pid(struct win32_ipc_pipe *p)
+{
+	if (p == NULL)
+		return (0);
+	return (p->peer_pid);
 }
 
 void

@@ -2071,7 +2071,6 @@ struct client {
 	size_t			 win32_tty_out_pending;
 	int			 win32_tty_transport_lost;
 	int			 win32_auth_pending;
-	struct msg_win32_auth_challenge win32_auth_nonce;
 	struct win32_ipc_peer_identity *win32_peer;
 #endif
 	struct event		 event;
@@ -2470,6 +2469,7 @@ uid_t	proc_get_peer_uid(struct tmuxpeer *);
 #ifdef TMUX_WIN32
 int	proc_set_peer_user_sid(struct tmuxpeer *, const char *);
 const char *proc_get_peer_user_sid(struct tmuxpeer *);
+int	proc_get_peer_fd(struct tmuxpeer *);
 #endif
 
 /* cfg.c */

@@ -76,7 +76,6 @@ static int	server_client_win32_identify_handle(struct client *,
 		    struct imsg *, int);
 static int	server_client_win32_identify_size(struct client *,
 		    struct imsg *);
-static int	server_client_win32_auth_start(struct client *);
 static int	server_client_win32_dispatch_auth(struct client *,
 		    struct imsg *);
 static int	server_client_win32_auth_finish(struct client *,
@@ -364,8 +363,13 @@ server_client_create(int fd)
 
 	TAILQ_INSERT_TAIL(&clients, c, entry);
 #ifdef TMUX_WIN32
-	if (fd != -1 && server_client_win32_auth_start(c) != 0)
-		c->flags |= CLIENT_EXIT;
+	/*
+	 * The client drives authentication now: it sends MSG_WIN32_AUTH_BIND
+	 * as soon as the transport is up, and the server answers. Nothing is
+	 * sent from here, so there is no race to lose.
+	 */
+	if (fd != -1)
+		c->win32_auth_pending = 1;
 #endif
 	log_debug("new client %p", c);
 	return (c);
@@ -2906,21 +2910,6 @@ server_client_win32_identify_size(struct client *c, struct imsg *imsg)
 }
 
 static int
-server_client_win32_auth_start(struct client *c)
-{
-	c->win32_auth_pending = 1;
-	memset(&c->win32_auth_nonce, 0, sizeof c->win32_auth_nonce);
-	if (win32_random_bytes(c->win32_auth_nonce.nonce,
-	    sizeof c->win32_auth_nonce.nonce, NULL) != 0)
-		return (-1);
-	c->win32_auth_nonce.pid = GetCurrentProcessId();
-	if (proc_send(c->peer, MSG_WIN32_AUTH_CHALLENGE, -1,
-	    &c->win32_auth_nonce, sizeof c->win32_auth_nonce) != 0)
-		return (-1);
-	return (0);
-}
-
-static int
 server_client_win32_auth_finish(struct client *c,
     struct win32_ipc_peer_identity *peer)
 {
@@ -2961,6 +2950,7 @@ server_client_win32_dispatch_auth(struct client *c, struct imsg *imsg)
 	struct msg_win32_auth_bind	 bind;
 	struct msg_win32_auth_result	 result;
 	ssize_t				 datalen;
+	DWORD				 peer_pid = 0;
 	char				*cause = NULL;
 
 	switch (imsg->hdr.type) {
@@ -2971,7 +2961,19 @@ server_client_win32_dispatch_auth(struct client *c, struct imsg *imsg)
 		if (datalen != sizeof bind)
 			return (-1);
 		memcpy(&bind, imsg->data, sizeof bind);
-		if (win32_ipc_verify_auth_bind(&c->win32_auth_nonce, &bind, &peer,
+		/*
+		 * Ask the kernel who connected, then check that the handle the
+		 * client sent belongs to that same process. Neither value comes
+		 * from the message.
+		 */
+		if (win32_ipc_peer_pid(proc_get_peer_fd(c->peer), &peer_pid,
+		    &cause) != 0) {
+			log_debug("client %p auth bind rejected: %s", c,
+			    cause != NULL ? cause : strerror(errno));
+			free(cause);
+			return (-1);
+		}
+		if (win32_ipc_verify_auth_bind(&bind, peer_pid, &peer,
 		    &cause) != 0) {
 			log_debug("client %p auth bind rejected: %s", c,
 			    cause != NULL ? cause : strerror(errno));
