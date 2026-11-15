@@ -178,7 +178,12 @@ current implementation:
   output abort, and explicit transport-loss handling.
 - Native-console relay now has a narrow key-record compatibility path for
   physical-style `Ctrl+j` records that carry control state but no byte; these
-  are translated to LF before entering tmux's normal tty key parser.
+  are translated to LF before entering tmux's normal tty key parser. Measured
+  with `tools/win32-input-matrix.ps1`: at the input modes tmux actually sets
+  (`0x200`, `0x3f0`) the console host already yields a `0x0a` byte, so the
+  fallback is redundant there; it only matters at `0x0`, which tmux does not
+  use. Kept as a safety net, not as the mechanism. See
+  `tools/win32-input-matrix.md` for the full cross-terminal table.
 - The relay UTF-8 writer boundary now carries multibyte splits incrementally
   and fails closed on invalid UTF-8 instead of silently pushing malformed data
   into the native console path.

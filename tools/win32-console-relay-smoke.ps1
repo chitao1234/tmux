@@ -959,6 +959,13 @@ function Write-CtrlJHelperScript {
         [string]$ResultPath
     )
 
+    # This helper runs inside the pane and must see raw keyboard bytes. It
+    # MUST put its own console into raw mode first: ConPTY hands it the
+    # console in default mode, which has ENABLE_LINE_INPUT and therefore
+    # buffers input until CR. With line input on, nothing at all reads back
+    # (not even plain letters), which looks exactly like a product bug but
+    # is just the wrong console mode. The mode that works is the same one
+    # tmux's own client sets: VT input, no line/echo/processed input.
     $escapedResultPath = $ResultPath.Replace("'", "''")
     $content = @"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
@@ -972,21 +979,52 @@ using System.Runtime.InteropServices;
 public static class CtrlJNativeInput
 {
     const int STD_INPUT_HANDLE = -10;
+    const uint ENABLE_PROCESSED_INPUT = 0x0001;
+    const uint ENABLE_LINE_INPUT = 0x0002;
+    const uint ENABLE_ECHO_INPUT = 0x0004;
+    const uint ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr GetStdHandle(int nStdHandle);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(IntPtr handle, byte[] buffer,
         uint bytesToRead, out uint bytesRead, IntPtr overlapped);
 
-    public static uint Read(byte[] buffer)
+    public static uint ConsoleMode;
+
+    public static void MakeRaw()
     {
         IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
         if (handle == new IntPtr(-1) || handle == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 "GetStdHandle(STD_INPUT_HANDLE) failed");
 
+        uint mode;
+        if (!GetConsoleMode(handle, out mode))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "GetConsoleMode(STDIN) failed - not a real console?");
+
+        mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        mode &= ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT |
+            ENABLE_ECHO_INPUT);
+        if (!SetConsoleMode(handle, mode))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "SetConsoleMode(STDIN, raw) failed");
+
+        if (!GetConsoleMode(handle, out ConsoleMode))
+            ConsoleMode = mode;
+    }
+
+    public static uint Read(byte[] buffer)
+    {
+        IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
         uint bytesRead;
         if (!ReadFile(handle, buffer, (uint)buffer.Length, out bytesRead,
             IntPtr.Zero))
@@ -996,6 +1034,9 @@ public static class CtrlJNativeInput
     }
 }
 '@
+
+[CtrlJNativeInput]::MakeRaw()
+[Console]::Out.WriteLine(('CTRLJ-MODE-{0:X}' -f [CtrlJNativeInput]::ConsoleMode))
 
 `$buffer = New-Object byte[] 16
 `$captured = New-Object 'System.Collections.Generic.List[byte]'
@@ -1996,9 +2037,16 @@ try {
             $inputPeakBuffered -ge 0 -and $inputPeakBuffered -le 65536 -and
             $failures.Count -eq 0
     } elseif ($ExerciseCtrlJ) {
+        # Assert what the user can observe: the pane got the key, and the
+        # program inside read an LF. Do NOT require the key-record fallback
+        # to have fired. On a console host that already converts Ctrl+J
+        # records into a 0x0a byte (verified at 0x200 and 0x3f0 with
+        # tools/win32-input-matrix.ps1), the fallback path is correctly not
+        # taken and the byte arrives through the normal ReadFile path.
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
             $inputCredit -and -not $directOutput -and $ctrlJReadyVisible -and
-            $ctrlJTranslated -and $ctrlJPaneWrite -and
+            $ctrlJPaneWrite -and $ctrlJCapturedVisible -and
+            $ctrlJByteCaptured -and
             $failures.Count -eq 0
     } elseif ($ExerciseUtf8Split) {
         $passed = $attachCode -eq 0 -and $relayMode -and $relayIdentify -and
