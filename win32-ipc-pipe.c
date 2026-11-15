@@ -255,16 +255,75 @@ win32_ipc_pipe_listen(const char *path, char **cause)
 }
 
 /*
- * Poll for a client. Creates a pending instance and checks whether it has
- * connected. Returns a connected pipe, or NULL with errno EAGAIN.
+ * Create a fresh unconnected instance and start waiting on it.
+ *
+ * The listener must always have one of these outstanding. A named pipe name
+ * only exists while at least one instance of it is open, so if the listener
+ * ever runs with zero instances a client racing it gets ERROR_FILE_NOT_FOUND
+ * and reports "no server running" even though the server is alive.
+ */
+static int
+win32_ipc_pipe_new_pending(struct win32_ipc_pipe_listener *l,
+    struct win32_ipc_pipe **pendingp, char **cause)
+{
+	struct win32_ipc_pipe	*p;
+	DWORD			 error;
+
+	p = xcalloc(1, sizeof *p);
+	p->notify_read = INVALID_SOCKET;
+	p->notify_write = INVALID_SOCKET;
+	p->handle = win32_ipc_pipe_create_instance(l->wname, !l->first_done,
+	    &error);
+	if (p->handle == INVALID_HANDLE_VALUE) {
+		if (cause != NULL) {
+			xasprintf(cause, "couldn't create transport pipe %s: %s",
+			    l->name, win32_strerror(error));
+		}
+		if (error == ERROR_ACCESS_DENIED)
+			errno = EACCES;
+		else if (error == ERROR_PIPE_BUSY)
+			errno = EAGAIN;
+		else
+			errno = EIO;
+		free(p);
+		return (-1);
+	}
+	l->first_done = 1;
+
+	memset(&p->connect_ov, 0, sizeof p->connect_ov);
+	if (!ConnectNamedPipe(p->handle, &p->connect_ov)) {
+		error = GetLastError();
+		if (error == ERROR_IO_PENDING)
+			p->connect_pending = 1;
+		else if (error != ERROR_PIPE_CONNECTED) {
+			if (cause != NULL) {
+				xasprintf(cause, "transport accept failed: %s",
+				    win32_strerror(error));
+			}
+			errno = EIO;
+			CloseHandle(p->handle);
+			free(p);
+			return (-1);
+		}
+	}
+	*pendingp = p;
+	return (0);
+}
+
+/*
+ * Poll for a client. Returns a connected pipe, or NULL with errno EAGAIN.
+ *
+ * There is always one instance waiting; when a client takes it, a
+ * replacement is created before returning so the name never disappears.
  */
 struct win32_ipc_pipe *
 win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
     struct win32_ipc_pipe **pendingp, char **cause)
 {
 	struct win32_ipc_pipe	*p = *pendingp;
-	DWORD			 error, bytes;
+	DWORD			 bytes;
 	BOOL			 ok;
+	char			*newcause = NULL;
 
 	if (cause != NULL)
 		*cause = NULL;
@@ -274,50 +333,8 @@ win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
 	}
 
 	if (p == NULL) {
-		p = xcalloc(1, sizeof *p);
-		p->notify_read = INVALID_SOCKET;
-		p->notify_write = INVALID_SOCKET;
-		p->handle = win32_ipc_pipe_create_instance(l->wname,
-		    !l->first_done, &error);
-		if (p->handle == INVALID_HANDLE_VALUE) {
-			if (cause != NULL) {
-				xasprintf(cause, "couldn't create transport "
-				    "pipe %s: %s", l->name,
-				    win32_strerror(error));
-			}
-			if (error == ERROR_ACCESS_DENIED)
-				errno = EACCES;
-			else if (error == ERROR_PIPE_BUSY)
-				errno = EAGAIN;
-			else
-				errno = EIO;
-			free(p);
+		if (win32_ipc_pipe_new_pending(l, pendingp, cause) != 0)
 			return (NULL);
-		}
-		l->first_done = 1;
-		memset(&p->connect_ov, 0, sizeof p->connect_ov);
-		if (!ConnectNamedPipe(p->handle, &p->connect_ov)) {
-			error = GetLastError();
-			if (error == ERROR_IO_PENDING)
-				p->connect_pending = 1;
-			else if (error != ERROR_PIPE_CONNECTED) {
-				if (cause != NULL) {
-					xasprintf(cause, "transport accept "
-					    "failed: %s",
-					    win32_strerror(error));
-				}
-				errno = EIO;
-				CloseHandle(p->handle);
-				free(p);
-				return (NULL);
-			}
-		}
-		/*
-		 * The instance exists but no client is connected yet. Keep it
-		 * in *pendingp so the next poll reuses it instead of creating
-		 * another instance with the same name.
-		 */
-		*pendingp = p;
 		errno = EAGAIN;
 		return (NULL);
 	}
@@ -337,9 +354,28 @@ win32_ipc_pipe_accept(struct win32_ipc_pipe_listener *l,
 		CloseHandle(p->handle);
 		free(p);
 		*pendingp = NULL;
+		(void)win32_ipc_pipe_new_pending(l, pendingp, &newcause);
+		free(newcause);
 		return (NULL);
 	}
+
+	/*
+	 * Hand this instance to the caller and immediately re-open the door.
+	 * Deferring this to the next 20ms poll leaves a window where the pipe
+	 * name has no instance at all, during which a client gets
+	 * ERROR_FILE_NOT_FOUND and gives up.
+	 */
 	*pendingp = NULL;
+	if (win32_ipc_pipe_new_pending(l, pendingp, &newcause) != 0) {
+		/*
+		 * The connected client is still valid; the listener just has no
+		 * spare instance right now. The next poll will retry, and the
+		 * client side retries too, so don't fail the connection.
+		 */
+		log_debug("%s: couldn't create replacement instance: %s",
+		    __func__, newcause != NULL ? newcause : strerror(errno));
+	}
+	free(newcause);
 	return (p);
 }
 
