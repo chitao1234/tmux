@@ -76,14 +76,15 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 ## Win32 Change Impact
 
 - If a change touches `client.c`, `server-client.c`, `tmux-protocol.h`, or `win32-event.c`, also inspect:
-  `tools/win32-console-relay-smoke.ps1`,
-  `tools/win32-direct-handle-smoke.ps1`,
-  `tools/win32-port-findings.md`.
-- Design plans for the Win32 redesign live in `docs/` (untracked, not distributed).
+  `tools/win32-console-relay-smoke.ps1` and
+  `tools/win32-direct-handle-smoke.ps1`.
+- Design notes for the Win32 redesign live in `docs/` (untracked, not distributed).
+  `docs/` also holds `win32-port-findings.md`, `win32-smoke.md`,
+  `win32-highlight-trace.md` and `win32-input-matrix.md`.
 - If a change touches `win32-conpty.c`, also inspect the call sites and lifecycle neighbors in:
   `spawn.c`, `job.c`, `input-keys.c`, `cmd-paste-buffer.c`, `server-fn.c`, `window.c`, and `cfg.c`.
-- If a change touches `win32-ipc.c`, socket handling in `tmux.c`, or any `-S` / `$TMUX` path behavior, also review the security and path assumptions documented in `tools/win32-port-findings.md`.
-- When changing Win32 protocol or transport behavior, keep the code, smoke coverage, and design notes aligned. This branch is actively documenting the Windows port as it evolves.
+- If a change touches `win32-ipc.c`, socket handling in `tmux.c`, or any `-S` / `$TMUX` path behavior, also review the security and path assumptions in `docs/win32-port-findings.md`.
+- When changing Win32 protocol or transport behavior, keep the code, smoke coverage, and design notes aligned.
 
 ## Win32 Validation Notes
 
@@ -94,12 +95,14 @@ This file applies to the entire repository rooted at `C:\ddev\tmux4win\tmux`.
 - Typical native PowerShell smoke commands:
   `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\win32-console-relay-coverage.ps1 -Cases baseline,input-credit,ctrl-j -RemoveArtifactsOnSuccess`
   `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\win32-direct-handle-smoke.ps1`
-- `tools/win32-smoke.md` is the general manual MVP checklist.
+- `docs/win32-smoke.md` is the general manual MVP checklist.
 - Toolchain and probe helpers live in:
   `tools/win32-build-sysroot.sh`,
   `tools/win32-build-probe.sh`,
-  `tools/win32-conpty-probe.c`,
-  `tools/win32-highlight-trace.md`.
+  `tools/win32-conpty-probe.c`.
+- Input-mode measurement lives in `tools/win32-consoletap.c`,
+  `tools/win32-conptyprobe.c` and `tools/win32-input-matrix.ps1`; the
+  collected tables are in `docs/win32-input-matrix.md`.
 
 ## Practical Editing Guidance
 
