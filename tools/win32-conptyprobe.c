@@ -159,6 +159,99 @@ wait_ready(const char *path, DWORD timeout_ms)
 	return (found);
 }
 
+/*
+ * Run an arbitrary command inside a pseudo console and wait for it.
+ *
+ * This exists so a program can be measured under ConPTY without going through
+ * tmux: the child writes its own result file and never has to be read from
+ * the pseudoconsole, which would confuse output with input.
+ */
+static int
+run_mode(int argc, char **argv)
+{
+	HANDLE		 inR = NULL, inW = NULL, outR = NULL, outW = NULL;
+	HPCON		 hpc = NULL;
+	COORD		 size = { 100, 40 };
+	STARTUPINFOEXW	 si;
+	PROCESS_INFORMATION pi;
+	SIZE_T		 attrs = 0;
+	SECURITY_ATTRIBUTES sa;
+	wchar_t		 cmd[4096];
+	HRESULT		 hr;
+	DWORD		 status;
+	int		 i, n;
+
+	if (argc < 3)
+		return (2);
+
+	sa.nLength = sizeof sa;
+	sa.lpSecurityDescriptor = NULL;
+	sa.bInheritHandle = FALSE;
+	if (!CreatePipe(&inR, &inW, &sa, 0) ||
+	    !CreatePipe(&outR, &outW, &sa, 0)) {
+		fprintf(stderr, "run: CreatePipe failed %lu\n",
+		    (unsigned long)GetLastError());
+		return (1);
+	}
+	if (argc > 5 && strcmp(argv[2], "-size") == 0) {
+		size.X = (SHORT)atoi(argv[3]);
+		size.Y = (SHORT)atoi(argv[4]);
+		i = 5;
+	} else
+		i = 2;
+
+	hr = CreatePseudoConsole(size, inR, outW, 0, &hpc);
+	if (FAILED(hr)) {
+		fprintf(stderr, "run: CreatePseudoConsole failed 0x%08lx\n",
+		    (unsigned long)hr);
+		return (1);
+	}
+
+	n = swprintf(cmd, 4096, L"\"%hs\"", argv[i]);
+	for (i++; i < argc; i++)
+		n += swprintf(cmd + n, 4096 - n, L" \"%hs\"", argv[i]);
+
+	ZeroMemory(&si, sizeof si);
+	si.StartupInfo.cb = sizeof si;
+	si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+	si.StartupInfo.hStdInput = NULL;
+	si.StartupInfo.hStdOutput = NULL;
+	si.StartupInfo.hStdError = NULL;
+	InitializeProcThreadAttributeList(NULL, 1, 0, &attrs);
+	si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, attrs);
+	if (si.lpAttributeList == NULL)
+		return (1);
+	InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrs);
+	UpdateProcThreadAttribute(si.lpAttributeList, 0,
+	    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc, sizeof hpc, NULL, NULL);
+
+	ZeroMemory(&pi, sizeof pi);
+	if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+	    EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &si.StartupInfo, &pi)) {
+		fprintf(stderr, "run: CreateProcess failed %lu\n",
+		    (unsigned long)GetLastError());
+		return (1);
+	}
+	CloseHandle(inR);
+	CloseHandle(outW);
+
+	/* Keep the output pipe moving so the child cannot block on write. */
+	for (;;) {
+		drain_output(outR, 2, 40);
+		status = WaitForSingleObject(pi.hProcess, 40);
+		if (status == WAIT_OBJECT_0)
+			break;
+	}
+	drain_output(outR, 10, 30);
+
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+	ClosePseudoConsole(hpc);
+	CloseHandle(inW);
+	CloseHandle(outR);
+	return (0);
+}
+
 static int
 host_mode(int argc, char **argv)
 {
@@ -261,13 +354,17 @@ main(int argc, char **argv)
 	if (argc < 2) {
 		fprintf(stderr, "usage: conptyprobe host <child> <out> "
 		    "<mode|none> <byte-hex>...\n"
-		    "       conptyprobe child <out> [mode-hex]\n");
+		    "       conptyprobe child <out> [mode-hex]\n"
+		    "       conptyprobe run [-size <cols> <rows>] "
+		    "<program> <args>...\n");
 		return (2);
 	}
 	if (strcmp(argv[1], "child") == 0)
 		return (child_mode(argc - 1, argv + 1));
 	if (strcmp(argv[1], "host") == 0)
 		return (host_mode(argc, argv));
+	if (strcmp(argv[1], "run") == 0)
+		return (run_mode(argc, argv));
 	fprintf(stderr, "unknown verb '%s'\n", argv[1]);
 	return (2);
 }

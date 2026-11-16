@@ -64,7 +64,6 @@ $conptySrc = Join-Path $toolsDir "win32-conptyprobe.c"
 
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $tapExe = Join-Path $OutDir "win32-consoletap.exe"
-$launchExe = Join-Path $OutDir "tap-launch.exe"
 $conptyExe = Join-Path $OutDir "win32-conptyprobe.exe"
 
 # ------------------------------------------------------------------ helpers
@@ -106,34 +105,47 @@ function Build-Helper {
     if ($LASTEXITCODE -ne 0) { throw "build failed: $Source" }
 }
 
-# Launcher: run a program in a brand new hidden console and wait for it. Each
-# measurement needs a fresh console, otherwise console input mode and queued
-# records from the previous key leak into the next one.
-$launchSrc = Join-Path $OutDir "tap-launch.c"
-function Write-Launcher {
-    $src = @'
-#include <windows.h>
-#include <stdio.h>
-int main(int argc, char **argv)
-{
-    STARTUPINFOW si; PROCESS_INFORMATION pi; wchar_t cmd[4096]; int i, n;
-    ZeroMemory(&si, sizeof si); si.cb = sizeof si;
-    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    n = swprintf(cmd, 4096, L"\"%hs\"", argv[1]);
-    for (i = 2; i < argc; i++) n += swprintf(cmd + n, 4096 - n, L" %hs", argv[i]);
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_CONSOLE,
-        NULL, NULL, &si, &pi)) {
-        fprintf(stderr, "launch: CreateProcess failed %lu\n",
-            (unsigned long)GetLastError());
-        return 1;
+# Tier A launcher: conhost.exe directly.
+#
+# This matters more than it looks. CREATE_NEW_CONSOLE does NOT reliably give a
+# classic console: on Windows 11 the default terminal application intercepts
+# it, so the child ends up on a ConPTY-backed console hosted by Windows
+# Terminal / OpenConsole instead of conhost.exe. An earlier version of this
+# script used CREATE_NEW_CONSOLE and silently measured ConPTY three times over
+# while labelling the columns "conhost", "wt" and "wezterm".
+#
+# Invoking conhost.exe with the program as its argument starts a real conhost
+# and waits for it, which is what the classic-console tier is supposed to
+# measure. Every tier is verified with win32-conhost-ident before its numbers
+# are trusted.
+$identSrc = Join-Path $toolsDir "win32-conhost-ident.c"
+$identExe = Join-Path $OutDir "win32-conhost-ident.exe"
+
+function Invoke-InConsoleHost {
+    param([string]$Exe, [string[]]$Arguments)
+
+    # Windows PowerShell joins ArgumentList with spaces and does no quoting,
+    # so quote anything that could contain a space.
+    $quoted = @($Exe) + $Arguments | ForEach-Object {
+        if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
     }
-    WaitForSingleObject(pi.hProcess, 20000);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return 0;
+    # Windows stay visible on purpose: a hidden console has bitten this suite
+    # before, and a visible window makes it obvious which host is under test.
+    $p = Start-Process -FilePath 'conhost.exe' -ArgumentList $quoted `
+        -Wait -PassThru
+    return $p.ExitCode
 }
-'@
-    Set-Content -LiteralPath $launchSrc -Value $src -Encoding ASCII
+
+function Get-HostKind {
+    # Returns 'conhost', 'conpty' or 'unknown' for the given launch method.
+    $probe = Join-Path $OutDir "hostcheck.txt"
+    Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
+    Invoke-InConsoleHost -Exe $identExe -Arguments @($probe) | Out-Null
+    if (-not (Test-Path $probe)) { return 'unknown' }
+    foreach ($line in Get-Content $probe) {
+        if ($line -match '^host=(.+)$') { return $Matches[1].Trim() }
+    }
+    return 'unknown'
 }
 
 # ---------------------------------------------------------------- tier A
@@ -144,7 +156,7 @@ function Invoke-ConhostCase {
     $out = Join-Path $OutDir ("conhost-" + ($Mode -replace '[^a-z0-9]','_') + "-" + ($Key -replace '[^a-z0-9]','_') + ".txt")
     $win = $out.Replace('\', '\\')
     Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
-    & $launchExe $tapExe "probe" $win $Mode $Key | Out-Null
+    Invoke-InConsoleHost -Exe $tapExe -Arguments @("probe", $win, $Mode, $Key) | Out-Null
     if (-not (Test-Path $out)) { return "" }
     $bytes = ""
     foreach ($line in Get-Content $out) {
@@ -269,11 +281,7 @@ Write-Host ""
 Write-Host "=== probes ==="
 Build-Helper -Source $tapSrc -Exe $tapExe
 Build-Helper -Source $conptySrc -Exe $conptyExe
-if (-not (Test-Path $launchExe) -or
-    ((Get-Item $launchExe).LastWriteTime -lt (Get-Item $launchSrc -ErrorAction SilentlyContinue).LastWriteTime)) {
-    Write-Launcher
-    Build-Helper -Source $launchSrc -Exe $launchExe
-}
+Build-Helper -Source $identSrc -Exe $identExe
 
 $have = [ordered]@{
     conhost = Test-Path "$env:WINDIR\system32\conhost.exe"
@@ -287,6 +295,20 @@ Write-Host ("available: " + (($have.GetEnumerator() | ForEach-Object {
     "$($_.Key)=$(if ($_.Value) {'yes'} else {'no'})" }) -join " "))
 Write-Host ("modes: " + ($Modes -join " "))
 Write-Host ("keys:  " + $Keys.Count)
+
+# Verify each tier really runs where it claims to. Without this an earlier run
+# reported identical numbers for "conhost", "wt" and "wezterm" because all
+# three were ConPTY.
+$verified = [ordered]@{}
+if ($have.conhost) {
+    $kind = Get-HostKind
+    $verified["conhost"] = $kind
+    Write-Host "conhost tier verified as: $kind"
+    if ($kind -ne 'conhost') {
+        Write-Host "  WARNING: conhost tier is not a real conhost; disabling it"
+        $have.conhost = $false
+    }
+}
 Write-Host ""
 
 $results = [ordered]@{ conhost = @{}; conpty = @{}; wt = @{}; wezterm = @{} }
