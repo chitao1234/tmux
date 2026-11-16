@@ -28,7 +28,7 @@
 param(
     [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "tmux-win32-input-matrix"),
     [string[]]$Modes = @("none", "0x0", "0x200", "0x1f7", "0x3f0"),
-    [string[]]$Terminals = @("conhost", "conpty", "wt", "wezterm"),
+    [string[]]$Terminals = @("conhost", "conpty", "wt", "wezterm", "conemu"),
     [string[]]$Keys = @(
         "a", "space", "ctrl-a", "ctrl-b", "ctrl-c", "ctrl-h", "ctrl-i",
         "ctrl-j", "ctrl-l", "ctrl-m", "ctrl-[", "ctrl-space", "enter",
@@ -275,6 +275,35 @@ function Invoke-WeztermCase {
     return (Wait-ProbeResult -Path $out)
 }
 
+# ConEmu runs a command with `-run "<command line>" -cur_console:n`. The whole
+# command line has to reach ConEmu as one argument: PowerShell splits an
+# ArgumentList array into separate tokens, ConEmu's parser then sees fragments
+# and waits forever on a console it never starts.
+#
+# ConEmu is worth measuring because it is a real console with a hidden
+# conhost.exe behind it, plus its own renderer on top. It is not ConPTY, and
+# win32-conhost-ident reports it as "emulated" because its console window
+# belongs to ConEmu64.exe rather than to the child.
+function Invoke-ConEmuCase {
+    param([string]$Mode, [string]$Key)
+
+    $out = Join-Path $OutDir ("ce-" + ($Mode -replace '[^a-z0-9]','_') + "-" + ($Key -replace '[^a-z0-9]','_') + ".txt")
+    $win = $out.Replace('\', '\\')
+    Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
+    $ce = @("$env:ProgramFiles\ConEmu\ConEmu64.exe",
+            "${env:ProgramFiles(x86)}\ConEmu\ConEmu64.exe",
+            "$env:LOCALAPPDATA\Programs\ConEmu\ConEmu64.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $ce) { return "" }
+    # ConEmu's -run takes a whole command line, so build it with explicit
+    # quoting, then wrap it in double quotes for ConEmu's own parser.
+    $cmd = '"' + $tapExe + '" probe "' + $win + '" ' + $Mode + ' ' + $Key
+    $argline = '-run "' + $cmd + '" -cur_console:n'
+    Start-Process -FilePath $ce -ArgumentList $argline -Wait -EA SilentlyContinue |
+        Out-Null
+    return (Wait-ProbeResult -Path $out)
+}
+
 # -------------------------------------------------------------------- main
 
 Write-Host ""
@@ -289,6 +318,10 @@ $have = [ordered]@{
     wt      = [bool](Get-Command wt.exe -ErrorAction SilentlyContinue)
     wezterm = [bool](@("$env:ProgramFiles\WezTerm\wezterm.exe",
         "$env:LOCALAPPDATA\Programs\WezTerm\wezterm.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1)
+    conemu  = [bool](@("$env:ProgramFiles\ConEmu\ConEmu64.exe",
+        "${env:ProgramFiles(x86)}\ConEmu\ConEmu64.exe",
+        "$env:LOCALAPPDATA\Programs\ConEmu\ConEmu64.exe") |
         Where-Object { Test-Path $_ } | Select-Object -First 1)
 }
 Write-Host ("available: " + (($have.GetEnumerator() | ForEach-Object {
@@ -311,7 +344,7 @@ if ($have.conhost) {
 }
 Write-Host ""
 
-$results = [ordered]@{ conhost = @{}; conpty = @{}; wt = @{}; wezterm = @{} }
+$results = [ordered]@{ conhost = @{}; conpty = @{}; wt = @{}; wezterm = @{}; conemu = @{} }
 $total = 0
 foreach ($t in $Terminals) { if ($have[$t]) { $total += $Modes.Count * $Keys.Count } }
 $done = 0
@@ -340,6 +373,10 @@ foreach ($m in $Modes) {
                 "wezterm" {
                     if (-not $results.wezterm.ContainsKey($m)) { $results.wezterm[$m] = @{} }
                     $results.wezterm[$m][$k] = Invoke-WeztermCase -Mode $m -Key $k
+                }
+                "conemu" {
+                    if (-not $results.conemu.ContainsKey($m)) { $results.conemu[$m] = @{} }
+                    $results.conemu[$m][$k] = Invoke-ConEmuCase -Mode $m -Key $k
                 }
             }
         }
@@ -410,7 +447,7 @@ if ($have.conpty) {
     }
 }
 
-foreach ($t in @("wt","wezterm")) {
+foreach ($t in @("wt","wezterm","conemu")) {
     if (-not $have[$t]) { continue }
     [void]$md.AppendLine("## ${t}: records -> bytes inside the real terminal")
     [void]$md.AppendLine("")
