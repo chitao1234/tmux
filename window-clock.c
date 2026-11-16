@@ -240,10 +240,19 @@ window_clock_draw_screen(struct window_mode_entry *wme)
 	t = time(NULL);
 	tm = localtime(&t);
 	if (style == 0 || style == 2) {
+		/*
+		 * %l is the 12-hour clock with a leading space, which glibc
+		 * has but MSVCRT does not, and an unimplemented conversion
+		 * writes nothing at all. Build it from %I instead, which
+		 * every strftime implements, and strip the leading zero the
+		 * same way %l would.
+		 */
 		if (style == 2)
-			strftime(tim, sizeof tim, "%l:%M:%S ", localtime(&t));
+			strftime(tim, sizeof tim, "%I:%M:%S ", localtime(&t));
 		else
-			strftime(tim, sizeof tim, "%l:%M ", localtime(&t));
+			strftime(tim, sizeof tim, "%I:%M ", localtime(&t));
+		if (tim[0] == '0')
+			tim[0] = ' ';
 		if (tm->tm_hour >= 12)
 			strlcat(tim, "PM", sizeof tim);
 		else

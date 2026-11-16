@@ -4027,8 +4027,15 @@ format_pretty_time(time_t t, int seconds)
 		return (xstrdup(s));
 	}
 
-	/* Older than that. */
-	strftime(s, sizeof s, "%h%y", &tm);
+	/*
+	 * Older than that.
+	 *
+	 * %b rather than %h: they are the same thing in POSIX and glibc, but
+	 * MSVCRT's strftime does not implement %h and writes nothing at all,
+	 * which would make the status bar lose its date on a 32-bit Windows
+	 * build. %b is implemented everywhere.
+	 */
+	strftime(s, sizeof s, "%b%y", &tm);
 	return (xstrdup(s));
 }
 
