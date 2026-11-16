@@ -1,22 +1,27 @@
 /*
- * win32-conhost-ident - report what is hosting this process's console.
+ * win32-conhost-ident - report what is actually hosting this console.
  *
- * The input matrix has a "conhost" tier that runs the probe with
- * CREATE_NEW_CONSOLE. On Windows 11 with Windows Terminal set as the default
- * terminal application, CREATE_NEW_CONSOLE is handed off to Windows Terminal,
- * which backs the console with ConPTY instead of conhost.exe. In that case a
- * run labelled "conhost" is really measuring the ConPTY path, and the whole
- * point of the tier - classic console host behaviour - is missed.
+ * Guessing from the ancestor chain is not enough, and getting it wrong is
+ * expensive: an earlier version of this probe reported ConEmu as ConPTY and a
+ * whole comparison run was labelled with the wrong host.
  *
- * This probe answers the question directly rather than by assumption:
+ * The three signals that actually separate the cases:
  *
- *   console_host   name of the conhost.exe/OpenConsole.exe/WindowsTerminal.exe
- *                  process found in the ancestor chain or the console's
- *                  attached process list
+ *   conhost ancestor      a classic console has conhost.exe above us in the
+ *                         parent chain
+ *   window owner          GetConsoleWindow() belongs to some other process
+ *                         when an emulator (ConEmu and friends) draws the
+ *                         console itself
+ *   conhost existence     a pseudo console still has a conhost.exe, but as a
+ *                         sibling created by the terminal, never as our
+ *                         ancestor
  *
- *   conpty         "yes" when the console is a pseudo console (GetConsoleMode
- *                  reports a mode but there is no conhost.exe ancestor, and
- *                  the attached list contains only this process)
+ * Which gives:
+ *
+ *   emulated          window owned by another process (ConEmu)
+ *   conhost           conhost.exe in our ancestor chain (classic)
+ *   conpty            conhost.exe exists but is not our ancestor (ConPTY)
+ *   conpty-openconsole no conhost.exe at all (Windows Terminal, WezTerm)
  *
  * Usage: win32-conhost-ident <outfile>
  */
@@ -30,98 +35,134 @@
 #include <string.h>
 #include <tlhelp32.h>
 
-static const char *
-process_name(DWORD pid, char *buf, size_t len)
+struct proc {
+	DWORD	pid;
+	DWORD	ppid;
+	char	name[128];
+};
+
+static struct proc *
+snapshot(size_t *countp)
 {
-	HANDLE			snap;
-	PROCESSENTRY32W		pe;
-	const char		*base;
+	HANDLE			 snap;
+	PROCESSENTRY32W		 pe;
+	struct proc		*list = NULL;
+	size_t			 n = 0, cap = 0;
 
 	snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if (snap == INVALID_HANDLE_VALUE)
 		return (NULL);
 	pe.dwSize = sizeof pe;
-	if (!Process32FirstW(snap, &pe)) {
-		CloseHandle(snap);
-		return (NULL);
+	if (Process32FirstW(snap, &pe)) {
+		do {
+			if (n == cap) {
+				cap = cap == 0 ? 256 : cap * 2;
+				list = realloc(list, cap * sizeof *list);
+				if (list == NULL) {
+					CloseHandle(snap);
+					return (NULL);
+				}
+			}
+			list[n].pid = pe.th32ProcessID;
+			list[n].ppid = pe.th32ParentProcessID;
+			list[n].name[0] = '\0';
+			WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1,
+			    list[n].name, sizeof list[n].name, NULL, NULL);
+			n++;
+		} while (Process32NextW(snap, &pe));
 	}
-	do {
-		if (pe.th32ProcessID != pid)
-			continue;
-		if (WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, buf,
-		    (int)len, NULL, NULL) == 0)
-			buf[0] = '\0';
-		CloseHandle(snap);
-		base = buf;
-		return (base);
-	} while (Process32NextW(snap, &pe));
 	CloseHandle(snap);
+	*countp = n;
+	return (list);
+}
+
+static const char *
+name_of(struct proc *list, size_t n, DWORD pid)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (list[i].pid == pid)
+			return (list[i].name);
+	}
 	return (NULL);
 }
 
 static DWORD
-parent_pid(DWORD pid)
+parent_of(struct proc *list, size_t n, DWORD pid)
 {
-	HANDLE			snap;
-	PROCESSENTRY32W		pe;
-	DWORD			parent = 0;
+	size_t i;
 
-	snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (snap == INVALID_HANDLE_VALUE)
-		return (0);
-	pe.dwSize = sizeof pe;
-	if (Process32FirstW(snap, &pe)) {
-		do {
-			if (pe.th32ProcessID == pid) {
-				parent = pe.th32ParentProcessID;
-				break;
-			}
-		} while (Process32NextW(snap, &pe));
+	for (i = 0; i < n; i++) {
+		if (list[i].pid == pid)
+			return (list[i].ppid);
 	}
-	CloseHandle(snap);
-	return (parent);
+	return (0);
 }
 
 static int
-name_contains(const char *name, const char *needle)
+is_conhost(const char *name)
 {
-	if (name == NULL)
-		return (0);
-	return (strstr(name, needle) != NULL);
+	return (name != NULL && _stricmp(name, "conhost.exe") == 0);
+}
+
+/* Is there a conhost.exe that is our ancestor, within a sane depth? */
+static DWORD
+conhost_ancestor(struct proc *list, size_t n, DWORD me)
+{
+	DWORD	chain = me;
+	int	depth;
+
+	for (depth = 0; depth < 16; depth++) {
+		DWORD pp = parent_of(list, n, chain);
+
+		if (pp == 0 || pp == chain)
+			break;
+		if (is_conhost(name_of(list, n, pp)))
+			return (pp);
+		chain = pp;
+	}
+	return (0);
 }
 
 /*
- * Classify the console host behind this process.
+ * Is a conhost.exe our sibling?
  *
- * Three cases matter and they are not interchangeable:
- *
- *   conhost   classic console host, conhost.exe in the ancestor chain
- *   conpty    no host process in the chain; the console is a pseudo console
- *             owned by an out-of-process terminal
+ * A pseudo console created by the system has its conhost.exe spawned by the
+ * same parent that spawned us, so it appears beside us rather than above us.
+ * Counting conhost.exe processes machine-wide is useless - services keep their
+ * own - so the only meaningful evidence is a conhost sharing our parent, or
+ * sharing our grandparent when the terminal inserted one more level.
  */
-static const char *
-classify(int found_conhost, int found_terminal)
+static DWORD
+conhost_sibling(struct proc *list, size_t n, DWORD me)
 {
-	if (found_conhost)
-		return ("conhost");
-	if (found_terminal)
-		return ("terminal-conpty");
-	return ("conpty-unknown");
+	DWORD	mypp = parent_of(list, n, me);
+	DWORD	grand = mypp != 0 ? parent_of(list, n, mypp) : 0;
+	size_t	i;
+
+	for (i = 0; i < n; i++) {
+		if (!is_conhost(list[i].name))
+			continue;
+		if (mypp != 0 && list[i].ppid == mypp)
+			return (list[i].pid);
+		if (grand != 0 && list[i].ppid == grand)
+			return (list[i].pid);
+	}
+	return (0);
 }
 
 int
 main(int argc, char **argv)
 {
-	FILE	*f;
-	HANDLE	 out;
-	DWORD	 me = GetCurrentProcessId();
-	DWORD	 pid, parent;
-	DWORD	 list[64], n, i;
-	DWORD	 mode = 0;
-	char	 nbuf[256];
-	const char *host;
-	int	 found_conhost = 0, found_terminal = 0;
-	int	 conpty = 0;
+	FILE		*f;
+	struct proc	*list;
+	size_t		 n;
+	DWORD		 me = GetCurrentProcessId();
+	DWORD		 ancestor, sibling, wpid = 0;
+	HWND		 w;
+	const char	*host;
+	int		 owned_by_other = 0;
 
 	if (argc < 2)
 		return (2);
@@ -129,55 +170,89 @@ main(int argc, char **argv)
 	if (f == NULL)
 		return (2);
 
+	list = snapshot(&n);
+	if (list == NULL) {
+		fprintf(f, "error=snapshot_failed\n");
+		fclose(f);
+		return (1);
+	}
+
 	fprintf(f, "pid=%lu\n", (unsigned long)me);
-
-	/* Console host visible in the ancestor chain? */
-	pid = me;
-	for (i = 0; i < 8; i++) {
-		parent = parent_pid(pid);
-		if (parent == 0 || parent == pid)
-			break;
-		if (process_name(parent, nbuf, sizeof nbuf) != NULL) {
-			fprintf(f, "ancestor[%lu]=%s\n",
-			    (unsigned long)parent, nbuf);
-			if (name_contains(nbuf, "conhost"))
-				found_conhost = 1;
-			if (name_contains(nbuf, "WindowsTerminal") ||
-			    name_contains(nbuf, "OpenConsole"))
-				found_terminal = 1;
-		}
-		pid = parent;
+	fprintf(f, "parent=%lu\n", (unsigned long)parent_of(list, n, me));
+	if (name_of(list, n, parent_of(list, n, me)) != NULL) {
+		fprintf(f, "parent_name=%s\n",
+		    name_of(list, n, parent_of(list, n, me)));
 	}
 
-	/* Processes attached to this console per the kernel. */
-	out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_READ |
-	    FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-	if (out == INVALID_HANDLE_VALUE) {
-		fprintf(f, "conout=unavailable err=%lu\n",
-		    (unsigned long)GetLastError());
-	} else {
-		n = GetConsoleProcessList(list, 64);
-		fprintf(f, "console_processes=%lu\n", (unsigned long)n);
-		for (i = 0; i < n && i < 64; i++) {
-			if (process_name(list[i], nbuf, sizeof nbuf) != NULL) {
-				fprintf(f, "console_pid[%lu]=%s\n",
-				    (unsigned long)list[i], nbuf);
-				if (name_contains(nbuf, "conhost"))
-					found_conhost = 1;
-			}
+	/* Ancestor chain, for the record. */
+	{
+		DWORD	chain = me;
+		int	depth;
+
+		for (depth = 0; depth < 6; depth++) {
+			DWORD		pp = parent_of(list, n, chain);
+			const char	*nm;
+
+			if (pp == 0 || pp == chain)
+				break;
+			nm = name_of(list, n, pp);
+			fprintf(f, "ancestor[%lu]=%s\n", (unsigned long)pp,
+			    nm != NULL ? nm : "?");
+			chain = pp;
 		}
-		if (GetConsoleMode(out, &mode))
-			fprintf(f, "conout_mode=0x%lx\n", (unsigned long)mode);
-		CloseHandle(out);
 	}
 
-	host = classify(found_conhost, found_terminal);
-	conpty = (strcmp(host, "conpty-unknown") == 0 ||
-	    strcmp(host, "terminal-conpty") == 0);
+	ancestor = conhost_ancestor(list, n, me);
+	sibling = conhost_sibling(list, n, me);
+	fprintf(f, "conhost_ancestor=%lu\n", (unsigned long)ancestor);
+	fprintf(f, "conhost_sibling=%lu\n", (unsigned long)sibling);
+
+	/* Console process list, which shows injected helpers. */
+	{
+		DWORD	clist[128], cn, j;
+
+		cn = GetConsoleProcessList(clist, 128);
+		fprintf(f, "console_processes=%lu\n", (unsigned long)cn);
+		for (j = 0; j < cn && j < 128; j++) {
+			const char *nm = name_of(list, n, clist[j]);
+
+			fprintf(f, "console_pid[%lu]=%s\n",
+			    (unsigned long)clist[j], nm != NULL ? nm : "?");
+		}
+	}
+
+	/*
+	 * The console window's owner is the decisive signal for an emulator: a
+	 * real console is drawn by whoever owns the window, and when that is a
+	 * different process the console is being rendered for us rather than by
+	 * the system host.
+	 */
+	w = GetConsoleWindow();
+	if (w != NULL) {
+		GetWindowThreadProcessId(w, &wpid);
+		fprintf(f, "window_pid=%lu\n", (unsigned long)wpid);
+		if (name_of(list, n, wpid) != NULL) {
+			fprintf(f, "window_owner=%s\n",
+			    name_of(list, n, wpid));
+		}
+		fprintf(f, "window_visible=%d\n", IsWindowVisible(w) ? 1 : 0);
+		if (wpid != 0 && wpid != me)
+			owned_by_other = 1;
+	}
+	fprintf(f, "window_owned_by_other=%d\n", owned_by_other);
+
+	if (owned_by_other)
+		host = "emulated";
+	else if (ancestor != 0)
+		host = "conhost";
+	else if (sibling != 0)
+		host = "conpty";
+	else
+		host = "conpty-openconsole";
 
 	fprintf(f, "host=%s\n", host);
-	fprintf(f, "conpty=%s\n", conpty ? "yes" : "no");
 	fflush(f);
 	fclose(f);
+	free(list);
 	return (0);
 }

@@ -38,69 +38,101 @@
  * straight at the feature that broke.
  */
 /*
- * Width corpus.
+ * Corpora.
  *
- * Each line brackets the character under test with ASCII markers, so the
- * reported grid directly shows how many cells it occupied: anything after the
+ * Every line brackets the character under test with ASCII markers, so the
+ * reported grid shows directly how many cells it occupied: anything after the
  * marker shifts by the character's width, and a host that disagrees produces a
  * visibly different column rather than a subtle rendering difference.
  *
- * The ranges cover every width class renderers actually disagree about:
- * ambiguous-width symbols, the CJK/Hangul/Kana blocks, halfwidth and
- * fullwidth forms, plane-2 ideographs, zero-width characters, combining
- * marks, variation selectors, and emoji including ZWJ sequences.
+ * Length is a hard constraint, not a style choice. Each host has a fixed
+ * screen buffer - 40 rows for a system ConPTY, 30 for Windows Terminal and
+ * WezTerm - and once the corpus is taller than the buffer the first lines
+ * scroll away and cannot be read back at all. Every corpus here therefore
+ * stays well under 24 lines.
  *
- * Kept to 28 lines so the whole corpus fits a stock 30-row console window
- * without scrolling; a corpus that silently loses its first lines to
- * scrollback is worse than a shorter one.
+ * The width material is split in two so it can be covered completely:
+ *
+ *   width    the common cases: ambiguous width, CJK/Hangul/Kana, halfwidth
+ *            and fullwidth, plane 2, surrogate pairs, wide-next-to-narrow
+ *   width2   the awkward cases: zero-width and formatting characters,
+ *            combining marks on wide bases, variation selectors, private use,
+ *            emoji sequences
  */
 static const wchar_t *corpus_width[] = {
 	/* ambiguity: 1 cell in most terminals, 2 in CJK locales */
-	L"20 amb boxdraw \x2500|\x2502|",
-	L"21 amb arrow \x2190|\x2192|",
-	L"22 amb punct \x2018|\x2019|",
-	L"23 amb degree \x00b0|\x00b1|",
+	L"01 amb boxdraw \x2500|\x2502|",
+	L"02 amb arrow \x2190|\x2192|",
+	L"03 amb punct \x2018|\x2019|",
+	L"04 amb degree \x00b0|\x00b1|",
 
 	/* definitely wide */
-	L"30 cjk han \x4e2d|\x6587|",
-	L"31 cjk hira \x3042|\x3044|",
-	L"32 cjk kata \x30a2|\x30a4|",
-	L"33 hangul \xac00|\xd55c|",
-	L"34 hangul jamo \x1100|\x1160|",
-	L"35 cjk compat \xf900|\xfaff|",
-	L"36 fullwidth \xff21|\xff41|",
-	L"37 halfwidth kata \xff66|\xff9d|",
-	L"38 cjk ext b \U00020000|\U0002a6df|",
-
-	/* zero width and combining */
-	L"40 zwsp a\x200b" L"b|",
-	L"41 zwj a\x200d" L"b|",
-	L"42 combining e\x0301|",
-	L"43 combining multi a\x0300\x0301\x0302|",
-	L"44 variation sel \x2764\xfe0f|",
+	L"05 cjk han \x4e2d|\x6587|",
+	L"06 cjk hira \x3042|\x3044|",
+	L"07 cjk kata \x30a2|\x30a4|",
+	L"08 hangul \xac00|\xd55c|",
+	L"09 hangul jamo \x1100|\x1160|",
+	L"10 cjk compat \xf900|\xfaff|",
+	L"11 fullwidth \xff21|\xff41|",
+	L"12 halfwidth kata \xff66|\xff9d|",
+	L"13 cjk ext b \U00020000|\U0002a6df|",
 
 	/* surrogate pairs: one character in two UTF-16 units */
-	L"50 emoji face \U0001f600|\U0001f601|",
-	L"51 emoji symbol \U0001f4a9|\U0001f525|",
-	L"52 emoji flag \U0001f1e8\U0001f1f3|",
-	L"53 emoji zwj \U0001f468\x200d\U0001f469|",
+	L"14 emoji face \U0001f600|\U0001f601|",
+	L"15 emoji symbol \U0001f4a9|\U0001f525|",
+	L"16 emoji flag \U0001f1e8\U0001f1f3|",
 
 	/* wide next to narrow, which is where off-by-one shows up */
-	L"60 wide+ascii \x4e2d" L"AB" L"\x6587" L"CD|",
-	L"61 ascii+wide " L"AB" L"\x4e2d" L"CD" L"\x6587|",
-	L"62 wide only \x4e2d\x6587\x4e2d\x6587|",
-	L"63 wide at eol \x4e2d\x6587",
+	L"17 wide+ascii \x4e2d" L"AB" L"\x6587" L"CD|",
+	L"18 ascii+wide " L"AB" L"\x4e2d" L"CD" L"\x6587|",
+	L"19 wide only \x4e2d\x6587\x4e2d\x6587|",
+	L"20 many wide \x4e2d\x4e2d\x4e2d\x4e2d\x4e2d\x4e2d\x4e2d|",
 
 	/* control behaviour */
-	L"70 tab a\tb\tc",
-	L"72 cursor \x1b[4GX",
+	L"21 tab a\tb\tc",
+	L"22 cursor \x1b[4GX",
+	NULL
+};
+
+static const wchar_t *corpus_width2[] = {
+	/* zero width and formatting characters */
+	L"01 zwsp a\x200b" L"b|",
+	L"02 zwj a\x200d" L"b|",
+	L"03 soft hyphen a\x00ad" L"b|",
+	L"04 word joiner a\x2060" L"b|",
+	L"05 bidi mark a\x200e" L"b|",
+	L"06 hangul filler \x115f|",
+
+	/* combining marks, including on a double-width base */
+	L"07 combining e\x0301|",
+	L"08 combining multi a\x0300\x0301\x0302|",
+	L"09 mark on wide \x4e2d\x0301|",
+
+	/* variation selectors */
+	L"10 vs on heart \x2764\xfe0f|",
+	L"11 vs on wide \x4e2d\xfe0f|",
+	L"12 keycap 1\xfe0f\x20e3|",
+
+	/* emoji sequences */
+	L"13 skin tone \U0001f44d\U0001f3fd|",
+	L"14 zwj family \U0001f468\x200d\U0001f469|",
+	L"15 rainbow \U0001f3f3\xfe0f\x200d\U0001f308|",
+
+	/* private use area */
+	L"16 pua \ue000|\uf8ff|",
+
+	/* wide followed by a mark then ascii */
+	L"17 wide+mark+ascii \x4e2d\x0301" L"AB|",
+
+	/* 4-byte character at end of line */
+	L"18 ext b at eol \U00020000\U00020001",
 	NULL
 };
 
 /*
  * Attribute corpus: colours and text attributes. Separate from the width
- * corpus because it needs a different window shape and because a failure here
- * means something completely different from a width mismatch.
+ * corpora because a failure here means something completely different from a
+ * width mismatch.
  */
 static const wchar_t *corpus_attr[] = {
 	L"01 plain ascii",
@@ -126,11 +158,10 @@ static const wchar_t *corpus_attr[] = {
 	L"21 fg 256 \x1b[38;5;196mC256\x1b[0m",
 	L"22 bg 256 \x1b[48;5;21mB256\x1b[0m",
 	L"23 fg rgb \x1b[38;2;255;0;0mRGB\x1b[0m",
-	L"24 bg rgb \x1b[48;2;0;128;255mBRGB\x1b[0m",
-	L"25 attr mix \x1b[1;4;31mBUR\x1b[0m",
-	L"26 all off AA\x1b[1;4;7mBB\x1b[0mCC",
 	NULL
 };
+
+/* ---------------------------------------------------------------- helpers */
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -245,7 +276,7 @@ dump_screen(const char *path)
 	SMALL_RECT		 region;
 	char			 line[8192];
 	size_t			 used;
-	SHORT			 x, y, width, height;
+	SHORT			 x, y, width, height, first;
 	int			 retval = 1;
 
 	f = fopen(path, "wb");
@@ -267,19 +298,29 @@ dump_screen(const char *path)
 	}
 
 	/*
-	 * Read only the visible window. A conhost buffer is thousands of rows
-	 * tall, and dumping all of it buries the answer in blank rows.
+	 * Read the whole buffer, then report only the rows that contain
+	 * something.
+	 *
+	 * The window is however tall the host happens to be - 24 rows under
+	 * ConEmu, 30 under conhost, 40 under a fresh ConPTY - and once the
+	 * corpus is taller than the window the earliest lines scroll out of
+	 * view. Reading only the window therefore made a correct renderer look
+	 * like it had lost rows, and made otherwise-identical reports differ by
+	 * host purely because of their default window height.
+	 *
+	 * Reading buffer rows from 0 and trimming blank rows at both ends
+	 * removes the window size from the comparison entirely.
 	 */
-	width = (SHORT)(csbi.srWindow.Right - csbi.srWindow.Left + 1);
-	height = (SHORT)(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+	width = csbi.dwSize.X;
+	height = csbi.dwSize.Y;
 	size.X = width;
 	size.Y = height;
 	origin.X = 0;
 	origin.Y = 0;
-	region.Left = csbi.srWindow.Left;
-	region.Top = csbi.srWindow.Top;
-	region.Right = csbi.srWindow.Right;
-	region.Bottom = csbi.srWindow.Bottom;
+	region.Left = 0;
+	region.Top = 0;
+	region.Right = (SHORT)(width - 1);
+	region.Bottom = (SHORT)(height - 1);
 
 	buf = calloc((size_t)width * (size_t)height, sizeof *buf);
 	if (buf == NULL) {
@@ -296,9 +337,8 @@ dump_screen(const char *path)
 	fprintf(f, "buffer=%dx%d\n", (int)csbi.dwSize.X,
 	    (int)csbi.dwSize.Y);
 	fprintf(f, "window=%dx%d\n", (int)width, (int)height);
-	fprintf(f, "cursor=%d,%d\n",
-	    (int)(csbi.dwCursorPosition.X - csbi.srWindow.Left),
-	    (int)(csbi.dwCursorPosition.Y - csbi.srWindow.Top));
+	fprintf(f, "cursor=%d,%d\n", (int)csbi.dwCursorPosition.X,
+	    (int)csbi.dwCursorPosition.Y);
 
 	/*
 	 * Text grid relative to the window, trailing blanks trimmed.
@@ -313,6 +353,27 @@ dump_screen(const char *path)
 	 * is the whole point of comparing hosts. A cell tagged as a trailing
 	 * byte is not a character of its own and is skipped.
 	 */
+	/*
+	 * Row numbers are relative to the first non-blank buffer row, so the
+	 * report starts at row 00 no matter how far the corpus scrolled or how
+	 * tall the host's default window is.
+	 */
+	first = -1;
+	for (y = 0; y < height && first < 0; y++) {
+		for (x = 0; x < width; x++) {
+			CHAR_INFO *ci = &buf[(size_t)y * width + x];
+			WCHAR ch = ci->Char.UnicodeChar;
+
+			if (ch != 0 && ch != L' ') {
+				first = y;
+				break;
+			}
+		}
+	}
+	if (first < 0)
+		first = 0;
+	fprintf(f, "first=%d\n", (int)first);
+
 	for (y = 0; y < height; y++) {
 		used = 0;
 		line[0] = '\0';
@@ -330,28 +391,37 @@ dump_screen(const char *path)
 		line[used] = '\0';
 		if (used == 0)
 			continue;
-		fprintf(f, "row %02d |%s|\n", (int)y, line);
+		fprintf(f, "row %02d |%s|\n", (int)(y - first), line);
 	}
 
 	/*
-	 * Attribute grid: only cells that differ from the default attribute,
-	 * so a clean run produces no attr lines at all.
+	 * Attribute grid: only cells whose colour or attribute differs from the
+	 * default, so a clean run produces no attr lines at all.
+	 *
+	 * The LVB bits are masked out of the comparison. They mark the leading
+	 * and trailing halves of a double-width character, and different hosts
+	 * set them on different cells; treating that as a colour difference
+	 * would drown the real signal in noise. They are still counted as a
+	 * width fact, by the text grid above.
 	 */
 	for (y = 0; y < height; y++) {
 		int any = 0;
 		used = 0;
 		for (x = 0; x < width; x++) {
 			CHAR_INFO *ci = &buf[(size_t)y * width + x];
-			if (ci->Attributes == csbi.wAttributes)
+			WORD plain = ci->Attributes &
+			    (WORD)~(COMMON_LVB_LEADING_BYTE |
+			    COMMON_LVB_TRAILING_BYTE);
+			if (plain == csbi.wAttributes)
 				continue;
 			if (!any) {
 				used = (size_t)snprintf(line, sizeof line,
-				    "attr %02d |", (int)y);
+				    "attr %02d |", (int)(y - first));
 				any = 1;
 			}
 			used += (size_t)snprintf(line + used,
 			    sizeof line - used, "%d:%04x ", (int)x,
-			    (unsigned)ci->Attributes);
+			    (unsigned)plain);
 		}
 		if (any) {
 			line[used++] = '|';
@@ -390,6 +460,8 @@ main(int argc, char **argv)
 	}
 	if (strcmp(argv[2], "width") == 0)
 		corpus = corpus_width;
+	else if (strcmp(argv[2], "width2") == 0)
+		corpus = corpus_width2;
 	else if (strcmp(argv[2], "attr") == 0)
 		corpus = corpus_attr;
 	else {
@@ -397,8 +469,9 @@ main(int argc, char **argv)
 		return (2);
 	}
 
-	if (strcmp(argv[1], "emit") == 0)
+	if (strcmp(argv[1], "emit") == 0) {
 		return (emit_corpus(corpus));
+	}
 	if (strcmp(argv[1], "self") == 0 && argc >= 4) {
 		if (emit_corpus(corpus) != 0)
 			return (1);
