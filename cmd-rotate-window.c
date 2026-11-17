@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: cmd-rotate-window.c,v 1.35 2026/10/09 13:12:14 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -29,6 +29,7 @@ static enum cmd_retval	cmd_rotate_window_exec(struct cmd *,
 
 const struct cmd_entry cmd_rotate_window_entry = {
 	.name = "rotate-window",
+	.description = "Rotate panes in a window.",
 	.alias = "rotatew",
 
 	.args = { "Dt:UZ", 0, 0, NULL },
@@ -109,6 +110,7 @@ cmd_rotate_window_exec(struct cmd *self, struct cmdq_item *item)
 	window_set_active_pane(w, wp, 1);
 	cmd_find_from_winlink_pane(current, wl, wp, 0);
 	window_pop_zoom(w);
+	redraw_invalidate_scene(w);
 	server_redraw_window(w);
 
 	return (CMD_RETURN_NORMAL);

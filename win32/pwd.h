@@ -18,6 +18,15 @@
 #define TMUX_WIN32_UID_T_DEFINED
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
+
+/*
+ * POSIX systems have id_t in <sys/types.h>, and the access list keys users
+ * and groups by numeric uid/gid. Windows has no such type and no usable
+ * numeric identity, so the port keys the access list by string SID. Defining
+ * id_t as a pointer lets one implementation of server-acl.c compile on both:
+ * the Unix build gets the system type, the Windows build gets a string.
+ */
+typedef const char *id_t;
 #endif
 
 struct passwd {

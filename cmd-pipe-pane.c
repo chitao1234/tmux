@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: cmd-pipe-pane.c,v 1.65 2026/10/09 13:12:14 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -59,6 +59,7 @@ static void cmd_pipe_pane_error_callback(struct bufferevent *, short, void *);
 
 const struct cmd_entry cmd_pipe_pane_entry = {
 	.name = "pipe-pane",
+	.description = "Pipe pane input or output to a command.",
 	.alias = "pipep",
 
 	.args = { "IOot:", 0, 1, NULL },
@@ -403,8 +404,12 @@ static void
 cmd_pipe_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 {
 	struct window_pane	*wp = data;
-	struct evbuffer		*evb = wp->pipe_event->input;
+	struct evbuffer		*evb;
 	size_t			 available;
+
+	if (wp->pipe_event == NULL)
+		return;
+	evb = wp->pipe_event->input;
 
 	available = EVBUFFER_LENGTH(evb);
 	log_debug("%%%u pipe read %zu", wp->id, available);

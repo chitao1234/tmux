@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: cmd-unbind-key.c,v 1.35 2026/10/09 13:12:14 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -30,6 +30,7 @@ static enum cmd_retval	cmd_unbind_key_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_unbind_key_entry = {
 	.name = "unbind-key",
+	.description = "Remove key bindings.",
 	.alias = "unbind",
 
 	.args = { "anqT:", 0, 1, NULL },

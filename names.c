@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: names.c,v 1.48 2026/06/29 18:17:28 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -95,7 +95,7 @@ check_window_name(struct window *w)
 	name = format_window_name(w);
 	if (strcmp(name, w->name) != 0) {
 		log_debug("@%u new name %s (was %s)", w->id, name, w->name);
-		window_set_name(w, name);
+		window_set_name(w, name, 1);
 		server_redraw_window_borders(w);
 		server_status_window(w);
 	} else
@@ -164,14 +164,18 @@ parse_window_name(const char *in)
 			*ptr-- = '\0';
 	}
 
+	/*
+	 * A Windows path can be absolute without starting with '/', so test
+	 * with path_is_absolute() and take the basename portably.
+	 */
 	if (*name == '/' || path_is_absolute(name)) {
 		char	*base;
 
 		base = path_basename_copy(name);
-		name = clean_name(base, "#");
+		name = clean_name(base, 1);
 		free(base);
 	} else
-		name = clean_name(name, "#");
+		name = clean_name(name, 1);
 	free(copy);
 	if (name == NULL)
 		return (xstrdup(""));

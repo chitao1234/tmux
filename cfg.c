@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: cfg.c,v 1.92 2026/10/02 12:28:07 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -46,8 +46,10 @@ char                    **cfg_files;
 u_int                     cfg_nfiles;
 
 static enum cmd_retval
-cfg_client_done(__unused struct cmdq_item *item, __unused void *data)
+cfg_client_done(struct cmdq_item *item, __unused void *data)
 {
+	if (cmdq_get_client(item)->flags & CLIENT_DEAD)
+		return (CMD_RETURN_NORMAL);
 	if (!cfg_finished)
 		return (CMD_RETURN_WAIT);
 	return (CMD_RETURN_NORMAL);
@@ -62,7 +64,14 @@ cfg_done(struct cmdq_item *item, __unused void *data)
 
 	cfg_show_causes(NULL);
 
-	return (status_prompt_load_history(item, &cfg_item));
+	if (cfg_item != NULL) {
+		cmdq_continue(cfg_item);
+		cfg_item = NULL;
+	}
+
+	prompt_load_history();
+
+	return (CMD_RETURN_NORMAL);
 }
 
 #ifdef TMUX_WIN32
@@ -203,15 +212,23 @@ cfg_win32_next_file(void)
 #endif
 
 void
+cfg_client_lost(struct client *c)
+{
+	if (c != cfg_client)
+		return;
+	cfg_client = NULL;
+	if (cfg_item != NULL) {
+		cmdq_continue(cfg_item);
+		cfg_item = NULL;
+	}
+}
+
+void
 start_cfg(void)
 {
 	struct client	 *c;
 	u_int		  i;
 	int		  flags = 0;
-
-	if (cfg_started)
-		return;
-	cfg_started = 1;
 
 	/*
 	 * Configuration files are loaded without a client, so commands are run
@@ -222,12 +239,19 @@ start_cfg(void)
 	 * Because start_cfg() is called so early, we can be sure the client's
 	 * command queue is currently empty and our callback will be at the
 	 * front - we need to get in before MSG_COMMAND.
+	 *
+	 * If the initial client is lost before the configuration finishes, the
+	 * next client to identify is first in the list and ends up here. Block
+	 * it instead, but do not load the files again.
 	 */
 	cfg_client = c = TAILQ_FIRST(&clients);
 	if (c != NULL) {
 		cfg_item = cmdq_get_callback(cfg_client_done, NULL);
 		cmdq_append(c, cfg_item);
 	}
+	if (cfg_started)
+		return;
+	cfg_started = 1;
 
 	if (cfg_quiet)
 		flags = CMD_PARSE_QUIET;
@@ -257,15 +281,6 @@ start_cfg(void)
 
 	cmdq_append(NULL, cmdq_get_callback(cfg_done, NULL));
 #endif
-}
-
-void
-cfg_client_lost(struct client *c)
-{
-	if (cfg_client == c) {
-		cfg_client = NULL;
-		cfg_item = NULL;
-	}
 }
 
 int
@@ -403,13 +418,15 @@ cfg_print_causes(struct cmdq_item *item)
 {
 	struct client	*c = cmdq_get_client(item);
 	u_int		 i;
+	char		*cause;
 
 	for (i = 0; i < cfg_ncauses; i++) {
+		cause = cfg_causes[i];
 		if (c != NULL && (c->flags & CLIENT_CONTROL))
-			control_write(c, "%%config-error %s", cfg_causes[i]);
+			control_notify_write(c, "%%config-error %s", cause);
 		else
-			cmdq_print(item, "%s", cfg_causes[i]);
-		free(cfg_causes[i]);
+			cmdq_print(item, "%s", cause);
+		free(cause);
 	}
 
 	free(cfg_causes);
@@ -424,14 +441,16 @@ cfg_show_causes(struct session *s)
 	struct window_pane		*wp;
 	struct window_mode_entry	*wme;
 	u_int				 i;
+	char				*cause;
 
 	if (cfg_ncauses == 0)
 		return;
 
 	if (c != NULL && (c->flags & CLIENT_CONTROL)) {
 		for (i = 0; i < cfg_ncauses; i++) {
-			control_write(c, "%%config-error %s", cfg_causes[i]);
-			free(cfg_causes[i]);
+			cause = cfg_causes[i];
+			control_notify_write(c, "%%config-error %s", cause);
+			free(cause);
 		}
 		goto out;
 	}
@@ -448,7 +467,8 @@ cfg_show_causes(struct session *s)
 
 	wme = TAILQ_FIRST(&wp->modes);
 	if (wme == NULL || wme->mode != &window_view_mode)
-		window_pane_set_mode(wp, NULL, &window_view_mode, NULL, NULL);
+		window_pane_set_mode(wp, NULL, &window_view_mode, NULL, NULL,
+		    NULL);
 	for (i = 0; i < cfg_ncauses; i++) {
 		window_copy_add(wp, 0, "%s", cfg_causes[i]);
 		free(cfg_causes[i]);

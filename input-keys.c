@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: input-keys.c,v 1.115 2026/10/12 09:37:07 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -518,7 +518,7 @@ input_key_vt10x(struct bufferevent *bev, key_code key)
 {
 	struct utf8_data	 ud;
 	key_code		 onlykey;
-	char			*p;
+	const char		*p;
 	static const char	*standard_map[2] = {
 		"1!9(0)=+;:'\",<.>/-8? 2",
 		"119900=+;;'',,..\x1f\x1f\x7f\x7f\0\0",
@@ -655,7 +655,7 @@ input_key(struct screen *s, struct bufferevent *bev, key_code key)
 			key = '\011' | (key & ~KEYC_MASK_KEY) | KEYC_SHIFT;
 		} else {
 			/* Otherwise clear modifiers. */
-			key &= ~KEYC_MASK_MODIFIERS;
+			key &= ~(KEYC_MASK_MODIFIERS|KEYC_IMPLIED_META);
 		}
 	}
 
@@ -841,7 +841,7 @@ input_key_mouse(struct window_pane *wp, struct mouse_event *m)
 		return;
 	if (cmd_mouse_at(wp, m, &x, &y, 0) != 0)
 		return;
-	if (!window_pane_visible(wp))
+	if (!window_pane_is_visible(wp))
 		return;
 	if (!input_key_get_mouse(s, m, x, y, &buf, &len))
 		return;

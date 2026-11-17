@@ -4,7 +4,7 @@ CLEANFILES = tmux.1.mdoc tmux.1.man cmd-parse.c
 
 # Distribution tarball options.
 EXTRA_DIST = \
-	CHANGES README README.ja COPYING example_tmux.conf \
+	CHANGES README COPYING example_tmux.conf \
 	osdep-*.c mdoc2man.awk tmux.1
 dist_EXTRA_tmux_SOURCES = compat/*.[ch]
 
@@ -13,7 +13,11 @@ AM_CPPFLAGS += @XOPEN_DEFINES@ \
 	-DTMUX_VERSION='"@VERSION@"' \
 	-DTMUX_CONF='"$(sysconfdir)/tmux.conf:~/.tmux.conf:$$XDG_CONFIG_HOME/tmux/tmux.conf:~/.config/tmux/tmux.conf"' \
 	-DTMUX_LOCK_CMD='"@DEFAULT_LOCK_CMD@"' \
-	-DTMUX_TERM='"@DEFAULT_TERM@"'
+	-DTMUX_TERM='"@DEFAULT_TERM@"' \
+	-DTMUX_MOUSE=1
+if HAVE_TMUX_SOCK
+AM_CPPFLAGS += -DTMUX_SOCK='"@TMUX_SOCK@"'
+endif
 
 # Additional object files.
 LDADD = $(LIBOBJS)
@@ -27,7 +31,7 @@ else
 AM_CFLAGS += -O0
 endif
 if IS_DEBUG
-AM_CFLAGS += -g
+AM_CFLAGS += -g3 -ggdb
 AM_CFLAGS += -Wno-long-long -Wall -W -Wformat=2 -Wno-use-after-free
 AM_CFLAGS += -Wmissing-prototypes -Wstrict-prototypes -Wmissing-declarations
 AM_CFLAGS += -Wwrite-strings -Wshadow -Wpointer-arith -Wsign-compare
@@ -42,7 +46,8 @@ AM_CPPFLAGS += -DDEBUG
 endif
 AM_CPPFLAGS += -iquote.
 if IS_ASAN
-AM_CFLAGS += -fsanitize=address
+AM_CPPFLAGS += -DASAN
+AM_CFLAGS += -fsanitize=address -fno-omit-frame-pointer
 AM_LDFLAGS += -fsanitize=address
 endif
 endif
@@ -108,7 +113,6 @@ dist_tmux_SOURCES = \
 	cmd-detach-client.c \
 	cmd-display-menu.c \
 	cmd-display-message.c \
-	cmd-display-panes.c \
 	cmd-find-window.c \
 	cmd-find.c \
 	cmd-if-shell.c \
@@ -168,19 +172,24 @@ dist_tmux_SOURCES = \
 	control-notify.c \
 	control.c \
 	environ.c \
+	events-payload.c \
+	events.c \
 	file.c \
-	format.c \
 	format-draw.c \
 	win32/fnmatch.h \
 	win32/glob.h \
+	format.c \
+	fuzzy.c \
 	grid-reader.c \
 	grid-view.c \
 	grid.c \
+	hooks.c \
 	hyperlinks.c \
 	ipc-startup.c \
 	input-keys.c \
 	input.c \
 	job.c \
+	json.c \
 	key-bindings.c \
 	key-string.c \
 	win32/langinfo.h \
@@ -190,16 +199,17 @@ dist_tmux_SOURCES = \
 	log.c \
 	menu.c \
 	mode-tree.c \
+	monitor.c \
 	names.c \
 	win32/netinet/in.h \
-	notify.c \
 	options-table.c \
 	options.c \
 	paste.c \
-	popup.c \
 	proc.c \
 	win32/pwd.h \
 	win32/regex.h \
+	prompt-history.c \
+	prompt.c \
 	regsub.c \
 	win32/resolv.h \
 	resize.c \
@@ -222,10 +232,11 @@ dist_tmux_SOURCES = \
 	win32/sys/uio.h \
 	win32/sys/utsname.h \
 	win32/sys/wait.h \
-	win32/termios.h \
-	tmux.c \
-	tmux.h \
 	tmux-protocol.h \
+	tmux.c \
+	tmux-image.h \
+	tmux.h \
+	win32/termios.h \
 	tty-acs.c \
 	tty-draw.c \
 	tty-features.c \
@@ -234,12 +245,16 @@ dist_tmux_SOURCES = \
 	tty.c \
 	utf8-combined.c \
 	utf8.c \
+	window-border.c \
 	window-buffer.c \
 	window-client.c \
 	window-clock.c \
 	window-copy.c \
 	window-customize.c \
+	window-panes.c \
+	window-switch.c \
 	window-tree.c \
+	window-visible.c \
 	window.c \
 	xmalloc.c \
 	xmalloc.h
@@ -264,6 +279,11 @@ if NEED_FORKPTY
 nodist_tmux_SOURCES += compat/forkpty-@PLATFORM@.c
 endif
 
+# Add compat file for Linux session keyrings.
+if HAVE_KEYCTL
+nodist_tmux_SOURCES += compat/keyring-linux.c
+endif
+
 # Add compat file for systemd.
 if HAVE_SYSTEMD
 nodist_tmux_SOURCES += compat/systemd.c
@@ -274,17 +294,27 @@ if HAVE_UTF8PROC
 nodist_tmux_SOURCES += compat/utf8proc.c
 endif
 
-# Enable sixel support.
-if ENABLE_SIXEL
-dist_tmux_SOURCES += image.c image-sixel.c
+# Enable image support.
+if ENABLE_IMAGES
+dist_tmux_SOURCES += \
+	image.c \
+	image-decode.c \
+	image-grid.c \
+	image-sixel.c \
+	image-kitty.c \
+	image-fallback.c
 endif
 
+# Add bits for fuzzing if enabled.
 if NEED_FUZZING
 check_PROGRAMS = \
 	fuzz/input-fuzzer \
 	fuzz/cmd-parse-fuzzer \
 	fuzz/format-fuzzer \
-	fuzz/style-fuzzer
+	fuzz/style-fuzzer \
+	fuzz/layout-fuzzer \
+	fuzz/json-fuzzer \
+	fuzz/copy-mode-fuzzer
 fuzz_input_fuzzer_LDFLAGS = $(FUZZING_LIBS)
 fuzz_input_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
 fuzz_cmd_parse_fuzzer_LDFLAGS = $(FUZZING_LIBS)
@@ -293,6 +323,12 @@ fuzz_format_fuzzer_LDFLAGS = $(FUZZING_LIBS)
 fuzz_format_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
 fuzz_style_fuzzer_LDFLAGS = $(FUZZING_LIBS)
 fuzz_style_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
+fuzz_layout_fuzzer_LDFLAGS = $(FUZZING_LIBS)
+fuzz_layout_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
+fuzz_json_fuzzer_LDFLAGS = $(FUZZING_LIBS)
+fuzz_json_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
+fuzz_copy_mode_fuzzer_LDFLAGS = $(FUZZING_LIBS)
+fuzz_copy_mode_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
 endif
 
 # Install tmux.1 in the right format.
@@ -307,3 +343,7 @@ install-exec-hook:
 	$(mkdir_p) $(DESTDIR)$(mandir)/man1
 	$(INSTALL_DATA) $(srcdir)/tmux.1.@MANFORMAT@ \
 		$(DESTDIR)$(mandir)/man1/tmux.1
+
+# And uninstall it.
+uninstall-hook:
+	rm -f $(DESTDIR)$(mandir)/man1/tmux.1

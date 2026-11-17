@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: tmux.c,v 1.225 2026/09/25 13:44:49 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -43,6 +43,9 @@ struct timeval	 start_time;
 struct ipc_endpoint *socket_endpoint;
 const char	*socket_path;
 int		 ptm_fd = -1;
+#ifdef TMUX_WIN32
+int		 win32_detached_server;
+#endif
 const char	*shell_command;
 
 static __dead void	 usage(int);
@@ -58,12 +61,30 @@ static size_t		 path_root_length(const char *);
 static char		*path_list_next(char **);
 #endif
 
+#ifdef ASAN
+__attribute__((used)) const char *__asan_default_options(void);
+__attribute__((used)) const char *
+__asan_default_options(void)
+{
+	return (
+	    "abort_on_error=1:"
+	    "halt_on_error=1:"
+	    "detect_leaks=0:"
+	    "detect_stack_use_after_return=1:"
+	    "strict_string_checks=1:"
+	    "check_initialization_order=1:"
+	    "log_path=/tmp/tmux-asan:"
+	    "log_exe_name=1"
+	);
+}
+#endif
+
 static __dead void
 usage(int status)
 {
 	fprintf(status ? stderr : stdout,
 	    "usage: %s [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n"
-	    "            [-S socket-path] [-T features] [command [flags]]\n",
+	    "            [-S socket-path] [-T features] [-W] [command [flags]]\n",
 	    getprogname());
 	exit(status);
 }
@@ -312,8 +333,8 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 #else
 		else {
 			if (realpath(expanded, resolved) == NULL) {
-				log_debug("%s: realpath(\"%s\") failed: %s", __func__,
-			  expanded, strerror(errno));
+				log_debug("%s: realpath(\"%s\") failed: %s",
+				    __func__, expanded, strerror(errno));
 				free(expanded);
 				continue;
 			}
@@ -567,20 +588,28 @@ get_timer(void)
 }
 
 char *
-clean_name(const char *name, const char* forbid)
+clean_name(const char *name, int untrusted)
 {
 	char	*copy, *cp, *new_name;
 
-	if (*name == '\0' || !utf8_isvalid(name))
+	if (!utf8_isvalid(name))
 		return (NULL);
 	copy = xstrdup(name);
 	for (cp = copy; *cp != '\0'; cp++) {
-		if (strchr(forbid, *cp) != NULL)
+		if (untrusted && cp[0] == '#' && cp[1] == '(')
 			*cp = '_';
 	}
 	utf8_stravis(&new_name, copy, VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL);
 	free(copy);
 	return (new_name);
+}
+
+int
+check_name(const char *name)
+{
+	if (!utf8_isvalid(name))
+		return (0);
+	return (1);
 }
 
 const char *
@@ -663,13 +692,8 @@ find_home(void)
 #endif
 	if (home == NULL || *home == '\0') {
 		pw = getpwuid(getuid());
-		if (pw != NULL) {
-#ifdef TMUX_WIN32
+		if (pw != NULL)
 			home = xstrdup(pw->pw_dir);
-#else
-			home = pw->pw_dir;
-#endif
-		}
 		else
 			home = NULL;
 	}
@@ -796,7 +820,7 @@ main(int argc, char **argv)
 	while ((opt = getopt(argc, argv, "2c:CDdf:hlL:NqS:T:uUvVW")) != -1) {
 		switch (opt) {
 		case '2':
-			tty_add_features(&feat, "256", ":,");
+			tty_parse_features("256", ":,", &feat, NULL);
 			break;
 		case 'c':
 			shell_command = optarg;
@@ -844,7 +868,7 @@ main(int argc, char **argv)
 			path = xstrdup(optarg);
 			break;
 		case 'T':
-			tty_add_features(&feat, optarg, ":,");
+			tty_parse_features(optarg, ":,", &feat, NULL);
 			break;
 		case 'u':
 			flags |= CLIENT_UTF8;
@@ -854,7 +878,7 @@ main(int argc, char **argv)
 			break;
 #ifdef TMUX_WIN32
 		case 'W':
-			flags |= CLIENT_SPAWNEDSERVER;
+			win32_detached_server = 1;
 			break;
 #endif
 		default:

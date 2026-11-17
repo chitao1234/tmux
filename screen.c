@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: screen.c,v 1.108 2026/10/12 10:50:06 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -69,6 +69,7 @@ screen_free_titles(struct screen *s)
 
 	free(s->titles);
 	s->titles = NULL;
+	s->ntitles = 0;
 }
 
 /* Create a new screen. */
@@ -80,6 +81,7 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 
 	s->title = xstrdup("");
 	s->titles = NULL;
+	s->ntitles = 0;
 	s->path = NULL;
 
 	s->cstyle = SCREEN_CURSOR_DEFAULT;
@@ -90,11 +92,6 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 	s->default_ccolour = -1;
 	s->tabs = NULL;
 	s->sel = NULL;
-
-#ifdef ENABLE_SIXEL
-	TAILQ_INIT(&s->images);
-	TAILQ_INIT(&s->saved_images);
-#endif
 
 	s->write_list = NULL;
 	s->hyperlinks = NULL;
@@ -123,16 +120,11 @@ screen_reinit(struct screen *s)
 	s->saved_cy = UINT_MAX;
 
 	screen_reset_tabs(s);
-
+	grid_free_lines(s->grid, s->grid->hsize, s->grid->sy);
 	grid_clear_lines(s->grid, s->grid->hsize, s->grid->sy, 8);
 
 	screen_clear_selection(s);
 	screen_free_titles(s);
-
-#ifdef ENABLE_SIXEL
-	image_free_all(s);
-#endif
-
 	screen_set_progress_bar(s, PROGRESS_BAR_HIDDEN, 0);
 	screen_reset_hyperlinks(s);
 }
@@ -167,9 +159,6 @@ screen_free(struct screen *s)
 		hyperlinks_free(s->hyperlinks);
 	screen_free_titles(s);
 
-#ifdef ENABLE_SIXEL
-	image_free_all(s);
-#endif
 }
 
 /* Reset tabs to default, eight spaces apart. */
@@ -190,10 +179,11 @@ screen_reset_tabs(struct screen *s)
 void
 screen_set_default_cursor(struct screen *s, struct options *oo)
 {
-	int	c;
+	struct grid_cell	gc;
+	int			c;
 
-	c = options_get_number(oo, "cursor-colour");
-	s->default_ccolour = c;
+	style_apply(&gc, oo, "cursor-colour", NULL);
+	s->default_ccolour = gc.fg;
 
 	c = options_get_number(oo, "cursor-style");
 	s->default_mode = 0;
@@ -245,11 +235,11 @@ screen_set_cursor_colour(struct screen *s, int colour)
 
 /* Set screen title. */
 int
-screen_set_title(struct screen *s, const char *title)
+screen_set_title(struct screen *s, const char *title, int untrusted)
 {
 	char	*new_title;
 
-	new_title = clean_name(title, "#");
+	new_title = clean_name(title, untrusted);
 	if (new_title == NULL)
 		return (0);
 	free(s->title);
@@ -259,11 +249,11 @@ screen_set_title(struct screen *s, const char *title)
 
 /* Set screen path. */
 int
-screen_set_path(struct screen *s, const char *path)
+screen_set_path(struct screen *s, const char *path, int untrusted)
 {
 	char	*new_path;
 
-	new_path = clean_name(path, "#");
+	new_path = clean_name(path, untrusted);
 	if (new_path == NULL)
 		return (0);
 	free(s->path);
@@ -361,10 +351,6 @@ screen_resize_cursor(struct screen *s, u_int sx, u_int sy, int reflow,
 	if (sy != screen_size_y(s))
 		screen_resize_y(s, sy, eat_empty, &cy);
 
-#ifdef ENABLE_SIXEL
-	image_free_all(s);
-#endif
-
 	if (reflow)
 		screen_reflow(s, sx, &cx, &cy, cursor);
 
@@ -395,6 +381,9 @@ screen_resize_y(struct screen *s, u_int sy, int eat_empty, u_int *cy)
 {
 	struct grid	*gd = s->grid;
 	u_int		 needed, available, oldy, i;
+#ifdef ENABLE_IMAGES
+	u_int		 oldsize = gd->hsize + gd->sy;
+#endif
 
 	if (sy == 0)
 		fatalx("zero size");
@@ -421,6 +410,12 @@ screen_resize_y(struct screen *s, u_int sy, int eat_empty, u_int *cy)
 			if (available > 0) {
 				if (available > needed)
 					available = needed;
+#ifdef ENABLE_IMAGES
+				for (i = oldy - available; i < oldy; i++) {
+					image_grid_free_line(gd,
+					    &gd->linedata[gd->hsize + i]);
+				}
+#endif
 				grid_view_delete_lines(gd, oldy - available,
 				    available, 8);
 			}
@@ -443,6 +438,12 @@ screen_resize_y(struct screen *s, u_int sy, int eat_empty, u_int *cy)
 			(*cy) -= available;
 		}
 	}
+
+#ifdef ENABLE_IMAGES
+	/* Free any images. */
+	for (i = gd->hsize + sy; i < oldsize; i++)
+		image_grid_free_line(gd, &gd->linedata[i]);
+#endif
 
 	/* Resize line array. */
 	grid_adjust_lines(gd, gd->hsize + sy);
@@ -672,16 +673,12 @@ screen_reflow(struct screen *s, u_int new_x, u_int *cx, u_int *cy, int cursor)
  * Enter alternative screen mode. A copy of the visible screen is saved and the
  * history is not updated.
  */
-void
+int
 screen_alternate_on(struct screen *s, struct grid_cell *gc, int cursor)
 {
 	u_int		 sx, sy;
-#ifdef ENABLE_SIXEL
-	struct image	*im;
-#endif
-
 	if (SCREEN_IS_ALTERNATE(s))
-		return;
+		return 0;
 	sx = screen_size_x(s);
 	sy = screen_size_y(s);
 
@@ -693,27 +690,20 @@ screen_alternate_on(struct screen *s, struct grid_cell *gc, int cursor)
 	}
 	memcpy(&s->saved_cell, gc, sizeof s->saved_cell);
 
-#ifdef ENABLE_SIXEL
-	TAILQ_CONCAT(&s->saved_images, &s->images, entry);
-	TAILQ_FOREACH(im, &s->saved_images, entry)
-	    im->list = &s->saved_images;
-#endif
-
+	grid_free_lines(s->grid, screen_hsize(s), sy);
 	grid_view_clear(s->grid, 0, 0, sx, sy, 8);
 
 	s->saved_flags = s->grid->flags;
 	s->grid->flags &= ~GRID_HISTORY;
+
+	return 1;
 }
 
 /* Exit alternate screen mode and restore the copied grid. */
-void
+int
 screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 {
 	u_int		 sx = screen_size_x(s), sy = screen_size_y(s);
-#ifdef ENABLE_SIXEL
-	struct image	*im;
-#endif
-
 	/*
 	 * If the current size is different, temporarily resize to the old size
 	 * before copying back.
@@ -738,8 +728,12 @@ screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 			s->cx = screen_size_x(s) - 1;
 		if (s->cy > screen_size_y(s) - 1)
 			s->cy = screen_size_y(s) - 1;
-		return;
+		return 0;
 	}
+
+	/* Clamp cursor to the current screen size. */
+	if (s->cy > screen_size_y(s) - 1)
+		s->cy = screen_size_y(s) - 1;
 
 	/* Restore the saved grid. */
 	grid_duplicate_lines(s->grid, screen_hsize(s), s->saved_grid, 0,
@@ -756,17 +750,12 @@ screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 	grid_destroy(s->saved_grid);
 	s->saved_grid = NULL;
 
-#ifdef ENABLE_SIXEL
-	image_free_all(s);
-	TAILQ_CONCAT(&s->images, &s->saved_images, entry);
-	TAILQ_FOREACH(im, &s->images, entry)
-	    im->list = &s->images;
-#endif
-
 	if (s->cx > screen_size_x(s) - 1)
 		s->cx = screen_size_x(s) - 1;
 	if (s->cy > screen_size_y(s) - 1)
 		s->cy = screen_size_y(s) - 1;
+
+	return 1;
 }
 
 /* Get mode as a string. */

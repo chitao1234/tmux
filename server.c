@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: server.c,v 1.217 2026/10/23 06:45:15 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -212,8 +212,14 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	TAILQ_INIT(&clients);
 	RB_INIT(&sessions);
 	key_bindings_init();
+	control_build_events();
+	hooks_build_events();
 	TAILQ_INIT(&message_log);
 	gettimeofday(&start_time, NULL);
+
+#ifdef HAVE_KEYCTL
+	fork_session_keyring();
+#endif
 
 #ifdef HAVE_SYSTEMD
 	server_fd = systemd_create_socket(flags, &cause);
@@ -227,7 +233,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
 #ifdef TMUX_WIN32
-	else if (flags & CLIENT_SPAWNEDSERVER)
+	else if (win32_detached_server)
 		/*
 		 * A detached server is spawned before any client can connect.
 		 * Hold exit-empty for a bounded startup window instead of
@@ -247,6 +253,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	if (cause != NULL) {
 		if (c != NULL) {
 			c->exit_message = cause;
+			c->retval = 1;
 			c->flags |= CLIENT_EXIT;
 		} else {
 			fprintf(stderr, "%s\n", cause);
@@ -266,7 +273,8 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	server_listener = NULL;
 	server_fd = -1;
 	job_kill_all();
-	status_prompt_save_history();
+	prompt_save_history();
+
 	tty_close_log();
 	log_close();
 
@@ -288,6 +296,8 @@ server_loop(void)
 			if (c->flags & CLIENT_IDENTIFIED)
 				items += cmdq_next(c);
 		}
+		TAILQ_FOREACH(c, &dead_clients, entry)
+			items += cmdq_next(c);
 	} while (items != 0);
 
 #ifdef TMUX_WIN32
@@ -483,11 +493,7 @@ server_accept(tmux_event_fd fd, short events, __unused void *data)
 #endif
 		return;
 	}
-#ifdef TMUX_WIN32
 	server_accept_client(newfd);
-#else
-	server_accept_client(newfd);
-#endif
 }
 
 /*
@@ -550,6 +556,10 @@ server_signal(int sig)
 		server_child_signal();
 		break;
 	case SIGUSR1:
+#ifdef HAVE_SYSTEMD
+		if (systemd_activated())
+			break;
+#endif
 		event_del(&server_ev_accept);
 		fd = server_create_socket(server_client_flags, NULL);
 		if (fd != -1) {
@@ -604,6 +614,9 @@ server_child_exited(pid_t pid, int status)
 
 				log_debug("%%%u exited", wp->id);
 				wp->flags |= PANE_EXITED;
+
+				window_pane_wait_finish(wp);
+				spawn_editor_finish(wp);
 
 				if (window_pane_destroy_ready(wp))
 					server_destroy_pane(wp, 1);

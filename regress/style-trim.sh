@@ -1,5 +1,7 @@
 #!/bin/sh
 
+. ./regress-common.inc
+
 PATH=/bin:/usr/bin
 TERM=screen
 
@@ -17,20 +19,25 @@ if command -v bash >/dev/null 2>&1; then
 fi
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -Ltest"
+TMUX="$TEST_TMUX -LtestA$$ -f/dev/null"
 $TMUX kill-server 2>/dev/null
-TMUX2="$TEST_TMUX -Ltest2"
+TMUX2="$TEST_TMUX -LtestB$$ -f/dev/null"
 $TMUX2 kill-server 2>/dev/null
 
 $TMUX2 -f/dev/null new -d "$TMUX -f/dev/null new -- $shell"
-sleep 2
+wait_until $TMUX has-session || exit 1
+wait_for_clients 1 $TMUX || exit 1
 $TMUX set -g status-style fg=default,bg=default
+
+rendered_status() {
+	$TMUX2 capturep -Cep | tail -1 | sed 's|\\033\[||g'
+}
 
 check() {
 	v=$($TMUX display -p "$1")
 	$TMUX set -g status-format[0] "$1"
-	sleep 1
-	r=$($TMUX2 capturep -Cep|tail -1|sed 's|\\033\[||g')
+	wait_for_output "$3" rendered_status || exit 1
+	r=$(rendered_status)
 
 	if [ "$v" != "$2" -o "$r" != "$3" ]; then
 		printf "$1 = [$v = $2] [$r = $3]"

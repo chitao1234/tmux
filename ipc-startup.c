@@ -302,10 +302,14 @@ ipc_client_connect_or_start(struct event_base *base, struct tmuxproc *client,
 		return (-1);
 	if (~flags & CLIENT_STARTSERVER)
 		return (-1);
+	/*
+	 * The coordination lock is an optimisation, not a requirement: if it
+	 * cannot be taken (for example the directory is not writable) carry on
+	 * and let the server report the real error from creating the socket.
+	 */
 	if (ipc_coordination_acquire(endpoint, &coordination, &cause) != 0) {
-		ipc_record_error(cause);
 		ipc_log_and_free_cause(&cause);
-		return (-1);
+		coordination = NULL;
 	}
 
 	fd = ipc_endpoint_connect(endpoint, flags, &cause);
@@ -489,10 +493,42 @@ ipc_endpoint_probe(struct ipc_endpoint *endpoint, uint64_t flags, char **cause)
 }
 
 #ifndef TMUX_WIN32
+/*
+ * The socket directory must be an existing absolute path with no ".." so a
+ * relative or ambiguous TMUX_TMPDIR cannot be used to place the socket
+ * somewhere unexpected.
+ */
+static int
+ipc_check_socket_path(const char *path, char **cause)
+{
+	char	*copy, *next, *tmp;
+
+	if (*path != '/') {
+		if (cause != NULL) {
+			xasprintf(cause, "socket directory %s is not an "
+			    "absolute path", path);
+		}
+		return (0);
+	}
+	copy = tmp = xstrdup(path);
+	while ((next = strsep(&tmp, "/")) != NULL) {
+		if (strcmp(next, "..") == 0) {
+			if (cause != NULL) {
+				xasprintf(cause, "socket directory %s "
+				    "contains ..", path);
+			}
+			free(copy);
+			return (0);
+		}
+	}
+	free(copy);
+	return (1);
+}
+
 static char *
 ipc_default_path_unix(const char *label, char **cause)
 {
-	char		**paths, *path, *base;
+	char		**paths, *path, *base, resolved[PATH_MAX];
 	struct stat	  sb;
 	uid_t		  uid;
 	u_int		  i, n;
@@ -503,16 +539,37 @@ ipc_default_path_unix(const char *label, char **cause)
 		label = "default";
 	uid = getuid();
 
-	expand_paths(TMUX_SOCK, &paths, &n, 0);
-	if (n == 0) {
-		if (cause != NULL)
+	/*
+	 * An unset variable has already been dropped and an empty one is
+	 * skipped, but anything else must be an existing absolute path with no
+	 * ".." or it is an error.
+	 */
+	expand_paths(TMUX_SOCK, &paths, &n, 1);
+	path = NULL;
+	for (i = 0; i < n; i++) {
+		if (*paths[i] == '\0')
+			continue;
+		if (!ipc_check_socket_path(paths[i], cause))
+			break;
+		if (realpath(paths[i], resolved) == NULL) {
+			if (cause != NULL) {
+				xasprintf(cause, "couldn't resolve socket "
+				    "directory %s (%s)", paths[i],
+				    strerror(errno));
+			}
+			break;
+		}
+		path = xstrdup(resolved);
+		break;
+	}
+	for (i = 0; i < n; i++)
+		free(paths[i]);
+	free(paths);
+	if (path == NULL) {
+		if (cause != NULL && *cause == NULL)
 			xasprintf(cause, "no suitable socket path");
 		return (NULL);
 	}
-	path = paths[0];
-	for (i = 1; i < n; i++)
-		free(paths[i]);
-	free(paths);
 
 	xasprintf(&base, "%s/tmux-%ld", path, (long)uid);
 	free(path);

@@ -426,11 +426,6 @@ int		 asprintf(char **, const char *, ...);
 int		 vasprintf(char **, const char *, va_list);
 #endif
 
-#ifndef HAVE_FGETLN
-/* fgetln.c */
-char		*fgetln(FILE *, size_t *);
-#endif
-
 #ifndef HAVE_GETLINE
 /* getline.c */
 ssize_t		 getline(char **, size_t *, FILE *);
@@ -460,6 +455,11 @@ void		*reallocarray(void *, size_t, size_t);
 #ifndef HAVE_RECALLOCARRAY
 /* recallocarray.c */
 void		*recallocarray(void *, size_t, size_t, size_t);
+#endif
+
+#ifdef HAVE_KEYCTL
+/* keyring-linux.c */
+void		 fork_session_keyring(void);
 #endif
 
 #ifdef HAVE_SYSTEMD

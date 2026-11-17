@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: client.c,v 1.169 2026/10/27 08:38:40 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1051,9 +1051,8 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #else
 	enum msgtype		 msg;
 #endif
-	size_t			 size, linesize = 0;
-	ssize_t			 linelen;
-	char			*line = NULL, **caps = NULL, *cause;
+	size_t			 size;
+	char			**caps = NULL, *cause;
 	u_int			 ncaps = 0;
 	struct args_value	*values;
 
@@ -1089,12 +1088,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	proc_set_signals(client_proc, client_signal);
 
 	/* Save the flags. */
-	client_flags = flags;
+	client_flags = flags|CLIENT_WRITE_ACK;
 	log_debug("flags are %#llx", (unsigned long long)client_flags);
 
 	/* Initialize the client socket and start the server. */
 #ifdef TMUX_WIN32
-	if (flags & CLIENT_SPAWNEDSERVER) {
+	if (win32_detached_server) {
 		fd = server_start(client_proc, flags, base, socket_endpoint, NULL);
 	} else
 #endif
@@ -1247,6 +1246,7 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			log_close();
 			return (1);
 		}
+		memcpy(&tio, &saved_tio, sizeof tio);
 		cfmakeraw(&tio);
 		tio.c_iflag = ICRNL|IXANY;
 		tio.c_oflag = OPOST|ONLCR;
@@ -1364,11 +1364,6 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	client_restore_terminal();
 #endif
 
-	/* Restore streams to blocking. */
-	setblocking(STDIN_FILENO, 1);
-	setblocking(STDOUT_FILENO, 1);
-	setblocking(STDERR_FILENO, 1);
-
 	/* Print the exit message, if any, and exit. */
 	if (client_attached) {
 		if (client_exitreason != CLIENT_EXIT_NONE)
@@ -1385,15 +1380,8 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		else
 			printf("%%exit\n");
 		fflush(stdout);
-		if (client_flags & CLIENT_CONTROL_WAITEXIT) {
-			setvbuf(stdin, NULL, _IOLBF, 0);
-			for (;;) {
-				linelen = getline(&line, &linesize, stdin);
-				if (linelen <= 1)
-					break;
-			}
-			free(line);
-		}
+		if (client_flags & CLIENT_CONTROL_WAITEXIT)
+			control_wait_exit(STDIN_FILENO);
 		if (client_flags & CLIENT_CONTROLCONTROL) {
 			printf("\033\\");
 			fflush(stdout);
@@ -1406,6 +1394,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #ifdef TMUX_WIN32
 	free(termname_owned);
 #endif
+
+	/* Restore the streams to blocking. */
+	setblocking(STDIN_FILENO, 1);
+	setblocking(STDOUT_FILENO, 1);
+	setblocking(STDERR_FILENO, 1);
+
 	log_close();
 	return (client_exitval);
 }
@@ -1780,6 +1774,9 @@ client_dispatch_wait(struct imsg *imsg)
 		fprintf(stderr, "server version is too old for client\n");
 		proc_exit(client_proc);
 		break;
+	default:
+		log_debug("unknown message type %u", imsg->hdr.type);
+		break;
 	}
 }
 
@@ -1889,5 +1886,8 @@ client_dispatch_attached(struct imsg *imsg)
 		client_win32_tty_state_dispatch(data, datalen);
 		break;
 #endif
+	default:
+		log_debug("unknown message type %u", imsg->hdr.type);
+		break;
 	}
 }

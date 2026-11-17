@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: sort.c,v 1.12 2026/09/28 10:42:01 nicm Exp $ */
 
 /*
  * Copyright (c) 2026 Dane Jensen <dhcjensen@gmail.com>
@@ -25,14 +25,24 @@
 
 static struct sort_criteria *sort_criteria;
 
+static int
+sort_number_cmp(unsigned long long a, unsigned long long b)
+{
+	if (a < b)
+		return (-1);
+	if (a > b)
+		return (1);
+	return (0);
+}
+
 static void
-sort_qsort(void *l, u_int len, u_int size, int (*cmp)(const void *, const void *),
-    struct sort_criteria *sort_crit)
+sort_qsort(void *l, u_int len, u_int size, int (*cmp)(const void *,
+    const void *), struct sort_criteria *sort_crit)
 {
 	u_int	 i;
 	void	*tmp, **ll;
 
-	if (sort_crit->order == SORT_END)
+	if (len < 2 || sort_crit->order == SORT_END)
 		return;
 
 	if (sort_crit->order == SORT_ORDER) {
@@ -56,8 +66,8 @@ sort_buffer_cmp(const void *a0, const void *b0)
 	struct sort_criteria			*sort_crit = sort_criteria;
 	const struct paste_buffer *const	*a = a0;
 	const struct paste_buffer *const	*b = b0;
-	const struct paste_buffer 		*pa = *a;
-	const struct paste_buffer 		*pb = *b;
+	const struct paste_buffer		*pa = *a;
+	const struct paste_buffer		*pb = *b;
 	int					 result = 0;
 
 	switch (sort_crit->order) {
@@ -65,15 +75,21 @@ sort_buffer_cmp(const void *a0, const void *b0)
 		result = strcmp(pa->name, pb->name);
 		break;
 	case SORT_CREATION:
-		result = pa->order - pb->order;
+		if (pa->order > pb->order)
+			result = -1;
+		else if (pa->order < pb->order)
+			result = 1;
+		else
+			result = 0;
 		break;
 	case SORT_SIZE:
-		result = pa->size - pb->size;
+		result = sort_number_cmp(pa->size, pb->size);
 		break;
 	case SORT_ACTIVITY:
 	case SORT_INDEX:
 	case SORT_MODIFIER:
 	case SORT_ORDER:
+	case SORT_Z:
 	case SORT_END:
 		break;
 	}
@@ -92,8 +108,8 @@ sort_client_cmp(const void *a0, const void *b0)
 	struct sort_criteria		*sort_crit = sort_criteria;
 	const struct client *const	*a = a0;
 	const struct client *const	*b = b0;
-	const struct client 		*ca = *a;
-	const struct client 		*cb = *b;
+	const struct client		*ca = *a;
+	const struct client		*cb = *b;
 	int				 result = 0;
 
 	switch (sort_crit->order) {
@@ -101,9 +117,9 @@ sort_client_cmp(const void *a0, const void *b0)
 		result = strcmp(ca->name, cb->name);
 		break;
 	case SORT_SIZE:
-		result = ca->tty.sx - cb->tty.sx;
+		result = sort_number_cmp(ca->tty.sx, cb->tty.sx);
 		if (result == 0)
-			result = ca->tty.sy - cb->tty.sy;
+			result = sort_number_cmp(ca->tty.sy, cb->tty.sy);
 		break;
 	case SORT_CREATION:
 		if (timercmp(&ca->creation_time, &cb->creation_time, >))
@@ -120,6 +136,7 @@ sort_client_cmp(const void *a0, const void *b0)
 	case SORT_INDEX:
 	case SORT_MODIFIER:
 	case SORT_ORDER:
+	case SORT_Z:
 	case SORT_END:
 		break;
 	}
@@ -144,7 +161,7 @@ sort_session_cmp(const void *a0, const void *b0)
 
 	switch (sort_crit->order) {
 	case SORT_INDEX:
-		result = sa->id - sb->id;
+		result = sort_number_cmp(sa->id, sb->id);
 		break;
 	case SORT_CREATION:
 		if (timercmp(&sa->creation_time, &sb->creation_time, >)) {
@@ -172,6 +189,7 @@ sort_session_cmp(const void *a0, const void *b0)
 	case SORT_MODIFIER:
 	case SORT_ORDER:
 	case SORT_SIZE:
+	case SORT_Z:
 	case SORT_END:
 		break;
 	}
@@ -195,21 +213,26 @@ sort_pane_cmp(const void *a0, const void *b0)
 
 	switch (sort_crit->order) {
 	case SORT_ACTIVITY:
-		result = a->active_point - b->active_point;
+		result = sort_number_cmp(a->active_point, b->active_point);
 		break;
 	case SORT_CREATION:
-		result = a->id - b->id;
+		result = sort_number_cmp(a->id, b->id);
 		break;
 	case SORT_SIZE:
-		result = a->sx * a->sy - b->sx * b->sy;
+		result = sort_number_cmp(a->sx * a->sy, b->sx * b->sy);
 		break;
 	case SORT_INDEX:
 		window_pane_index(a, &ai);
 		window_pane_index(b, &bi);
-		result = ai - bi;
+		result = sort_number_cmp(ai, bi);
 		break;
 	case SORT_NAME:
 		result = strcmp(a->screen->title, b->screen->title);
+		break;
+	case SORT_Z:
+		window_pane_zindex(a, &ai);
+		window_pane_zindex(b, &bi);
+		result = sort_number_cmp(ai, bi);
 		break;
 	case SORT_MODIFIER:
 	case SORT_ORDER:
@@ -243,11 +266,11 @@ sort_winlink_cmp(const void *a0, const void *b0)
 		break;
 	case SORT_CREATION:
 		if (timercmp(&wa->creation_time, &wb->creation_time, >)) {
-			result = -1;
+			result = 1;
 			break;
 		}
 		if (timercmp(&wa->creation_time, &wb->creation_time, <)) {
-			result = 1;
+			result = -1;
 			break;
 		}
 		break;
@@ -265,10 +288,11 @@ sort_winlink_cmp(const void *a0, const void *b0)
 		result = strcmp(wa->name, wb->name);
 		break;
 	case SORT_SIZE:
-		result = wa->sx * wa->sy - wb->sx * wb->sy;
+		result = sort_number_cmp(wa->sx * wa->sy, wb->sx * wb->sy);
 		break;
 	case SORT_MODIFIER:
 	case SORT_ORDER:
+	case SORT_Z:
 	case SORT_END:
 		break;
 	}
@@ -288,28 +312,33 @@ sort_key_binding_cmp(const void *a0, const void *b0)
 	const struct key_binding	*a = *(struct key_binding **)a0;
 	const struct key_binding	*b = *(struct key_binding **)b0;
 	int				 result = 0;
+	key_code			 ak, bk;
 
 	switch (sort_crit->order) {
 	case SORT_INDEX:
-		result = a->key - b->key;
+		result = sort_number_cmp(a->key, b->key);
 		break;
 	case SORT_MODIFIER:
-		result = (a->key & KEYC_MASK_MODIFIERS) -
-		    (b->key & KEYC_MASK_MODIFIERS);
+		ak = (a->key & KEYC_MASK_MODIFIERS);
+		bk = (b->key & KEYC_MASK_MODIFIERS);
+		result = sort_number_cmp(ak, bk);
 		break;
 	case SORT_NAME:
-		result = strcasecmp(a->tablename, b->tablename) == 0;
+		result = strcasecmp(a->tablename, b->tablename);
 		break;
 	case SORT_ACTIVITY:
 	case SORT_CREATION:
 	case SORT_ORDER:
 	case SORT_SIZE:
+	case SORT_Z:
 	case SORT_END:
 		break;
 	}
 
 	if (result == 0)
-		result = strcasecmp(a->tablename, b->tablename) == 0;
+		result = strcasecmp(a->tablename, b->tablename);
+	if (result == 0)
+		result = sort_number_cmp(a->key, b->key);
 
 	if (sort_crit->reversed)
 		result = -result;
@@ -358,6 +387,8 @@ sort_order_from_string(const char* order)
 			return (SORT_ORDER);
 		if (strcasecmp(order, "size") == 0)
 			return (SORT_SIZE);
+		if (strcasecmp(order, "z") == 0)
+			return (SORT_Z);
 	}
 	return (SORT_END);
 }
@@ -379,6 +410,8 @@ sort_order_to_string(enum sort_order order)
 		return "order";
 	if (order == SORT_SIZE)
 		return "size";
+	if (order == SORT_Z)
+		return "z";
 	return (NULL);
 }
 
@@ -425,6 +458,10 @@ sort_get_clients(u_int *n, struct sort_criteria *sort_crit)
 
 	i = 0;
 	TAILQ_FOREACH(c, &clients, entry) {
+		if (c->flags & CLIENT_UNATTACHEDFLAGS)
+			continue;
+		if (~c->flags & CLIENT_ATTACHED)
+			continue;
 		if (lsz <= i) {
 			lsz += 100;
 			l = xreallocarray(l, lsz, sizeof *l);
@@ -468,7 +505,7 @@ sort_get_panes(u_int *n, struct sort_criteria *sort_crit)
 	struct winlink			 *wl;
 	struct window			 *w;
 	struct window_pane		 *wp;
-	u_int		 		  i;
+	u_int				  i;
 	static struct window_pane	**l = NULL;
 	static u_int			  lsz = 0;
 
@@ -499,7 +536,7 @@ sort_get_panes_session(struct session *s, u_int *n,
 	struct winlink			 *wl = NULL;
 	struct window			 *w = NULL;
 	struct window_pane		 *wp = NULL;
-	u_int		 		  i;
+	u_int				  i;
 	static struct window_pane	**l = NULL;
 	static u_int			  lsz = 0;
 
@@ -526,7 +563,7 @@ sort_get_panes_window(struct window *w, u_int *n,
     struct sort_criteria *sort_crit)
 {
 	struct window_pane		 *wp;
-	u_int		 		  i;
+	u_int				  i;
 	static struct window_pane	**l = NULL;
 	static u_int			  lsz = 0;
 

@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: hyperlinks.c,v 1.8 2026/11/13 09:58:45 nicm Exp $ */
 
 /*
  * Copyright (c) 2021 Will <author@will.party>
@@ -31,6 +31,7 @@
  *
  * Each hyperlink and ID combination is assigned a number ("inner" in this
  * file) which is stored in an extended grid cell and maps into a tree here.
+ * Numbers are shared by all screens and are not reused.
  *
  * Each URI has one inner number and one external ID (which tmux uses to send
  * the hyperlink to the terminal) and one internal ID (which is received from
@@ -42,7 +43,7 @@
 
 #define MAX_HYPERLINKS 5000
 
-static long long hyperlinks_next_external_id = 1;
+static u_int hyperlinks_next_inner = 1;
 static u_int global_hyperlinks_count;
 
 struct hyperlinks_uri {
@@ -65,7 +66,6 @@ static struct hyperlinks_list global_hyperlinks =
     TAILQ_HEAD_INITIALIZER(global_hyperlinks);
 
 struct hyperlinks {
-	u_int				next_inner;
 	struct hyperlinks_by_inner_tree	by_inner;
 	struct hyperlinks_by_uri_tree	by_uri;
 	u_int				references;
@@ -86,7 +86,11 @@ hyperlinks_by_uri_cmp(struct hyperlinks_uri *left, struct hyperlinks_uri *right)
 			return (-1);
 		if (*right->internal_id != '\0')
 			return (1);
-		return (left->inner - right->inner);
+		if (left->inner < right->inner)
+			return (-1);
+		if (left->inner > right->inner)
+			return (1);
+		return (0);
 	}
 
 	r = strcmp(left->internal_id, right->internal_id);
@@ -103,7 +107,11 @@ static int
 hyperlinks_by_inner_cmp(struct hyperlinks_uri *left,
     struct hyperlinks_uri *right)
 {
-	return (left->inner - right->inner);
+	if (left->inner < right->inner)
+		return (-1);
+	if (left->inner > right->inner)
+		return (1);
+	return (0);
 }
 RB_PROTOTYPE_STATIC(hyperlinks_by_inner_tree, hyperlinks_uri, by_inner_entry,
     hyperlinks_by_inner_cmp);
@@ -145,9 +153,13 @@ hyperlinks_put(struct hyperlinks *hl, const char *uri_in,
 		internal_id_in = "";
 
 	utf8_stravis(&uri, uri_in, VIS_OCTAL|VIS_CSTYLE);
-	utf8_stravis(&internal_id, internal_id_in, VIS_OCTAL|VIS_CSTYLE);
+	if (strlen(uri) > MAX_HYPERLINK_URI) {
+		free(uri);
+		return (0);
+	}
 
-	if (*internal_id_in != '\0') {
+	utf8_stravis(&internal_id, internal_id_in, VIS_OCTAL|VIS_CSTYLE);
+	if (*internal_id != '\0') {
 		find.uri = uri;
 		find.internal_id = internal_id;
 
@@ -158,10 +170,16 @@ hyperlinks_put(struct hyperlinks *hl, const char *uri_in,
 			return (hlu->inner);
 		}
 	}
-	xasprintf(&external_id, "tmux%llX", hyperlinks_next_external_id++);
+
+	if (hyperlinks_next_inner == 0) {
+		free(uri);
+		free(internal_id);
+		return (0);
+	}
 
 	hlu = xcalloc(1, sizeof *hlu);
-	hlu->inner = hl->next_inner++;
+	hlu->inner = hyperlinks_next_inner++;
+	xasprintf(&external_id, "tmux%X", hlu->inner);
 	hlu->internal_id = internal_id;
 	hlu->external_id = external_id;
 	hlu->uri = uri;
@@ -203,7 +221,6 @@ hyperlinks_init(void)
 	struct hyperlinks	*hl;
 
 	hl = xcalloc(1, sizeof *hl);
-	hl->next_inner = 1;
 	RB_INIT(&hl->by_uri);
 	RB_INIT(&hl->by_inner);
 	hl->references = 1;

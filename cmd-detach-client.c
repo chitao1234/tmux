@@ -1,4 +1,4 @@
-/* $OpenBSD$ */
+/* $OpenBSD: cmd-detach-client.c,v 1.40 2026/10/09 13:12:14 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -31,6 +31,7 @@ static enum cmd_retval	cmd_detach_client_exec(struct cmd *,
 
 const struct cmd_entry cmd_detach_client_entry = {
 	.name = "detach-client",
+	.description = "Detach one or more clients.",
 	.alias = "detach",
 
 	.args = { "aE:s:t:P", 0, 0, NULL },
@@ -45,6 +46,7 @@ const struct cmd_entry cmd_detach_client_entry = {
 
 const struct cmd_entry cmd_suspend_client_entry = {
 	.name = "suspend-client",
+	.description = "Suspend a client.",
 	.alias = "suspendc",
 
 	.args = { "t:", 0, 0, NULL },
@@ -59,6 +61,7 @@ cmd_detach_client_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = cmd_get_args(self);
 	struct cmd_find_state	*source = cmdq_get_source(item);
+	struct client		*c = cmdq_get_client(item);
 	struct client		*tc = cmdq_get_target_client(item), *loop;
 	struct session		*s;
 	enum msgtype		 msgtype;
@@ -67,6 +70,13 @@ cmd_detach_client_exec(struct cmd *self, struct cmdq_item *item)
 	if (cmd_get_entry(self) == &cmd_suspend_client_entry) {
 		server_client_suspend(tc);
 		return (CMD_RETURN_NORMAL);
+	}
+
+	if (c->flags & CLIENT_READONLY) {
+		if (args_has(args, 's') || args_has(args, 'a') || c != tc) {
+			cmdq_error(item, "client is read-only");
+			return (CMD_RETURN_ERROR);
+		}
 	}
 
 	if (args_has(args, 'P'))
