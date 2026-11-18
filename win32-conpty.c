@@ -128,6 +128,31 @@ static void	win32_pane_close_source(struct win32_pane *);
 static void	win32_job_close_input(struct win32_job *);
 static void	win32_job_close_source(struct win32_job *);
 
+/*
+ * libevent freezes the front of every bufferevent's output evbuffer, so a
+ * plain evbuffer_drain() on it is refused with -1 and removes nothing.
+ *
+ * The Windows job code hangs an fd -1 bufferevent off each child purely as a
+ * byte queue (the pipe has its own writer), and drains that queue by hand
+ * after copying bytes into the writer. That drain needs the front unfrozen,
+ * the same thing libevent does around its own write event.
+ *
+ * Doing this wrong is not a soft failure: job_write() reported success while
+ * nothing was removed, so the flush loop rewrote the same bytes until the
+ * writer queue reached its 1 MB high-water mark. One byte of pane output
+ * became about a megabyte on the pipe.
+ */
+static int
+win32_evbuffer_drain_queue(struct evbuffer *evb, size_t size)
+{
+	int	ret;
+
+	evbuffer_unfreeze(evb, 1);
+	ret = evbuffer_drain(evb, size);
+	evbuffer_freeze(evb, 1);
+	return (ret);
+}
+
 static int
 win32_make_pipe_flags(HANDLE *readp, HANDLE *writep, int inherit_read,
     int inherit_write, DWORD read_flags, DWORD write_flags)
@@ -925,7 +950,16 @@ win32_pane_flush_input(struct window_pane *wp)
 		    EVBUFFER_DATA(evb), nwrite);
 		if (written <= 0)
 			return (-1);
-		evbuffer_drain(evb, written);
+		if (evbuffer_drain(evb, written) != 0 ||
+		    EVBUFFER_LENGTH(evb) == available) {
+			/*
+			 * The queue did not shrink, so writing again would
+			 * duplicate these bytes. Never loop on that.
+			 */
+			log_debug("%s: %%%u input queue would not drain",
+			    __func__, wp->id);
+			return (-1);
+		}
 	}
 }
 
@@ -1015,9 +1049,11 @@ win32_job_close_source(struct win32_job *wj)
 static void
 win32_job_close_input(struct win32_job *wj)
 {
-	if (wj->event != NULL)
-		evbuffer_drain(wj->event->output,
-		    EVBUFFER_LENGTH(wj->event->output));
+	if (wj->event != NULL &&
+	    win32_evbuffer_drain_queue(wj->event->output,
+	    EVBUFFER_LENGTH(wj->event->output)) != 0) {
+		log_debug("%s: couldn't clear job input queue", __func__);
+	}
 	if (wj->stdin_writer != NULL) {
 		win32_io_endpoint_free(wj->stdin_writer);
 		wj->stdin_writer = NULL;
@@ -1059,7 +1095,17 @@ win32_job_flush_input(struct win32_job *wj)
 		    EVBUFFER_DATA(evb), nwrite);
 		if (written <= 0)
 			return (-1);
-		evbuffer_drain(evb, written);
+		if (win32_evbuffer_drain_queue(evb, written) != 0 ||
+		    EVBUFFER_LENGTH(evb) == available) {
+			/*
+			 * Without this the loop would rewrite the same bytes
+			 * to the child forever: job_write() looked successful
+			 * while nothing was removed.
+			 */
+			log_debug("%s: job input queue would not drain",
+			    __func__);
+			return (-1);
+		}
 	}
 }
 
@@ -1699,9 +1745,11 @@ win32_job_write_error_cb(void *arg)
 	 * output reader.
 	 */
 	wj->stdin_closing = 1;
-	if (wj->event != NULL)
-		evbuffer_drain(wj->event->output,
-		    EVBUFFER_LENGTH(wj->event->output));
+	if (wj->event != NULL &&
+	    win32_evbuffer_drain_queue(wj->event->output,
+	    EVBUFFER_LENGTH(wj->event->output)) != 0) {
+		log_debug("%s: couldn't clear job input queue", __func__);
+	}
 	if (wj->event != NULL && wj->event->writecb != NULL)
 		wj->event->writecb(wj->event, wj->event->cbarg);
 }
