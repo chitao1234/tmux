@@ -1144,10 +1144,10 @@ win32_pane_output_event_cb(void *arg, uint32_t events)
 
 	if (events & WIN32_IO_EVENT_READ)
 		win32_pane_drain(wp);
-	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED))
+	if (!(events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED)))
 		return;
-	if (~events & WIN32_IO_EVENT_READ)
+	if (!(events & WIN32_IO_EVENT_READ))
 		win32_pane_drain(wp);
 	if (events & WIN32_IO_EVENT_ERROR) {
 		log_debug("%%%u output read error", wp->id);
@@ -1701,10 +1701,10 @@ win32_job_output_event_cb(void *arg, uint32_t events)
 
 	if (events & WIN32_IO_EVENT_READ)
 		win32_job_read_event(wj);
-	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED))
+	if (!(events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED)))
 		return;
-	if (~events & WIN32_IO_EVENT_READ)
+	if (!(events & WIN32_IO_EVENT_READ))
 		win32_job_read_event(wj);
 	if (events & WIN32_IO_EVENT_ERROR) {
 		log_debug("job output read error, pid %ld",

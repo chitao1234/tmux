@@ -649,8 +649,8 @@ client_win32_input_event_callback(void *arg, uint32_t events)
 {
 	if (events & WIN32_IO_EVENT_READ)
 		client_win32_input_callback(arg);
-	if (~events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
-	    WIN32_IO_EVENT_CANCELED))
+	if (!(events & (WIN32_IO_EVENT_READ_EOF|WIN32_IO_EVENT_ERROR|
+	    WIN32_IO_EVENT_CANCELED)))
 		return;
 	log_debug("%s: console input closed", __func__);
 	if (client_attached)
