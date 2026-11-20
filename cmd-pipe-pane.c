@@ -321,8 +321,16 @@ cmd_pipe_pane_job_update1(struct job *job, int allow_pause)
 
 	log_debug("%%%u pipe job read %zu", wp->id, available);
 	if (available != 0) {
-		if (!win32_pane_input_ready(wp) ||
-		    win32_pane_write(wp, EVBUFFER_DATA(evb), available) != 0) {
+		/*
+		 * win32_pane_write() does the readiness checks itself and reports
+		 * why it refused: EPIPE when the pane or its writer is gone,
+		 * EAGAIN for backpressure. Testing readiness separately loses
+		 * that reason and leaves errno stale, which made backpressure look
+		 * terminal and dropped the helper's output. It also returns the
+		 * byte count on success, so anything but a negative result worked.
+		 */
+		if (window_pane_exited(wp) ||
+		    win32_pane_write(wp, EVBUFFER_DATA(evb), available) < 0) {
 			/*
 			 * A dead pane is terminal, not backpressure: drop the
 			 * remaining helper output and stop reading instead of
