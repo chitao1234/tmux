@@ -137,6 +137,12 @@ writev(int fd, const struct iovec *iov, int iovcnt)
 	return (total);
 }
 
+/* The handle's IOCP key is shared by duplex reads and writes. */
+struct win32_io_operation {
+	OVERLAPPED		 overlapped;
+	struct win32_io_endpoint *endpoint;
+};
+
 struct win32_handle_event {
 	struct win32_io_endpoint endpoint;
 	TAILQ_ENTRY(win32_handle_event) console_entry;
@@ -146,7 +152,7 @@ struct win32_handle_event {
 	HANDLE		 ready;
 	HANDLE		 changed;
 	HANDLE		 complete;
-	OVERLAPPED	 overlapped;
+	struct win32_io_operation operation;
 	char		 iocp_buf[65536];
 	struct evbuffer	*input;
 	CRITICAL_SECTION lock;
@@ -156,6 +162,7 @@ struct win32_handle_event {
 	int		 pending;
 	int		 paused;
 	int		 stopping;
+	int		 destroy_pending;
 	int		 throttled;
 	int		 console_queued;
 	int		 console_active;
@@ -171,7 +178,7 @@ struct win32_handle_writer {
 	HANDLE		 thread;
 	HANDLE		 ready;
 	HANDLE		 complete;
-	OVERLAPPED	 overlapped;
+	struct win32_io_operation operation;
 	char		*iocp_buf;
 	size_t		 iocp_size;
 	struct evbuffer	*output;
@@ -184,6 +191,7 @@ struct win32_handle_writer {
 	int		 pending;
 	int		 borrowed;
 	int		 stop;
+	int		 destroy_pending;
 	int		 console_queued;
 	int		 console_active;
 	size_t		 write_progress;
@@ -241,7 +249,6 @@ static struct win32_console_reader_service win32_console_reader;
 #define WIN32_HANDLE_WRITER_HIGH (1024 * 1024)
 #define WIN32_HANDLE_WRITER_CHUNK (256 * 1024)
 #define WIN32_WORKER_STOP_TIMEOUT 1000
-#define WIN32_IOCP_STOP_TIMEOUT 1000
 #define WIN32_IOCP_SERVICE_STOP_TIMEOUT 1000
 #define WIN32_CONSOLE_WRITER_STOP_TIMEOUT 1000
 #define WIN32_CONSOLE_READER_STOP_TIMEOUT 1000
@@ -269,7 +276,6 @@ static void	win32_io_service_cb(evutil_socket_t, short, void *);
 static void	win32_io_service_dispatch_endpoint(
 		     struct win32_io_endpoint *, uint32_t);
 static int	win32_wait_worker_thread(HANDLE, const char *);
-static int	win32_wait_iocp_endpoint(HANDLE, const char *);
 static int	win32_wait_iocp_thread(HANDLE, const char *);
 static int	win32_wait_console_endpoint(HANDLE, const char *);
 static int	win32_wait_console_thread(HANDLE, const char *);
@@ -322,7 +328,9 @@ static void	win32_handle_writer_iocp_complete(
 		     struct win32_handle_writer *, DWORD, DWORD);
 static int	win32_handle_event_error_is_eof(DWORD);
 static void	win32_handle_event_free(struct win32_handle_event *);
+static void	win32_handle_event_destroy(struct win32_handle_event *);
 static void	win32_handle_writer_free(struct win32_handle_writer *);
+static void	win32_handle_writer_destroy(struct win32_handle_writer *);
 static void	win32_process_event_free(struct win32_process_event *);
 static int	win32_console_handle(HANDLE);
 static int	win32_handle_write_file(HANDLE, const void *, size_t, DWORD *);
@@ -642,6 +650,7 @@ static DWORD WINAPI
 win32_io_service_iocp_thread(__unused void *arg)
 {
 	struct win32_io_endpoint		*endpoint;
+	struct win32_io_operation	*operation;
 	OVERLAPPED			*overlapped;
 	DWORD				 transferred, error;
 	ULONG_PTR			 key;
@@ -655,7 +664,9 @@ win32_io_service_iocp_thread(__unused void *arg)
 			break;
 		if (overlapped == NULL || key == 0)
 			continue;
-		endpoint = (struct win32_io_endpoint *)key;
+		operation = CONTAINING_RECORD(overlapped,
+		    struct win32_io_operation, overlapped);
+		endpoint = operation->endpoint;
 		if (endpoint->type == WIN32_IO_ENDPOINT_READER) {
 			win32_handle_event_iocp_complete(endpoint->owner,
 			    error, transferred);
@@ -821,21 +832,6 @@ win32_wait_worker_thread(HANDLE thread, const char *name)
 		return (0);
 	log_debug("%s: worker thread did not stop within %u ms",
 	    name, WIN32_WORKER_STOP_TIMEOUT);
-	return (-1);
-}
-
-static int
-win32_wait_iocp_endpoint(HANDLE complete, const char *name)
-{
-	DWORD	wait;
-
-	if (complete == NULL)
-		return (0);
-	wait = WaitForSingleObject(complete, WIN32_IOCP_STOP_TIMEOUT);
-	if (wait == WAIT_OBJECT_0)
-		return (0);
-	log_debug("%s: IOCP endpoint did not stop within %u ms",
-	    name, WIN32_IOCP_STOP_TIMEOUT);
 	return (-1);
 }
 
@@ -1177,15 +1173,15 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 	    whe->state != WIN32_HANDLE_EVENT_RUNNING)
 		return (0);
 
-	memset(&whe->overlapped, 0, sizeof whe->overlapped);
+	memset(&whe->operation.overlapped, 0,
+	    sizeof whe->operation.overlapped);
 	if (whe->use_offset) {
-		whe->overlapped.Offset = (DWORD)(whe->offset & 0xffffffff);
-		whe->overlapped.OffsetHigh = (DWORD)(whe->offset >> 32);
+		whe->operation.overlapped.Offset = (DWORD)whe->offset;
+		whe->operation.overlapped.OffsetHigh = (DWORD)(whe->offset >> 32);
 	}
-	ResetEvent(whe->complete);
 	whe->pending = 1;
 	if (ReadFile(whe->handle, whe->iocp_buf, sizeof whe->iocp_buf, &nread,
-	    &whe->overlapped))
+	    &whe->operation.overlapped))
 		return (0);
 	error = GetLastError();
 	if (error == ERROR_IO_PENDING)
@@ -1200,7 +1196,7 @@ win32_handle_event_iocp_start(struct win32_handle_event *whe)
 		events = WIN32_IO_EVENT_ERROR;
 	}
 	whe->error = error;
-	/* The caller holds the lock and signals whe->complete afterwards. */
+	/* This failure did not queue an IOCP completion. */
 	return (events);
 }
 
@@ -1210,7 +1206,7 @@ win32_handle_event_iocp_complete(struct win32_handle_event *whe, DWORD error,
 {
 	enum win32_handle_event_state	 state;
 	uint32_t			 events = 0;
-	int				 complete = 0;
+	int				 destroy;
 
 	EnterCriticalSection(&whe->lock);
 	if (whe->pending)
@@ -1255,15 +1251,10 @@ out:
 		events |= win32_handle_event_iocp_start(whe);
 	if (events != 0)
 		win32_io_service_enqueue_endpoint(&whe->endpoint, events);
-	if (!whe->pending)
-		complete = 1;
+	destroy = whe->destroy_pending;
 	LeaveCriticalSection(&whe->lock);
-	/*
-	 * Signal only after dropping the lock: the free path waits on this
-	 * event and may delete the lock and free the object right after.
-	 */
-	if (complete)
-		SetEvent(whe->complete);
+	if (destroy)
+		win32_handle_event_destroy(whe);
 }
 
 static int
@@ -2182,17 +2173,12 @@ win32_io_reader_new_iocp(HANDLE handle, uint64_t offset, int use_offset,
 		free(whe);
 		return (NULL);
 	}
-	whe->complete = CreateEventW(NULL, TRUE, TRUE, NULL);
-	if (whe->complete == NULL) {
-		evbuffer_free(whe->input);
-		free(whe);
-		return (NULL);
-	}
 	InitializeCriticalSection(&whe->lock);
 	win32_io_endpoint_init(&whe->endpoint, WIN32_IO_ENDPOINT_READER, whe,
 	    eventcb, arg);
+	whe->operation.endpoint = &whe->endpoint;
 	if (CreateIoCompletionPort(handle, win32_io.iocp,
-	    (ULONG_PTR)&whe->endpoint, 0) == NULL) {
+	    1, 0) == NULL) {
 		win32_handle_event_free(whe);
 		return (NULL);
 	}
@@ -2224,23 +2210,17 @@ win32_handle_event_free(struct win32_handle_event *whe)
 	if (whe == NULL)
 		return;
 	if (whe->backend == WIN32_HANDLE_EVENT_IOCP) {
+		win32_io_service_deactivate_endpoint(&whe->endpoint);
 		EnterCriticalSection(&whe->lock);
 		whe->stopping = 1;
 		if (whe->pending) {
-			ResetEvent(whe->complete);
-			CancelIoEx(whe->handle, &whe->overlapped);
-		}
-		LeaveCriticalSection(&whe->lock);
-		/*
-		 * Only wait when an overlapped read is outstanding; with none
-		 * there is no completion to wait for and the wait would always
-		 * time out.
-		 */
-		if (whe->pending &&
-		    win32_wait_iocp_endpoint(whe->complete, __func__) != 0) {
-			win32_io_service_abandon_endpoint(&whe->endpoint);
+			/* The completion owns the remaining backend lifetime. */
+			whe->destroy_pending = 1;
+			CancelIoEx(whe->handle, &whe->operation.overlapped);
+			LeaveCriticalSection(&whe->lock);
 			return;
 		}
+		LeaveCriticalSection(&whe->lock);
 	} else if (whe->backend == WIN32_HANDLE_EVENT_CONSOLE) {
 		EnterCriticalSection(&win32_console_reader.lock);
 		EnterCriticalSection(&whe->lock);
@@ -2272,6 +2252,12 @@ win32_handle_event_free(struct win32_handle_event *whe)
 		}
 	}
 	win32_io_service_deactivate_endpoint(&whe->endpoint);
+	win32_handle_event_destroy(whe);
+}
+
+static void
+win32_handle_event_destroy(struct win32_handle_event *whe)
+{
 	if (whe->input != NULL)
 		evbuffer_free(whe->input);
 	if (whe->thread != NULL)
@@ -2523,18 +2509,19 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 		size = WIN32_HANDLE_WRITER_CHUNK;
 	memcpy(whw->iocp_buf, EVBUFFER_DATA(whw->output), size);
 
-	memset(&whw->overlapped, 0, sizeof whw->overlapped);
+	memset(&whw->operation.overlapped, 0,
+	    sizeof whw->operation.overlapped);
 	if (whw->append) {
-		whw->overlapped.Offset = 0xffffffff;
-		whw->overlapped.OffsetHigh = 0xffffffff;
+		whw->operation.overlapped.Offset = 0xffffffff;
+		whw->operation.overlapped.OffsetHigh = 0xffffffff;
 	} else if (whw->use_offset) {
-		whw->overlapped.Offset = (DWORD)(whw->offset & 0xffffffff);
-		whw->overlapped.OffsetHigh = (DWORD)(whw->offset >> 32);
+		whw->operation.overlapped.Offset = (DWORD)whw->offset;
+		whw->operation.overlapped.OffsetHigh = (DWORD)(whw->offset >> 32);
 	}
-	ResetEvent(whw->complete);
 	whw->iocp_size = size;
 	whw->pending = 1;
-	if (WriteFile(whw->handle, whw->iocp_buf, size, NULL, &whw->overlapped))
+	if (WriteFile(whw->handle, whw->iocp_buf, size, NULL,
+	    &whw->operation.overlapped))
 		return (0);
 
 	error = GetLastError();
@@ -2547,7 +2534,7 @@ win32_handle_writer_iocp_start(struct win32_handle_writer *whw)
 	if (!whw->borrowed)
 		CloseHandle(whw->handle);
 	whw->handle = NULL;
-	/* The caller holds the lock and signals whw->complete afterwards. */
+	/* This failure did not queue an IOCP completion. */
 	return (WIN32_IO_EVENT_ERROR);
 }
 
@@ -2556,7 +2543,7 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
     DWORD error, DWORD nwritten)
 {
 	uint32_t	events = 0;
-	int		complete = 0;
+	int		destroy;
 
 	EnterCriticalSection(&whw->lock);
 	if (whw->pending)
@@ -2590,12 +2577,10 @@ win32_handle_writer_iocp_complete(struct win32_handle_writer *whw,
 out:
 	if (events != 0)
 		win32_io_service_enqueue_endpoint(&whw->endpoint, events);
-	if (!whw->pending)
-		complete = 1;
+	destroy = whw->destroy_pending;
 	LeaveCriticalSection(&whw->lock);
-	/* See win32_handle_event_iocp_complete: signal after unlocking. */
-	if (complete)
-		SetEvent(whw->complete);
+	if (destroy)
+		win32_handle_writer_destroy(whw);
 }
 
 static struct win32_handle_writer *
@@ -2658,7 +2643,8 @@ fail:
 
 static struct win32_handle_writer *
 win32_handle_writer_new_iocp(HANDLE *handle, uint64_t offset, int use_offset,
-    int append, void (*eventcb)(void *, uint32_t), void *arg, int borrowed)
+    int append, void (*eventcb)(void *, uint32_t), void *arg, int borrowed,
+    int associated)
 {
 	struct win32_handle_writer	*whw;
 	uint32_t			 events;
@@ -2684,20 +2670,13 @@ win32_handle_writer_new_iocp(HANDLE *handle, uint64_t offset, int use_offset,
 		free(whw);
 		return (NULL);
 	}
-	whw->complete = CreateEventW(NULL, TRUE, TRUE, NULL);
-	if (whw->complete == NULL) {
-		free(whw->iocp_buf);
-		evbuffer_free(whw->output);
-		free(whw);
-		return (NULL);
-	}
 	InitializeCriticalSection(&whw->lock);
 	win32_io_endpoint_init(&whw->endpoint, WIN32_IO_ENDPOINT_WRITER, whw,
 	    eventcb, arg);
-	if (CreateIoCompletionPort(*handle, win32_io.iocp,
-	    (ULONG_PTR)&whw->endpoint, 0) == NULL) {
+	whw->operation.endpoint = &whw->endpoint;
+	if (!associated && CreateIoCompletionPort(*handle, win32_io.iocp,
+	    1, 0) == NULL) {
 		DeleteCriticalSection(&whw->lock);
-		CloseHandle(whw->complete);
 		free(whw->iocp_buf);
 		evbuffer_free(whw->output);
 		free(whw);
@@ -2719,7 +2698,20 @@ win32_io_writer_new_overlapped(HANDLE *handle,
 {
 	struct win32_handle_writer	*whw;
 
-	whw = win32_handle_writer_new_iocp(handle, 0, 0, 0, eventcb, arg, 0);
+	whw = win32_handle_writer_new_iocp(handle, 0, 0, 0, eventcb, arg, 0, 0);
+	if (whw == NULL)
+		return (NULL);
+	return (&whw->endpoint);
+}
+
+struct win32_io_endpoint *
+win32_io_writer_new_overlapped_borrowed(HANDLE *handle,
+    void (*eventcb)(void *, uint32_t), void *arg)
+{
+	struct win32_handle_writer	*whw;
+
+	/* The duplex handle was associated with our IOCP by its reader. */
+	whw = win32_handle_writer_new_iocp(handle, 0, 0, 0, eventcb, arg, 1, 1);
 	if (whw == NULL)
 		return (NULL);
 	return (&whw->endpoint);
@@ -2733,7 +2725,7 @@ win32_io_writer_new_file_borrowed(HANDLE *handle, uint64_t offset, int append,
 
 	whw = win32_handle_writer_new_iocp(handle, offset, 1, append,
 	    eventcb, arg,
-	    1);
+	    1, 0);
 	if (whw == NULL)
 		return (NULL);
 	return (&whw->endpoint);
@@ -2798,10 +2790,15 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 	if (whw == NULL)
 		return;
 	if (whw->backend == WIN32_HANDLE_WRITER_IOCP) {
+		win32_io_service_deactivate_endpoint(&whw->endpoint);
 		EnterCriticalSection(&whw->lock);
 		whw->stop = 1;
-		if (whw->pending)
-			CancelIoEx(whw->handle, &whw->overlapped);
+		if (whw->pending) {
+			whw->destroy_pending = 1;
+			CancelIoEx(whw->handle, &whw->operation.overlapped);
+			LeaveCriticalSection(&whw->lock);
+			return;
+		}
 		LeaveCriticalSection(&whw->lock);
 	} else if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE) {
 		EnterCriticalSection(&win32_console_writer.lock);
@@ -2817,11 +2814,6 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 		SetEvent(whw->ready);
 		LeaveCriticalSection(&whw->lock);
 	}
-	if (whw->backend == WIN32_HANDLE_WRITER_IOCP &&
-	    win32_wait_iocp_endpoint(whw->complete, __func__) != 0) {
-		win32_io_service_abandon_endpoint(&whw->endpoint);
-		return;
-	}
 	if (whw->backend == WIN32_HANDLE_WRITER_CONSOLE &&
 	    win32_wait_console_endpoint(whw->complete, __func__) != 0) {
 		win32_io_service_abandon_endpoint(&whw->endpoint);
@@ -2835,6 +2827,12 @@ win32_handle_writer_free(struct win32_handle_writer *whw)
 		}
 	}
 	win32_io_service_deactivate_endpoint(&whw->endpoint);
+	win32_handle_writer_destroy(whw);
+}
+
+static void
+win32_handle_writer_destroy(struct win32_handle_writer *whw)
+{
 	if (whw->handle != NULL && !whw->borrowed)
 		CloseHandle(whw->handle);
 	if (whw->thread != NULL)

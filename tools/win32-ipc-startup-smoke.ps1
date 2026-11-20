@@ -72,7 +72,7 @@ function Invoke-Tmux {
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.Arguments = Join-Win32Arguments $Arguments
+    $psi.Arguments = Join-Win32Arguments (@('-f', $script:ConfigPath) + $Arguments)
 
     foreach ($entry in $Environment.GetEnumerator()) {
         $psi.Environment[$entry.Key] = $entry.Value
@@ -123,7 +123,7 @@ function Start-TmuxProcess {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.Arguments = Join-Win32Arguments $Arguments
+    $psi.Arguments = Join-Win32Arguments (@('-f', $script:ConfigPath) + $Arguments)
     $null = $psi.Environment.Remove("TMUX")
 
     $process = [System.Diagnostics.Process]::Start($psi)
@@ -494,7 +494,7 @@ function Test-ExplicitMissingParentStartup {
     $resolved = ($socketResult.Output | Select-Object -Last 1).Trim()
 
     Assert-True (Test-ComparablePathEquals $resolved $socketPath) "resolved socket path '$resolved' did not match expected '$socketPath'"
-    Assert-True (Test-Path -LiteralPath $socketPath) "explicit missing-parent startup did not create socket path: $socketPath"
+    Assert-True (-not (Test-Path -LiteralPath $socketPath)) "named-pipe startup created a filesystem endpoint: $socketPath"
 
     Invoke-Tmux -Arguments @("-S", $socketPath, "kill-server") | Out-Null
     Assert-True (-not (Test-Path -LiteralPath ($socketPath + ".lock"))) "explicit missing-parent startup left a .lock file: $socketPath.lock"
@@ -511,7 +511,7 @@ function Test-ExplicitLocalAppDataStartup {
         $resolved = ($socketResult.Output | Select-Object -Last 1).Trim()
 
         Assert-True (Test-ComparablePathEquals $resolved $socketPath) "resolved socket path '$resolved' did not match expected '$socketPath'"
-        Assert-True (Test-Path -LiteralPath $socketPath) "explicit LOCALAPPDATA startup did not create socket path: $socketPath"
+        Assert-True (-not (Test-Path -LiteralPath $socketPath)) "named-pipe startup created a filesystem endpoint: $socketPath"
 
         Invoke-Tmux -Arguments @("-S", $socketPath, "kill-server") | Out-Null
         Assert-True (-not (Test-Path -LiteralPath ($socketPath + ".lock"))) "explicit LOCALAPPDATA startup left a .lock file: $socketPath.lock"
@@ -604,7 +604,7 @@ function Test-StaleForegroundStartup {
         $socketPath
     )
 
-    & $script:TmuxPath -D -S $socketPath
+    & $script:TmuxPath -f $script:ConfigPath -D -S $socketPath
     if ($LASTEXITCODE -ne 0) {
         throw "foreground stale startup failed with exit code $LASTEXITCODE"
     }
@@ -630,7 +630,7 @@ function Test-ForegroundRace {
         "4"
     )
 
-    & $script:TmuxPath -D -L $label
+    & $script:TmuxPath -f $script:ConfigPath -D -L $label
     if ($LASTEXITCODE -ne 0) {
         throw "foreground race startup failed with exit code $LASTEXITCODE"
     }
@@ -649,6 +649,9 @@ if (-not (Test-Path -LiteralPath $script:TmuxPath)) {
 }
 
 New-Item -ItemType Directory -Path $script:ArtifactRoot | Out-Null
+$script:ConfigPath = Join-Path $script:ArtifactRoot 'tmux.conf'
+# These startup cases intentionally keep an empty server alive across clients.
+Set-Content -LiteralPath $script:ConfigPath -Value 'set-option -g exit-empty off'
 $script:HelperScriptPath = New-HelperScript
 
 $results = New-Object System.Collections.Generic.List[string]

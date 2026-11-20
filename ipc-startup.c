@@ -991,7 +991,7 @@ static int
 ipc_endpoint_connect_win32(struct ipc_endpoint *endpoint, uint64_t flags,
     char **cause)
 {
-	return (win32_ipc_client_connect(ipc_endpoint_path(endpoint), flags,
+	return (win32_ipc_client_connect(ipc_endpoint_compare_path(endpoint), flags,
 	    cause));
 }
 
@@ -1147,7 +1147,7 @@ ipc_listener_create_win32(struct ipc_endpoint *endpoint, __unused uint64_t flags
 	if (listenerp != NULL)
 		*listenerp = NULL;
 
-	fd = win32_ipc_server_create(ipc_endpoint_path(endpoint), cause);
+	fd = win32_ipc_server_create(ipc_endpoint_compare_path(endpoint), cause);
 	if (fd == -1)
 		return (-1);
 
@@ -1191,6 +1191,11 @@ ipc_server_start_win32(struct event_base *base, struct tmuxproc *client,
 	if (flags & CLIENT_NOFORK)
 		return (server_start(client, flags, base, endpoint, coordination));
 
+	/* Report policy failures here; detached startup cannot return them. */
+	if (ipc_endpoint_prepare_mutation(endpoint, cause) != 0) {
+		ipc_coordination_finish(coordination);
+		return (-1);
+	}
 	if (win32_server_spawn(ipc_endpoint_path(endpoint), flags, cause) != 0) {
 		ipc_coordination_finish(coordination);
 		return (-1);

@@ -93,7 +93,6 @@ static int	win32_ipc_make_shared_root(char **, char **);
 static int	win32_ipc_path_has_trusted_writers(const char *, int *,
 		    char **);
 static int	win32_ipc_sid_string_is_trusted_writer(const char *);
-static int	win32_ipc_hash_text_hex(const char *, char **, char **);
 static const char *win32_ipc_shared_coordination_dir(char **);
 static int	win32_ipc_set_path_security(const char *, char **);
 static int	win32_ipc_ensure_dir(const char *, char **);
@@ -927,7 +926,7 @@ win32_ipc_make_shared_root(char **path, char **cause)
 	return (0);
 }
 
-static int
+int
 win32_ipc_hash_text_hex(const char *text, char **digest, char **cause)
 {
 	BCRYPT_ALG_HANDLE	 alg = NULL;
@@ -1420,7 +1419,7 @@ win32_ipc_socket_accept(int fd, char **cause)
 	if (pipe == NULL)
 		return (-1);
 	if (win32_ipc_pipe_attach_notify(pipe, cause) != 0) {
-		win32_ipc_pipe_close(pipe, 0);
+		win32_ipc_pipe_close(pipe);
 		return (-1);
 	}
 	notify = win32_ipc_pipe_notify_socket(pipe);
@@ -1444,7 +1443,7 @@ win32_ipc_client_connect(const char *path, __unused uint64_t flags,
 	if (pipe == NULL)
 		return (-1);
 	if (win32_ipc_pipe_attach_notify(pipe, cause) != 0) {
-		win32_ipc_pipe_close(pipe, 0);
+		win32_ipc_pipe_close(pipe);
 		return (-1);
 	}
 	notify = win32_ipc_pipe_notify_socket(pipe);
@@ -1464,14 +1463,14 @@ win32_ipc_close(int fd)
 
 	if ((pe = win32_ipc_find_pipe(fd)) != NULL) {
 		TAILQ_REMOVE(&win32_ipc_pipes, pe, entry);
-		win32_ipc_pipe_close(pe->pipe, 1);
+		win32_ipc_pipe_close(pe->pipe);
 		free(pe);
 		return (0);
 	}
 	if ((le = win32_ipc_find_listener(fd)) != NULL) {
 		TAILQ_REMOVE(&win32_ipc_listeners, le, entry);
 		if (le->pending != NULL)
-			win32_ipc_pipe_close(le->pending, 0);
+			win32_ipc_pipe_close(le->pending);
 		win32_ipc_pipe_listener_free(le->listener);
 		free(le);
 		return (0);
@@ -1550,6 +1549,17 @@ win32_ipc_consume_notify(int fd)
 	pe = win32_ipc_find_pipe(fd);
 	if (pe != NULL)
 		win32_ipc_pipe_consume_notify(pe->pipe);
+}
+
+short
+win32_ipc_events(int fd)
+{
+	struct win32_ipc_pipe_entry *pe;
+
+	pe = win32_ipc_find_pipe(fd);
+	if (pe == NULL)
+		return (EV_READ);
+	return (win32_ipc_pipe_events(pe->pipe));
 }
 
 ssize_t

@@ -47,11 +47,14 @@ struct win32_ipc_pipe {
 	OVERLAPPED			 connect_ov;
 	int				 connect_pending;
 	DWORD				 peer_pid;
-	int				 connected;
 	int				 eof;
 
 	struct win32_io_endpoint	*reader;
+	struct win32_io_endpoint	*writer;
 	struct evbuffer			*input;
+	size_t				 write_size;
+	size_t				 write_done;
+	int				 write_error;
 
 	SOCKET				 notify_read;
 	SOCKET				 notify_write;
@@ -62,9 +65,7 @@ static int
 win32_ipc_pipe_name(const char *path, wchar_t **namep, char **name8p,
     char **cause)
 {
-	unsigned int	 hash = 2166136261u;
-	char		 buf[64];
-	size_t		 i;
+	char		*digest, *name;
 
 	*namep = NULL;
 	if (name8p != NULL)
@@ -75,26 +76,23 @@ win32_ipc_pipe_name(const char *path, wchar_t **namep, char **name8p,
 		errno = EINVAL;
 		return (-1);
 	}
-	for (i = 0; path[i] != '\0'; i++) {
-		unsigned char c = (unsigned char)path[i];
-
-		if (c >= 'A' && c <= 'Z')
-			c = c - 'A' + 'a';
-		else if (c == '\\')
-			c = '/';
-		hash ^= c;
-		hash *= 16777619u;
-	}
-	xsnprintf(buf, sizeof buf, "\\\\.\\pipe\\tmux-%08x", hash);
-	*namep = win32_utf8_to_wide(buf);
+	/* path is the endpoint identity, also used by the startup guard. */
+	if (win32_ipc_hash_text_hex(path, &digest, cause) != 0)
+		return (-1);
+	xasprintf(&name, "\\\\.\\pipe\\tmux-v2-%s", digest);
+	free(digest);
+	*namep = win32_utf8_to_wide(name);
 	if (*namep == NULL) {
+		free(name);
 		if (cause != NULL)
 			xasprintf(cause, "couldn't build pipe name");
 		errno = EINVAL;
 		return (-1);
 	}
 	if (name8p != NULL)
-		*name8p = xstrdup(buf);
+		*name8p = name;
+	else
+		free(name);
 	return (0);
 }
 
@@ -148,7 +146,6 @@ win32_ipc_pipe_create_instance(const wchar_t *wname, int first, DWORD *errorp)
 static int
 win32_ipc_pipe_activate(struct win32_ipc_pipe *p, char **cause)
 {
-	p->connected = 1;
 	p->input = evbuffer_new();
 	if (p->input == NULL) {
 		if (cause != NULL)
@@ -161,6 +158,7 @@ win32_ipc_pipe_activate(struct win32_ipc_pipe *p, char **cause)
 
 /* Attach the reactor reader; the callback is needed to see readiness. */
 static void	win32_ipc_pipe_event_cb(void *, uint32_t);
+static void	win32_ipc_pipe_write_cb(void *, uint32_t);
 
 static int
 win32_ipc_pipe_start_reader(struct win32_ipc_pipe *p, char **cause)
@@ -202,6 +200,18 @@ win32_ipc_pipe_event_cb(void *arg, uint32_t events)
 	    WIN32_IO_EVENT_CANCELED))
 		p->eof = 1;
 	if (EVBUFFER_LENGTH(p->input) != 0 || p->eof)
+		win32_ipc_pipe_notify(p);
+}
+
+static void
+win32_ipc_pipe_write_cb(void *arg, uint32_t events)
+{
+	struct win32_ipc_pipe	*p = arg;
+
+	p->write_done += win32_io_writer_consume_progress(p->writer);
+	if (events & (WIN32_IO_EVENT_ERROR|WIN32_IO_EVENT_CANCELED))
+		p->write_error = 1;
+	if (p->write_error || p->write_done != 0)
 		win32_ipc_pipe_notify(p);
 }
 
@@ -457,13 +467,21 @@ win32_ipc_pipe_attach_notify(struct win32_ipc_pipe *p, char **cause)
 		errno = EINVAL;
 		return (-1);
 	}
-	if (p->reader != NULL) {
-		win32_io_endpoint_free(p->reader);
-		p->reader = NULL;
-	}
+	if (p->reader != NULL)
+		return (0);
+	if (win32_ipc_pipe_make_notify(p, cause) != 0)
+		return (-1);
 	if (win32_ipc_pipe_start_reader(p, cause) != 0)
 		return (-1);
-	return (win32_ipc_pipe_make_notify(p, cause));
+	p->writer = win32_io_writer_new_overlapped_borrowed(&p->handle,
+	    win32_ipc_pipe_write_cb, p);
+	if (p->writer == NULL) {
+		if (cause != NULL)
+			xasprintf(cause, "couldn't start transport writer");
+		errno = EIO;
+		return (-1);
+	}
+	return (0);
 }
 
 SOCKET
@@ -494,6 +512,19 @@ win32_ipc_pipe_consume_notify(struct win32_ipc_pipe *p)
 	p->notify_armed = 0;
 }
 
+short
+win32_ipc_pipe_events(struct win32_ipc_pipe *p)
+{
+	short	events = 0;
+
+	if (EVBUFFER_LENGTH(p->input) != 0 || p->eof || p->write_error)
+		events |= EV_READ;
+	if (p->write_error || p->write_size == 0 ||
+	    p->write_done == p->write_size)
+		events |= EV_WRITE;
+	return (events);
+}
+
 ssize_t
 win32_ipc_pipe_read(struct win32_ipc_pipe *p, void *data, size_t size)
 {
@@ -507,6 +538,10 @@ win32_ipc_pipe_read(struct win32_ipc_pipe *p, void *data, size_t size)
 	if (take > size)
 		take = size;
 	if (take == 0) {
+		if (p->write_error) {
+			errno = EPIPE;
+			return (-1);
+		}
 		if (p->eof)
 			return (0);
 		errno = EAGAIN;
@@ -521,7 +556,7 @@ win32_ipc_pipe_read(struct win32_ipc_pipe *p, void *data, size_t size)
 	 * notifies once per read completion, and the imsg reader may consume
 	 * only part of what arrived.
 	 */
-	if (EVBUFFER_LENGTH(p->input) != 0)
+	if (EVBUFFER_LENGTH(p->input) != 0 || p->eof)
 		win32_ipc_pipe_notify(p);
 	return ((ssize_t)take);
 }
@@ -529,35 +564,41 @@ win32_ipc_pipe_read(struct win32_ipc_pipe *p, void *data, size_t size)
 ssize_t
 win32_ipc_pipe_write(struct win32_ipc_pipe *p, const void *data, size_t size)
 {
-	size_t		 left = size, nwrite;
-	ssize_t		 total = 0;
-	DWORD		 written, error;
+	size_t		nwrite;
+	int		 written;
 
-	if (p == NULL || p->handle == NULL) {
+	if (p == NULL || p->writer == NULL) {
 		errno = EBADF;
 		return (-1);
 	}
-	while (left != 0) {
-		nwrite = left;
-		if (nwrite > INT_MAX)
-			nwrite = INT_MAX;
-		if (!WriteFile(p->handle, (const char *)data + total,
-		    (DWORD)nwrite, &written, NULL)) {
-			error = GetLastError();
-			if (error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE)
-				errno = EPIPE;
-			else
-				errno = EIO;
-			return (total == 0 ? -1 : total);
-		}
-		if (written == 0) {
-			errno = EPIPE;
-			return (total == 0 ? -1 : total);
-		}
-		total += written;
-		left -= written;
+	if (p->write_error) {
+		errno = EPIPE;
+		return (-1);
 	}
-	return (total);
+	/*
+	 * imsg retains these bytes until the write completes. Only one copied
+	 * prefix is in flight, so an empty imsg queue still means output done.
+	 */
+	if (p->write_size != 0) {
+		if (p->write_done == p->write_size) {
+			nwrite = p->write_size;
+			p->write_size = p->write_done = 0;
+			return (nwrite);
+		}
+	} else {
+		nwrite = size;
+		/* Message-mode readers use a 64K buffer. */
+		if (nwrite > WIN32_IPC_PIPE_BUFFER)
+			nwrite = WIN32_IPC_PIPE_BUFFER;
+		if (nwrite == 0)
+			return (0);
+		written = win32_io_writer_write(p->writer, data, nwrite);
+		if (written == -1)
+			return (-1);
+		p->write_size = written;
+	}
+	errno = EAGAIN;
+	return (-1);
 }
 
 int
@@ -568,11 +609,33 @@ win32_ipc_pipe_eof(struct win32_ipc_pipe *p)
 	return (p->eof && EVBUFFER_LENGTH(p->input) == 0);
 }
 
-void
-win32_ipc_pipe_close(struct win32_ipc_pipe *p, int graceful)
+static void
+win32_ipc_pipe_close_pending(__unused evutil_socket_t fd, __unused short events,
+    void *arg)
 {
+	win32_ipc_pipe_close(arg);
+}
+
+void
+win32_ipc_pipe_close(struct win32_ipc_pipe *p)
+{
+	struct timeval	 tv = { .tv_usec = 10000 };
+	DWORD		 bytes;
+
 	if (p == NULL)
 		return;
+	if (p->connect_pending) {
+		CancelIoEx(p->handle, &p->connect_ov);
+		if (!GetOverlappedResult(p->handle, &p->connect_ov, &bytes,
+		    FALSE) && GetLastError() == ERROR_IO_INCOMPLETE) {
+			/* Keep the connect storage alive until cancellation completes. */
+			if (event_once(-1, EV_TIMEOUT, win32_ipc_pipe_close_pending,
+			    p, &tv) != 0)
+				fatalx("couldn't schedule transport connect cleanup");
+			return;
+		}
+		p->connect_pending = 0;
+	}
 	/*
 	 * Detach the reader first. Its completion callback carries this pipe as
 	 * its argument, and a completion may already be queued on the reactor;
@@ -584,9 +647,16 @@ win32_ipc_pipe_close(struct win32_ipc_pipe *p, int graceful)
 		win32_io_endpoint_free(p->reader);
 		p->reader = NULL;
 	}
+	if (p->writer != NULL) {
+		win32_io_endpoint_detach(p->writer);
+		win32_io_endpoint_free(p->writer);
+		p->writer = NULL;
+	}
 	if (p->handle != NULL) {
-		if (p->connected && graceful)
-			(void)FlushFileBuffers(p->handle);
+		/*
+		 * CloseHandle preserves completed writes for the remaining reader.
+		 * Do not disconnect (discards them) or flush (waits for that reader).
+		 */
 		CloseHandle(p->handle);
 		p->handle = NULL;
 	}

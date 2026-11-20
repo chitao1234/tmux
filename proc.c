@@ -40,7 +40,10 @@
 
 struct tmuxproc {
 	const char	 *name;
-	int		  exit;
+	int		  exit; /* Win32: 1 drains output, 2 stops at the deadline. */
+#ifdef TMUX_WIN32
+	struct event	  exit_timer;
+#endif
 
 	void		(*signalcb)(int);
 
@@ -65,6 +68,7 @@ struct tmuxpeer {
 	gid_t		 gid;
 #ifdef TMUX_WIN32
 	char		*user_sid;
+	struct event	 close_timer;
 #endif
 
 	int		 flags;
@@ -79,6 +83,11 @@ struct tmuxpeer {
 static int	peer_check_version(struct tmuxpeer *, struct imsg *);
 static void	proc_update_event(struct tmuxpeer *);
 static void	proc_clear_peer_identity(struct tmuxpeer *);
+#ifdef TMUX_WIN32
+static void	proc_exit_timeout(tmux_event_fd, short, void *);
+static void	proc_close_timeout(tmux_event_fd, short, void *);
+static int	proc_output_pending(struct tmuxproc *);
+#endif
 
 static void
 proc_event_cb(__unused tmux_event_fd fd, short events, void *arg)
@@ -87,11 +96,12 @@ proc_event_cb(__unused tmux_event_fd fd, short events, void *arg)
 	int		 n;
 	struct imsg	 imsg;
 
-	if (!(peer->flags & PEER_BAD) && (events & EV_READ)) {
 #ifdef TMUX_WIN32
-		/* Drain the readiness byte; the data is in the pipe. */
-		win32_ipc_consume_notify(peer->ibuf.fd);
+	/* The socket signals pipe events; its own writability is irrelevant. */
+	win32_ipc_consume_notify(peer->ibuf.fd);
+	events = win32_ipc_events(peer->ibuf.fd);
 #endif
+	if (!(peer->flags & PEER_BAD) && (events & EV_READ)) {
 		if (imsgbuf_read(&peer->ibuf) != 1) {
 			peer->dispatchcb(NULL, peer->arg);
 			return;
@@ -140,7 +150,7 @@ peer_check_version(struct tmuxpeer *peer, struct imsg *imsg)
 		log_debug("peer %p bad version %d", peer, version);
 
 		proc_send(peer, MSG_VERSION, -1, NULL, 0);
-		peer->flags |= PEER_BAD;
+		proc_kill_peer(peer);
 
 		return (-1);
 	}
@@ -160,11 +170,19 @@ proc_update_event(struct tmuxpeer *peer)
 	event_del(&peer->event);
 
 	events = EV_READ;
+#ifndef TMUX_WIN32
 	if (imsgbuf_queuelen(&peer->ibuf) > 0)
 		events |= EV_WRITE;
+#endif
 	event_set(&peer->event, fd, events, proc_event_cb, peer);
 
 	event_add(&peer->event, NULL);
+#ifdef TMUX_WIN32
+	if ((imsgbuf_queuelen(&peer->ibuf) > 0 &&
+	    (win32_ipc_events(peer->ibuf.fd) & EV_WRITE)) ||
+	    ((peer->flags & PEER_BAD) && imsgbuf_queuelen(&peer->ibuf) == 0))
+		event_active(&peer->event, EV_READ, 1);
+#endif
 }
 
 int
@@ -229,20 +247,67 @@ void
 proc_loop(struct tmuxproc *tp, int (*loopcb)(void))
 {
 	log_debug("%s loop enter", tp->name);
+#ifdef TMUX_WIN32
+	for (;;) {
+		event_loop(EVLOOP_ONCE);
+		if (tp->exit) {
+			if (tp->exit == 2 || !proc_output_pending(tp))
+				break;
+		} else if (loopcb != NULL && loopcb())
+			break;
+	}
+	if (event_initialized(&tp->exit_timer))
+		evtimer_del(&tp->exit_timer);
+#else
 	do
 		event_loop(EVLOOP_ONCE);
 	while (!tp->exit && (loopcb == NULL || !loopcb ()));
+#endif
 	log_debug("%s loop exit", tp->name);
 }
+
+#ifdef TMUX_WIN32
+static void
+proc_exit_timeout(__unused tmux_event_fd fd, __unused short events, void *arg)
+{
+	struct tmuxproc *tp = arg;
+
+	log_debug("%s: abandoning queued output at exit", tp->name);
+	tp->exit = 2;
+}
+
+static int
+proc_output_pending(struct tmuxproc *tp)
+{
+	struct tmuxpeer *peer;
+
+	TAILQ_FOREACH(peer, &tp->peers, entry) {
+		if (imsgbuf_queuelen(&peer->ibuf) != 0)
+			return (1);
+	}
+	return (0);
+}
+#endif
 
 void
 proc_exit(struct tmuxproc *tp)
 {
 	struct tmuxpeer	*peer;
+#ifdef TMUX_WIN32
+	struct timeval	 tv = { .tv_sec = 5 };
 
-	TAILQ_FOREACH(peer, &tp->peers, entry)
-	    imsgbuf_flush(&peer->ibuf);
+	if (tp->exit)
+		return;
 	tp->exit = 1;
+	TAILQ_FOREACH(peer, &tp->peers, entry)
+		proc_update_event(peer);
+	evtimer_set(&tp->exit_timer, proc_exit_timeout, tp);
+	evtimer_add(&tp->exit_timer, &tv);
+#else
+	TAILQ_FOREACH(peer, &tp->peers, entry)
+		imsgbuf_flush(&peer->ibuf);
+	tp->exit = 1;
+#endif
 }
 
 #ifndef TMUX_WIN32
@@ -383,10 +448,8 @@ proc_remove_peer(struct tmuxpeer *peer)
 
 	event_del(&peer->event);
 #ifdef TMUX_WIN32
-	/* Named-pipe close discards messages still queued in the imsg buffer. */
-	if (imsgbuf_flush(&peer->ibuf) == -1)
-		log_debug("peer %p: failed to flush before close: %s", peer,
-		    strerror(errno));
+	if (event_initialized(&peer->close_timer))
+		evtimer_del(&peer->close_timer);
 #endif
 	imsgbuf_clear(&peer->ibuf);
 	proc_clear_peer_identity(peer);
@@ -399,16 +462,42 @@ proc_remove_peer(struct tmuxpeer *peer)
 	free(peer);
 }
 
+#ifdef TMUX_WIN32
+static void
+proc_close_timeout(__unused tmux_event_fd fd, __unused short events, void *arg)
+{
+	struct tmuxpeer *peer = arg;
+
+	log_debug("peer %p: abandoning reply to bad peer", peer);
+	peer->dispatchcb(NULL, peer->arg);
+}
+#endif
+
 void
 proc_kill_peer(struct tmuxpeer *peer)
 {
+#ifdef TMUX_WIN32
+	struct timeval	 tv = { .tv_sec = 5 };
+
+	if (!(peer->flags & PEER_BAD)) {
+		evtimer_set(&peer->close_timer, proc_close_timeout, peer);
+		evtimer_add(&peer->close_timer, &tv);
+	}
+#endif
 	peer->flags |= PEER_BAD;
+#ifdef TMUX_WIN32
+	proc_update_event(peer);
+#endif
 }
 
 void
 proc_flush_peer(struct tmuxpeer *peer)
 {
+#ifdef TMUX_WIN32
+	proc_update_event(peer);
+#else
 	imsgbuf_flush(&peer->ibuf);
+#endif
 }
 
 void
